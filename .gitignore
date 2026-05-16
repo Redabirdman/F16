@@ -1,0 +1,28 @@
+# Node
+node_modules/
+dist/
+build/
+*.log
+coverage/
+.next/
+.turbo/
+.pnpm-store/
+
+# Env
+.env
+.env.local
+.env.*.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Python (pipecat workspace)
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# Playwright / Stagehand
+playwright-report/
