@@ -44,11 +44,12 @@ import type { ChannelId, ContactRef } from '../../channels/types.js';
 import { checkComplianceFor } from '../../compliance/index.js';
 import * as humanActions from '../../db/repositories/human-actions.js';
 import { sendMessage } from '../../messaging/dispatcher.js';
-// Importing the tools barrel registers all four built-in tools at module load
+// Importing the tools barrel registers all built-in tools at module load
 // (side-effect registration). The Sales Agent is the first user of the
 // tool-use loop, so this is the natural boot point until a dedicated tool
 // bootstrap module is needed (post M6).
 import { listTools } from '../../tools/index.js';
+import { recallCustomerFacts } from '../../memory/index.js';
 
 const MAX_HISTORY_TURNS = 10;
 const MAX_REPLY_CHARS = 1500;
@@ -62,9 +63,19 @@ const REPLY_TOKEN_BUDGET = 400;
 const SALES_AGENT_TOOL_NAMES = [
   'customer.read_profile',
   'customer.update_profile',
+  'customer.remember_fact',
   'knowledge.search',
   'human.escalate',
 ] as const;
+
+/**
+ * Cosine-distance ceiling for facts recalled into the prompt. Conservative —
+ * we'd rather omit a marginally-relevant fact than splice noise into the
+ * model's context. Tune as we observe real recall quality.
+ */
+const RECALL_DISTANCE_CEILING = 0.6;
+const RECALL_LIMIT = 5;
+const RECALL_MIN_CONFIDENCE = 0.3;
 
 export class SalesAgent extends BaseAgent {
   protected async onMessage(envelope: AgentMessageEnvelope): Promise<MessageHandlerResult> {
@@ -192,6 +203,27 @@ export class SalesAgent extends BaseAgent {
     const recentTurns = [...recentTurnsDesc].reverse();
     const fullName = decryptPII(customer.fullName);
 
+    // Mem0 recall — embed the customer's current message, kNN over
+    // `customer_facts.embedding` bounded to this customer, splice the hits
+    // into the system prompt's per-turn fragment. Wrapped in try/catch:
+    // if embeddings are down the customer reply is more important than
+    // perfect memory, so we degrade silently.
+    let recalledFacts: string[] = [];
+    try {
+      const hits = await recallCustomerFacts(this.db, customer.id, payload.content, {
+        limit: RECALL_LIMIT,
+        minConfidence: RECALL_MIN_CONFIDENCE,
+      });
+      recalledFacts = hits
+        .filter((f) => f.distance < RECALL_DISTANCE_CEILING)
+        .map((f) => `[${f.factType}, conf ${f.confidence.toFixed(2)}] ${f.content}`);
+    } catch (err) {
+      logger.warn(
+        { err, leadId: lead.id, instanceId: this.instanceId },
+        'sales-agent: fact recall failed; continuing without recalled facts',
+      );
+    }
+
     const ctx: SalesAgentTurnContext = {
       customer: {
         id: customer.id,
@@ -216,6 +248,7 @@ export class SalesAgent extends BaseAgent {
         content: t.content,
         at: t.occurredAt,
       })),
+      ...(recalledFacts.length > 0 ? { recalledFacts } : {}),
       channel: payload.channel,
     };
 
