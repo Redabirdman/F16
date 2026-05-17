@@ -5,3 +5,4 @@ export * from './_enums.js';
 export * from './customers.js';
 export * from './leads.js';
 export * from './conversation-turns.js';
+export * from './quotes.js';

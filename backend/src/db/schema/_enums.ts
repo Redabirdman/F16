@@ -52,3 +52,19 @@ export const factTypeEnum = pgEnum('fact_type', [
   'observation',
   'event',
 ]);
+
+// Quote lifecycle (design §9 + §14). Forward-only in the happy path:
+//   draft → requested → in_progress → ready → sent → accepted
+// Terminal sad paths: rejected (customer declined) or expired (TTL elapsed
+// with no acceptance). 'draft' exists for quotes assembled in admin before
+// being dispatched to Maxance; the Maxance flow starts at 'requested'.
+export const quoteStatusEnum = pgEnum('quote_status', [
+  'draft',
+  'requested',
+  'in_progress',
+  'ready',
+  'sent',
+  'accepted',
+  'rejected',
+  'expired',
+]);
