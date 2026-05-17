@@ -53,6 +53,19 @@ export const factTypeEnum = pgEnum('fact_type', [
   'event',
 ]);
 
+// Agent lifecycle status (M3.T7). Forward-only in the happy path:
+//   starting → running → stopping → stopped
+// Sad path: any → crashed. A subsequent successful spawn for the same
+// (role, instance_id) upserts the row back to 'starting'/'running' — the
+// crash record is overwritten by design (the latest spawn wins).
+export const agentStatusEnum = pgEnum('agent_status', [
+  'starting',
+  'running',
+  'stopping',
+  'stopped',
+  'crashed',
+]);
+
 // Quote lifecycle (design §9 + §14). Forward-only in the happy path:
 //   draft → requested → in_progress → ready → sent → accepted
 // Terminal sad paths: rejected (customer declined) or expired (TTL elapsed
