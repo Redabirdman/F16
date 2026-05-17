@@ -115,3 +115,74 @@ export async function markError(db: Database, id: string, error: string): Promis
      WHERE id = ${id}
   `);
 }
+
+/**
+ * Atomically claim THIS specific row IF it matches `toRole` and is still
+ * unconsumed. Returns the claimed row, or null when:
+ *   - the id doesn't exist
+ *   - the row's to_role doesn't match the claimer (defensive — protects
+ *     against a misrouted BullMQ job from leaking into the wrong worker)
+ *   - the row was already consumed by someone else
+ *
+ * Used by the dispatcher: BullMQ delivers messageIds, this UPDATE makes
+ * row-claim atomic. Falls under the same SKIP-LOCKED rationale as claimNext
+ * but targets a known id instead of "next available".
+ */
+export async function claimSpecific(
+  db: Database,
+  messageId: string,
+  claimerRole: string,
+): Promise<AgentMessage | null> {
+  const result = (await db.execute(sql`
+    UPDATE agent_messages
+       SET consumed_at = now(),
+           consumed_by = ${claimerRole}
+     WHERE id = ${messageId}
+       AND consumed_at IS NULL
+       AND to_role = ${claimerRole}
+    RETURNING
+      id,
+      from_role        AS "fromRole",
+      from_instance    AS "fromInstance",
+      to_role          AS "toRole",
+      to_instance      AS "toInstance",
+      intent,
+      payload,
+      correlation_id   AS "correlationId",
+      requires_human   AS "requiresHuman",
+      priority,
+      created_at       AS "createdAt",
+      consumed_at      AS "consumedAt",
+      consumed_by      AS "consumedBy",
+      result,
+      error
+  `)) as unknown as AgentMessage[];
+
+  return result[0] ?? null;
+}
+
+/** Fetch a row by id (read-only). Returns null if not found. */
+export async function getById(db: Database, messageId: string): Promise<AgentMessage | null> {
+  const result = (await db.execute(sql`
+    SELECT
+      id,
+      from_role        AS "fromRole",
+      from_instance    AS "fromInstance",
+      to_role          AS "toRole",
+      to_instance      AS "toInstance",
+      intent,
+      payload,
+      correlation_id   AS "correlationId",
+      requires_human   AS "requiresHuman",
+      priority,
+      created_at       AS "createdAt",
+      consumed_at      AS "consumedAt",
+      consumed_by      AS "consumedBy",
+      result,
+      error
+      FROM agent_messages
+     WHERE id = ${messageId}
+  `)) as unknown as AgentMessage[];
+
+  return result[0] ?? null;
+}

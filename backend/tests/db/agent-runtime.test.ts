@@ -21,6 +21,8 @@ import {
 import {
   enqueue,
   claimNext,
+  claimSpecific,
+  getById,
   markResult,
   markError,
 } from '../../src/db/repositories/agent-messages.js';
@@ -182,6 +184,61 @@ d('agent runtime (live)', () => {
     const ids = claims.map((c) => c!.id);
     const unique = new Set(ids);
     expect(unique.size).toBe(4);
+  });
+
+  it('test 4b: claimSpecific claims a specific row when role matches; null otherwise', async () => {
+    const row = await enqueue(db, {
+      fromRole: 'a',
+      toRole: 'specific-worker',
+      intent: 'X',
+      payload: { n: 1 },
+    });
+
+    // Mismatched role → null, and the row remains unclaimed.
+    const wrongRole = await claimSpecific(db, row.id, 'someone-else');
+    expect(wrongRole).toBeNull();
+    const [stillPending] = await db
+      .select()
+      .from(agentMessages)
+      .where(eq(agentMessages.id, row.id));
+    expect(stillPending!.consumedAt).toBeNull();
+
+    // Right role → returns the row + marks consumed.
+    const claimed = await claimSpecific(db, row.id, 'specific-worker');
+    expect(claimed).not.toBeNull();
+    expect(claimed!.id).toBe(row.id);
+    expect(claimed!.consumedBy).toBe('specific-worker');
+    expect(claimed!.consumedAt).not.toBeNull();
+
+    // Second claim → null (already consumed).
+    const second = await claimSpecific(db, row.id, 'specific-worker');
+    expect(second).toBeNull();
+
+    // Nonexistent id → null.
+    const ghost = await claimSpecific(
+      db,
+      '00000000-0000-4000-8000-000000000000',
+      'specific-worker',
+    );
+    expect(ghost).toBeNull();
+  });
+
+  it('test 4c: getById returns the row or null', async () => {
+    const row = await enqueue(db, {
+      fromRole: 'a',
+      toRole: 'getter',
+      intent: 'PING',
+      payload: { hello: 'world' },
+    });
+
+    const fetched = await getById(db, row.id);
+    expect(fetched).not.toBeNull();
+    expect(fetched!.id).toBe(row.id);
+    expect(fetched!.intent).toBe('PING');
+    expect(fetched!.payload).toEqual({ hello: 'world' });
+
+    const ghost = await getById(db, '00000000-0000-4000-8000-000000000000');
+    expect(ghost).toBeNull();
   });
 
   it('test 5: NOTIFY trigger fires on agent_messages insert', async () => {
