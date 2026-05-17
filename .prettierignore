@@ -1,0 +1,11 @@
+node_modules
+dist
+build
+coverage
+*.min.*
+pnpm-lock.yaml
+pipecat
+**/*.lock
+.vite
+.cache
+*.tsbuildinfo

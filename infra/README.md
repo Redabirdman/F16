@@ -17,10 +17,10 @@ docker compose -f infra/docker-compose.dev.yml up -d
 
 Wait ~10 seconds for the healthchecks to settle, then connect:
 
-| Service  | How to connect                                       |
-| -------- | ---------------------------------------------------- |
-| Postgres | `psql postgres://f16:f16@localhost:5433/f16`         |
-| Redis    | `redis-cli -p 6380`                                  |
+| Service  | How to connect                                                                    |
+| -------- | --------------------------------------------------------------------------------- |
+| Postgres | `psql postgres://f16:f16@localhost:5433/f16`                                      |
+| Redis    | `redis-cli -p 6380`                                                               |
 | Adminer  | <http://localhost:8081> (server: `postgres`, user/pass/db: `f16` / `f16` / `f16`) |
 
 Non-standard ports (5433, 6380, 8081) are deliberate -- they avoid colliding with any default Postgres / Redis / dev tool you may already have on 5432 / 6379 / 8080.

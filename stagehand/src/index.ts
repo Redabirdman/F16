@@ -13,9 +13,9 @@ import { pool } from './browser-pool.js';
  */
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-const pkg = JSON.parse(
-  readFileSync(join(__dirname, '..', 'package.json'), 'utf8'),
-) as { version: string };
+const pkg = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf8')) as {
+  version: string;
+};
 
 const startedAt = Date.now();
 
@@ -78,8 +78,7 @@ export async function start(port: number = Number(process.env.PORT ?? 4001)): Pr
 // pathToFileURL handles drive letters, spaces, and unicode on Windows/macOS/Linux uniformly —
 // hand-rolled string munging breaks on paths like "C:\Platforms Factory\…".
 const isDirectRun =
-  process.argv[1] !== undefined &&
-  import.meta.url === pathToFileURL(process.argv[1]).href;
+  process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isDirectRun) {
   void start();
 }

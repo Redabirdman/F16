@@ -8,9 +8,9 @@ import { app } from '../src/index.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-const pkg = JSON.parse(
-  readFileSync(join(__dirname, '..', 'package.json'), 'utf8'),
-) as { version: string };
+const pkg = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf8')) as {
+  version: string;
+};
 
 describe('GET /health', () => {
   it('returns 200 with service health payload', async () => {

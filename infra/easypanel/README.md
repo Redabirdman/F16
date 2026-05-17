@@ -4,16 +4,16 @@ This document maps every F16 service to its EasyPanel app spec. F16 ships as a s
 
 ## Service map
 
-| EasyPanel app   | Source                           | Build context     | Port (internal) | Public? | Notes                                                |
-| --------------- | -------------------------------- | ----------------- | --------------- | ------- | ---------------------------------------------------- |
-| f16-postgres    | EasyPanel built-in Postgres      | n/a               | 5432            | no      | Pin to v16 + pgvector extension                      |
-| f16-redis       | EasyPanel built-in Redis         | n/a               | 6379            | no      | AOF persistence enabled                              |
-| f16-backend     | this repo, `backend/Dockerfile`  | F16 root          | 3001            | no      | Behind Caddy; reaches data plane by service name     |
-| f16-admin       | this repo, `admin/Dockerfile`    | F16 root          | 8080            | yes     | Public via Caddy on a domain Ridaa picks later       |
-| f16-pipecat     | this repo, `pipecat/Dockerfile`  | `pipecat/` ctx    | 8000            | no      | Needs SIP outbound; webhook may go public later      |
-| f16-stagehand   | this repo, `stagehand/Dockerfile`| F16 root          | 4001            | no      | Headful browser possible in dev, headless in prod    |
-| f16-billionmail | external image (defer to deploy) | n/a               | 25 / 587        | yes     | SMTP-out only; needs TLS cert, MX, SPF, DKIM setup   |
-| waha            | already deployed on the VPS      | n/a               | 3000            | yes     | Pre-existing -- leave alone, F16 just consumes it    |
+| EasyPanel app   | Source                            | Build context  | Port (internal) | Public? | Notes                                              |
+| --------------- | --------------------------------- | -------------- | --------------- | ------- | -------------------------------------------------- |
+| f16-postgres    | EasyPanel built-in Postgres       | n/a            | 5432            | no      | Pin to v16 + pgvector extension                    |
+| f16-redis       | EasyPanel built-in Redis          | n/a            | 6379            | no      | AOF persistence enabled                            |
+| f16-backend     | this repo, `backend/Dockerfile`   | F16 root       | 3001            | no      | Behind Caddy; reaches data plane by service name   |
+| f16-admin       | this repo, `admin/Dockerfile`     | F16 root       | 8080            | yes     | Public via Caddy on a domain Ridaa picks later     |
+| f16-pipecat     | this repo, `pipecat/Dockerfile`   | `pipecat/` ctx | 8000            | no      | Needs SIP outbound; webhook may go public later    |
+| f16-stagehand   | this repo, `stagehand/Dockerfile` | F16 root       | 4001            | no      | Headful browser possible in dev, headless in prod  |
+| f16-billionmail | external image (defer to deploy)  | n/a            | 25 / 587        | yes     | SMTP-out only; needs TLS cert, MX, SPF, DKIM setup |
+| waha            | already deployed on the VPS       | n/a            | 3000            | yes     | Pre-existing -- leave alone, F16 just consumes it  |
 
 ## Internal DNS
 
