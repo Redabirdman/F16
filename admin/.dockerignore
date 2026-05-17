@@ -1,0 +1,15 @@
+node_modules
+dist
+coverage
+.env*
+*.log
+.git
+.github
+.vscode
+.idea
+*.md
+docs/
+pnpm-debug.log*
+npm-debug.log*
+.vite
+*.tsbuildinfo

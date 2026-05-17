@@ -7,12 +7,12 @@
 # visible to pnpm. From F16/:
 #   DOCKER_BUILDKIT=1 docker build -f backend/Dockerfile -t f16-backend .
 #
-# Note: the `COPY admin/package.json` and `COPY stagehand/package.json` lines
-# below are commented out because those workspaces don't have their package.json
-# yet (they land in M1.T3 and M1.T5). Uncomment them once those tasks ship —
-# without them, the lockfile won't fully resolve. We don't actually build this
-# image until M16, so the Dockerfile being un-runnable today is acceptable; the
-# logic just needs to be correct so M16 is a flip-the-switch operation.
+# Note: the `COPY stagehand/package.json` line below is commented out because
+# that workspace doesn't have its package.json yet (lands in M1.T5). Uncomment
+# once that task ships — without it, the lockfile won't fully resolve. We don't
+# actually build this image until M16, so the Dockerfile being un-runnable
+# today is acceptable; the logic just needs to be correct so M16 is a
+# flip-the-switch operation.
 #
 ARG NODE_IMAGE=node:22-alpine
 ARG PNPM_VERSION=10.33.0
@@ -27,8 +27,8 @@ RUN corepack enable && corepack prepare pnpm@${PNPM_VERSION} --activate
 # Workspace metadata — required for pnpm to recognize every workspace.
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
 COPY backend/package.json backend/package.json
-# Uncomment after M1.T3 / M1.T5 create their package.json:
-# COPY admin/package.json admin/package.json
+COPY admin/package.json admin/package.json
+# Uncomment after M1.T5 creates its package.json:
 # COPY stagehand/package.json stagehand/package.json
 
 RUN --mount=type=cache,id=pnpm-store,target=/root/.local/share/pnpm/store \
@@ -53,8 +53,8 @@ RUN corepack enable && corepack prepare pnpm@${PNPM_VERSION} --activate
 # Re-copy workspace metadata (same set as deps) so prod install resolves identically.
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
 COPY backend/package.json backend/package.json
-# Uncomment after M1.T3 / M1.T5 create their package.json:
-# COPY admin/package.json admin/package.json
+COPY admin/package.json admin/package.json
+# Uncomment after M1.T5 creates its package.json:
 # COPY stagehand/package.json stagehand/package.json
 
 RUN --mount=type=cache,id=pnpm-store,target=/root/.local/share/pnpm/store \

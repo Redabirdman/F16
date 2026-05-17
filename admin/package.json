@@ -1,0 +1,50 @@
+{
+  "name": "@f16/admin",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "engines": {
+    "node": ">=22.0.0",
+    "pnpm": ">=10.33.0"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit -p tsconfig.json && vite build",
+    "preview": "vite preview",
+    "pretest": "tsc --noEmit -p tsconfig.test.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "lint": "echo \"lint: configured in M1.T7\" && exit 0"
+  },
+  "dependencies": {
+    "@radix-ui/react-slot": "1.1.2",
+    "@tanstack/react-query": "5.62.7",
+    "class-variance-authority": "0.7.1",
+    "clsx": "2.1.1",
+    "framer-motion": "11.15.0",
+    "lucide-react": "0.469.0",
+    "pixi.js": "8.6.6",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "react-router-dom": "6.28.1",
+    "recharts": "2.15.0",
+    "tailwind-merge": "2.6.0",
+    "tailwindcss-animate": "1.0.7"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "6.6.3",
+    "@testing-library/react": "16.1.0",
+    "@types/node": "25.8.0",
+    "@types/react": "18.3.18",
+    "@types/react-dom": "18.3.5",
+    "@vitejs/plugin-react": "4.3.4",
+    "autoprefixer": "10.4.20",
+    "jsdom": "25.0.1",
+    "postcss": "8.4.49",
+    "tailwindcss": "3.4.17",
+    "typescript": "6.0.3",
+    "vite": "5.4.11",
+    "vitest": "3.2.4"
+  }
+}
