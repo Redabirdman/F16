@@ -9,3 +9,4 @@ export type { IngestionAdapter } from './adapters/types.js';
 export { ingestSource } from './ingest.js';
 export type { IngestSourceOptions } from './ingest.js';
 export { markdownFileAdapter, chunkMarkdown, slugify } from './adapters/markdown-file.js';
+export { reactSourceAdapter, extractStrings } from './adapters/react-source.js';

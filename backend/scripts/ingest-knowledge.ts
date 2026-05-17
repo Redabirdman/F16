@@ -22,11 +22,15 @@
 import { resolve } from 'node:path';
 import { createDb } from '../src/db/index.js';
 import { logger } from '../src/logger.js';
-import { ingestSource, markdownFileAdapter } from '../src/knowledge/index.js';
+import { ingestSource, markdownFileAdapter, reactSourceAdapter } from '../src/knowledge/index.js';
+import type { IngestionAdapter } from '../src/knowledge/index.js';
+
+type AdapterId = 'markdown-file' | 'react-source';
 
 interface CliArgs {
   source: string;
   path: string;
+  adapter: AdapterId;
   dryRun: boolean;
   batchSize: number;
 }
@@ -35,6 +39,7 @@ function parseArgs(argv: string[]): CliArgs {
   const out: CliArgs = {
     source: 'assuryal_knowledge_md',
     path: '../ASSURYAL base connaissance agent.md',
+    adapter: 'markdown-file',
     dryRun: false,
     batchSize: 32,
   };
@@ -47,6 +52,16 @@ function parseArgs(argv: string[]): CliArgs {
       case '--path':
         out.path = argv[++i] ?? out.path;
         break;
+      case '--adapter': {
+        const v = argv[++i];
+        if (v === 'markdown-file' || v === 'react-source') {
+          out.adapter = v;
+        } else {
+          logger.error({ adapter: v }, 'ingest-knowledge: unknown --adapter value');
+          process.exit(2);
+        }
+        break;
+      }
       case '--dry-run':
         out.dryRun = true;
         break;
@@ -64,6 +79,15 @@ function parseArgs(argv: string[]): CliArgs {
   return out;
 }
 
+function pickAdapter(id: AdapterId): IngestionAdapter {
+  switch (id) {
+    case 'markdown-file':
+      return markdownFileAdapter;
+    case 'react-source':
+      return reactSourceAdapter;
+  }
+}
+
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
 
@@ -78,9 +102,16 @@ async function main(): Promise<void> {
   }
 
   const absPath = resolve(process.cwd(), args.path);
+  const adapter = pickAdapter(args.adapter);
 
   logger.info(
-    { source: args.source, path: absPath, dryRun: args.dryRun, batchSize: args.batchSize },
+    {
+      source: args.source,
+      adapter: adapter.id,
+      path: absPath,
+      dryRun: args.dryRun,
+      batchSize: args.batchSize,
+    },
     'ingest-knowledge: starting',
   );
 
@@ -88,7 +119,7 @@ async function main(): Promise<void> {
 
   const result = await ingestSource(
     db,
-    markdownFileAdapter,
+    adapter,
     { name: args.source, path: absPath },
     { dryRun: args.dryRun, batchSize: args.batchSize },
   );
