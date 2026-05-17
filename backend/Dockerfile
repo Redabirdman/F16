@@ -7,13 +7,6 @@
 # visible to pnpm. From F16/:
 #   DOCKER_BUILDKIT=1 docker build -f backend/Dockerfile -t f16-backend .
 #
-# Note: the `COPY stagehand/package.json` line below is commented out because
-# that workspace doesn't have its package.json yet (lands in M1.T5). Uncomment
-# once that task ships — without it, the lockfile won't fully resolve. We don't
-# actually build this image until M16, so the Dockerfile being un-runnable
-# today is acceptable; the logic just needs to be correct so M16 is a
-# flip-the-switch operation.
-#
 ARG NODE_IMAGE=node:22-alpine
 ARG PNPM_VERSION=10.33.0
 
@@ -28,8 +21,7 @@ RUN corepack enable && corepack prepare pnpm@${PNPM_VERSION} --activate
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
 COPY backend/package.json backend/package.json
 COPY admin/package.json admin/package.json
-# Uncomment after M1.T5 creates its package.json:
-# COPY stagehand/package.json stagehand/package.json
+COPY stagehand/package.json stagehand/package.json
 
 RUN --mount=type=cache,id=pnpm-store,target=/root/.local/share/pnpm/store \
     pnpm install --frozen-lockfile --filter @f16/backend...
@@ -54,8 +46,7 @@ RUN corepack enable && corepack prepare pnpm@${PNPM_VERSION} --activate
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
 COPY backend/package.json backend/package.json
 COPY admin/package.json admin/package.json
-# Uncomment after M1.T5 creates its package.json:
-# COPY stagehand/package.json stagehand/package.json
+COPY stagehand/package.json stagehand/package.json
 
 RUN --mount=type=cache,id=pnpm-store,target=/root/.local/share/pnpm/store \
     pnpm install --prod --frozen-lockfile --filter @f16/backend...

@@ -7,9 +7,6 @@
 # visible to pnpm. From F16/:
 #   DOCKER_BUILDKIT=1 docker build -f admin/Dockerfile -t f16-admin .
 #
-# The stagehand workspace's package.json doesn't exist yet (lands in M1.T5).
-# That COPY line is commented out — uncomment it once M1.T5 ships.
-#
 ARG NODE_IMAGE=node:22-alpine
 ARG PNPM_VERSION=10.33.0
 # Pin Caddy to a minor version so a future base-image revision doesn't
@@ -27,8 +24,7 @@ RUN corepack enable && corepack prepare pnpm@${PNPM_VERSION} --activate
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
 COPY backend/package.json backend/package.json
 COPY admin/package.json admin/package.json
-# Uncomment after M1.T5 creates stagehand/package.json:
-# COPY stagehand/package.json stagehand/package.json
+COPY stagehand/package.json stagehand/package.json
 
 RUN --mount=type=cache,id=pnpm-store,target=/root/.local/share/pnpm/store \
     pnpm install --frozen-lockfile --filter @f16/admin...
