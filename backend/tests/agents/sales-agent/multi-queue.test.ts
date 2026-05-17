@@ -104,12 +104,29 @@ class StubChannel implements ConversationChannel {
   }
 }
 
-/** Minimal stub Anthropic — records calls, returns a canned text. */
+/**
+ * Minimal stub Anthropic — records calls, returns a canned text.
+ *
+ * M6.T4: Compliance Sentry runs on every customer-message reply via Haiku.
+ * The stub dispatches on model: Haiku auto-passes the sentry; Sonnet
+ * returns `nextText`. `calls` counts Sonnet (sales LLM) only — Haiku calls
+ * are tracked separately as `sentryCalls`, preserving the existing
+ * `claudeStub.calls.length` assertions in this suite.
+ */
 class StubAnthropic {
-  public calls: unknown[] = [];
+  public calls: Array<{ model: string }> = [];
+  public sentryCalls: unknown[] = [];
   public nextText = 'merci';
   public messages = {
-    create: async (req: unknown) => {
+    create: async (req: { model: string }) => {
+      if (req.model.includes('haiku')) {
+        this.sentryCalls.push(req);
+        return {
+          content: [{ type: 'text' as const, text: '{"verdict":"pass","reasons":[]}' }],
+          stop_reason: 'end_turn' as const,
+          usage: { input_tokens: 50, output_tokens: 15 },
+        };
+      }
       this.calls.push(req);
       return {
         content: [{ type: 'text' as const, text: this.nextText }],

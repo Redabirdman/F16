@@ -95,7 +95,19 @@ class TestableSalesAgent extends SalesAgent {
   }
 }
 
-/** Minimal stub Anthropic — records every request, returns a canned text. */
+/**
+ * Minimal stub Anthropic — records every request, returns a canned text.
+ *
+ * M6.T4 wired the Compliance Sentry into the customer-message path. The
+ * sentry calls Haiku and expects JSON `{verdict, reasons}`. To keep the
+ * pre-sentry tests focused on the Sales LLM path, the stub dispatches on
+ * model: Haiku always returns `{verdict:"pass",reasons:[]}` so the draft
+ * passes through; Sonnet returns the configured `nextText`.
+ *
+ * `calls` (and `lastCall`) only includes Sonnet calls — Haiku/sentry calls
+ * are tracked separately as `sentryCalls`. This preserves the original
+ * test assertions (`claudeStub.calls.length` counts Sales LLM calls only).
+ */
 class StubAnthropic {
   public calls: Array<{
     model: string;
@@ -103,7 +115,10 @@ class StubAnthropic {
     system?: unknown;
     messages: Array<{ role: string; content: string }>;
   }> = [];
+  public sentryCalls: Array<{ model: string }> = [];
   public nextText = 'OK';
+  /** When set, the sentry stub will return this JSON instead of pass. */
+  public nextSentryText: string | null = null;
   public messages = {
     create: async (req: {
       model: string;
@@ -111,6 +126,16 @@ class StubAnthropic {
       system?: unknown;
       messages: Array<{ role: string; content: string }>;
     }) => {
+      // Haiku tier = sentry. Default to pass so existing tests are unaffected.
+      if (req.model.includes('haiku')) {
+        this.sentryCalls.push({ model: req.model });
+        const text = this.nextSentryText ?? '{"verdict":"pass","reasons":[]}';
+        return {
+          content: [{ type: 'text' as const, text }],
+          stop_reason: 'end_turn' as const,
+          usage: { input_tokens: 50, output_tokens: 15 },
+        };
+      }
       this.calls.push({
         model: req.model,
         max_tokens: req.max_tokens,

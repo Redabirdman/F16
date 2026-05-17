@@ -41,6 +41,9 @@ import { callClaude } from '../../llm/claude.js';
 import { buildSalesAgentSystemPrompt, type SalesAgentTurnContext } from './prompts/index.js';
 import { sendViaChannel } from '../../channels/send.js';
 import type { ChannelId, ContactRef } from '../../channels/types.js';
+import { checkComplianceFor } from '../../compliance/index.js';
+import * as humanActions from '../../db/repositories/human-actions.js';
+import { sendMessage } from '../../messaging/dispatcher.js';
 
 const MAX_HISTORY_TURNS = 10;
 const MAX_REPLY_CHARS = 1500;
@@ -228,9 +231,73 @@ export class SalesAgent extends BaseAgent {
       return { ok: false, error: `reply-too-long (${draft.length} chars)` };
     }
 
-    // TODO M6.T4 — pass `draft` through compliance.sentry before sending.
-    // The sentry will return either {ok:true, draft} (possibly rewritten) or
-    // {ok:false, reason} which should trigger a HUMAN_ACTION.REQUESTED here.
+    // M6.T4 — Compliance Sentry. Two-layer check (server rules + Haiku LLM)
+    // synchronously gates the send. Fail-closed: any block routes the draft
+    // to a human action and emits COMPLIANCE.BLOCKED instead of sending.
+    const compliance = await checkComplianceFor(this.db, {
+      draft,
+      ctx: {
+        customerId: customer.id,
+        channel: payload.channel,
+        productLine: (lead.productLine ?? 'car') as 'scooter' | 'car',
+        leadStatus: lead.status,
+        lastInboundContent: payload.content,
+      },
+    });
+
+    if (compliance.verdict === 'block') {
+      logger.warn(
+        {
+          leadId: lead.id,
+          instanceId: this.instanceId,
+          reasons: compliance.reasons,
+          ruleHits: compliance.ruleHits,
+          durationMs: compliance.durationMs,
+        },
+        'sales-agent: compliance blocked draft, escalating to human',
+      );
+
+      // Persist the human action — severity 2 = standard (yellow).
+      const action = await humanActions.createAction(this.db, {
+        createdByAgent: `${this.role}#${this.instanceId}`,
+        correlationId: lead.id,
+        intent: 'COMPLIANCE_BLOCKED',
+        severity: 2,
+        summary: `Sales Agent draft bloqué (${compliance.ruleHits.join(', ') || 'LLM'}). Raisons : ${compliance.reasons.join(' ; ')}`,
+        options: [
+          { id: 'send_as_is', label: 'Envoyer quand même', kind: 'approve' },
+          { id: 'reject_send', label: "Refuser l'envoi", kind: 'reject' },
+          { id: 'revise', label: 'Demander une révision', kind: 'revise' },
+        ],
+      });
+
+      // Emit COMPLIANCE.BLOCKED to the audit trail.
+      await sendMessage(
+        { db: this.db },
+        {
+          fromRole: this.role,
+          fromInstance: this.instanceId,
+          toRole: 'supervisor',
+          intent: 'COMPLIANCE.BLOCKED',
+          payload: { messageId: action.id, reasons: compliance.reasons },
+          correlationId: lead.id,
+          requiresHuman: true,
+          priority: 2,
+        },
+      );
+
+      return {
+        ok: true,
+        result: {
+          intent: envelope.intent,
+          sent: false,
+          blocked: true,
+          reasons: compliance.reasons,
+          humanActionId: action.id,
+        },
+      };
+    }
+
     const send = await sendViaChannel({
       db: this.db,
       customerId: customer.id,
