@@ -179,7 +179,7 @@ d('BaseAgent (live)', () => {
       role: 'echo-agent',
       instanceId: 'singleton',
       model: 'haiku',
-      queue: 'lead',
+      queues: ['lead'],
       db,
     });
     agents.push(a);
@@ -210,7 +210,7 @@ d('BaseAgent (live)', () => {
       role: 'echo-agent',
       instanceId: 'singleton',
       model: 'haiku',
-      queue: 'lead',
+      queues: ['lead'],
       db,
     });
     agents.push(a);
@@ -279,7 +279,7 @@ d('BaseAgent (live)', () => {
       role: 'echo-agent',
       instanceId: 'A',
       model: 'haiku',
-      queue: 'lead',
+      queues: ['lead'],
       db,
     });
     agents.push(a);
@@ -326,14 +326,14 @@ d('BaseAgent (live)', () => {
       role: 'echo-agent',
       instanceId: 'A',
       model: 'haiku',
-      queue: 'lead',
+      queues: ['lead'],
       db,
     });
     const b = new TestEchoAgent({
       role: 'echo-agent',
       instanceId: 'B',
       model: 'haiku',
-      queue: 'lead',
+      queues: ['lead'],
       db,
     });
     agents.push(a, b);
@@ -384,7 +384,7 @@ d('BaseAgent (live)', () => {
       role: 'echo-agent',
       instanceId: 'singleton',
       model: 'haiku',
-      queue: 'lead',
+      queues: ['lead'],
       db,
     });
     agents.push(a);
@@ -441,7 +441,7 @@ d('BaseAgent (live)', () => {
       role: 'echo-agent',
       instanceId: 'singleton',
       model: 'haiku',
-      queue: 'lead',
+      queues: ['lead'],
       db,
     });
     agents.push(a);
@@ -463,14 +463,14 @@ d('BaseAgent (live)', () => {
       role: 'echo-agent',
       instanceId: 'A',
       model: 'haiku',
-      queue: 'lead',
+      queues: ['lead'],
       db,
     });
     const b = new TestEchoAgent({
       role: 'echo-agent',
       instanceId: 'B',
       model: 'haiku',
-      queue: 'lead',
+      queues: ['lead'],
       db,
     });
     agents.push(a, b);

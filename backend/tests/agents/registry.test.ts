@@ -176,7 +176,7 @@ d('AgentRegistry (live)', () => {
           role: 'echo-agent',
           instanceId,
           model: 'haiku',
-          queue: 'lead',
+          queues: ['lead'],
           db: cfgDb,
           ...(meta !== undefined ? { meta } : {}),
         }),
@@ -188,7 +188,7 @@ d('AgentRegistry (live)', () => {
           role: 'broken-agent',
           instanceId,
           model: 'haiku',
-          queue: 'lead',
+          queues: ['lead'],
           db: cfgDb,
           ...(meta !== undefined ? { meta } : {}),
         }),
@@ -216,7 +216,7 @@ d('AgentRegistry (live)', () => {
           role: 'echo-agent',
           instanceId,
           model: 'haiku',
-          queue: 'lead',
+          queues: ['lead'],
           db: cfgDb,
           ...(meta !== undefined ? { meta } : {}),
         }),
@@ -271,7 +271,7 @@ d('AgentRegistry (live)', () => {
           role: 'echo-agent',
           instanceId,
           model: 'haiku',
-          queue: 'lead',
+          queues: ['lead'],
           db: cfgDb,
         }),
     );
@@ -296,7 +296,7 @@ d('AgentRegistry (live)', () => {
           role: 'echo-agent',
           instanceId,
           model: 'haiku',
-          queue: 'lead',
+          queues: ['lead'],
           db: cfgDb,
         }),
     );
@@ -326,7 +326,7 @@ d('AgentRegistry (live)', () => {
           role: 'echo-agent',
           instanceId,
           model: 'haiku',
-          queue: 'lead',
+          queues: ['lead'],
           db: cfgDb,
         }),
     );
@@ -363,7 +363,7 @@ d('AgentRegistry (live)', () => {
           role: 'multi-echo',
           instanceId,
           model: 'haiku',
-          queue: 'lead',
+          queues: ['lead'],
           db: cfgDb,
         }),
     );
@@ -374,7 +374,7 @@ d('AgentRegistry (live)', () => {
           role: 'multi-echo',
           instanceId,
           model: 'haiku',
-          queue: 'lead',
+          queues: ['lead'],
           db: cfgDb,
         }),
     );
@@ -435,7 +435,7 @@ d('AgentRegistry (live)', () => {
           role: 'echo-agent',
           instanceId,
           model: 'haiku',
-          queue: 'lead',
+          queues: ['lead'],
           db: cfgDb,
         }),
     );
@@ -466,7 +466,7 @@ d('AgentRegistry (live)', () => {
           role: 'broken-agent',
           instanceId,
           model: 'haiku',
-          queue: 'lead',
+          queues: ['lead'],
           db: cfgDb,
         }),
     );
@@ -508,7 +508,7 @@ d('AgentRegistry (live)', () => {
           role: 'echo-agent',
           instanceId,
           model: 'haiku',
-          queue: 'lead',
+          queues: ['lead'],
           db: cfgDb,
         }),
     );

@@ -38,8 +38,15 @@ export interface BaseAgentConfig {
   instanceId: string;
   /** Preferred model tier; wired into the Claude SDK wrapper in M3.T5. */
   model: ModelTier;
-  /** BullMQ queue name (from QUEUE_NAMES). */
-  queue: string;
+  /**
+   * BullMQ queue name(s) the agent subscribes to (from QUEUE_NAMES). Most agents
+   * pass a single queue here; some (e.g. Sales Agent) listen on multiple — one
+   * BullMQ worker is spun up per queue, all dispatching to the same `onMessage`.
+   * Either `queue` (single, back-compat) or `queues` (list) MUST be set.
+   */
+  queues?: readonly string[];
+  /** @deprecated single-queue shorthand. Prefer `queues: [name]`. */
+  queue?: string;
   /** BullMQ concurrency — defaults to 1 (one message at a time per agent). */
   concurrency?: number;
   db: Database;
@@ -55,14 +62,18 @@ export abstract class BaseAgent {
   readonly role: string;
   readonly instanceId: string;
   readonly model: ModelTier;
-  readonly queue: string;
+  /**
+   * Every queue this agent subscribes to. One BullMQ worker is created per
+   * entry; all dispatch to the same `onMessage` handler. Always length >= 1.
+   */
+  readonly queues: readonly string[];
   readonly concurrency: number;
   readonly allowedTools: readonly string[];
   readonly systemPrompt: string;
   readonly meta: Record<string, unknown>;
   protected db: Database;
 
-  private worker?: Worker;
+  private workers: Worker[] = [];
   private started = false;
   private stopped = false;
 
@@ -70,12 +81,38 @@ export abstract class BaseAgent {
     this.role = cfg.role;
     this.instanceId = cfg.instanceId;
     this.model = cfg.model;
-    this.queue = cfg.queue;
+    // Accept either `queues` (preferred, multi-queue) or `queue` (single,
+    // back-compat). Exactly one MUST be set; an empty `queues: []` is invalid.
+    const queues = cfg.queues ?? (cfg.queue ? [cfg.queue] : []);
+    if (queues.length === 0) {
+      throw new Error(
+        `Agent ${cfg.role}#${cfg.instanceId}: at least one queue must be configured (set 'queues' or 'queue')`,
+      );
+    }
+    this.queues = queues;
     this.concurrency = cfg.concurrency ?? 1;
     this.allowedTools = cfg.allowedTools ?? [];
     this.systemPrompt = cfg.systemPrompt ?? '';
     this.meta = cfg.meta ?? {};
     this.db = cfg.db;
+  }
+
+  /**
+   * Back-compat accessor — returns the agent's primary queue (queues[0]).
+   * Kept so the agent registry can write a single 'queue' column into
+   * agents_state for the admin's visual summary; the agent's real, multi-queue
+   * behavior is an implementation detail.
+   */
+  get queue(): string {
+    // Constructor guarantees queues.length >= 1; index access is safe.
+    const primary = this.queues[0];
+    if (primary === undefined) {
+      // Unreachable — constructor rejects empty `queues`. Throwing rather than
+      // ! keeps the lint rule honest and surfaces a clear error if the
+      // invariant ever breaks (e.g. someone mutates `queues` reflectively).
+      throw new Error(`Agent ${this.role}#${this.instanceId} has no queues configured`);
+    }
+    return primary;
   }
 
   /**
@@ -134,56 +171,68 @@ export abstract class BaseAgent {
     }
     this.started = true;
     logger.info(
-      { role: this.role, instanceId: this.instanceId, queue: this.queue, model: this.model },
+      { role: this.role, instanceId: this.instanceId, queues: this.queues, model: this.model },
       'agent.start',
     );
     await this.onStart();
-    this.worker = consume({
-      db: this.db,
-      queue: this.queue,
-      role: this.role,
-      concurrency: this.concurrency,
-      handler: async (envelope) => {
-        // Only handle messages directed at this role and (optionally) this instance.
-        // The dispatcher.claimSpecific already filters by role; we additionally
-        // ignore messages targeted at a *different* instance. Note that by the
-        // time we get here the row is already claimed (consumed_at set) — we
-        // still return ok:true so the row is marked with a skipped result and
-        // the queue moves on. Sub-class onMessage is NOT invoked.
-        if (envelope.toInstance && envelope.toInstance !== this.instanceId) {
-          logger.debug(
-            {
-              role: this.role,
-              instanceId: this.instanceId,
-              targetInstance: envelope.toInstance,
-              messageId: envelope.id,
-            },
-            'agent.skip.instance-mismatch',
-          );
-          return { ok: true, result: { skipped: 'instance-mismatch' } };
-        }
+    // Shared handler — one closure dispatched by every queue's worker. Going
+    // through this instead of N closures keeps `onMessage` the single point of
+    // truth + lets us filter instance-mismatch identically per queue.
+    const handler = async (envelope: AgentMessageEnvelope): Promise<MessageHandlerResult> => {
+      if (envelope.toInstance && envelope.toInstance !== this.instanceId) {
         logger.debug(
           {
             role: this.role,
             instanceId: this.instanceId,
-            intent: envelope.intent,
+            targetInstance: envelope.toInstance,
             messageId: envelope.id,
           },
-          'agent.onMessage',
+          'agent.skip.instance-mismatch',
         );
-        return this.onMessage(envelope);
-      },
-    });
+        return { ok: true, result: { skipped: 'instance-mismatch' } };
+      }
+      logger.debug(
+        {
+          role: this.role,
+          instanceId: this.instanceId,
+          intent: envelope.intent,
+          messageId: envelope.id,
+        },
+        'agent.onMessage',
+      );
+      return this.onMessage(envelope);
+    };
+    // One worker per queue. They share the same handler — BullMQ guarantees
+    // each message is delivered to at most one worker per queue, and our
+    // agent_messages.claimSpecific row-level lock guards against any cross-
+    // worker dup if the same message id were ever enqueued twice.
+    for (const q of this.queues) {
+      this.workers.push(
+        consume({
+          db: this.db,
+          queue: q,
+          role: this.role,
+          concurrency: this.concurrency,
+          handler,
+        }),
+      );
+    }
   }
 
-  /** Stop the worker; idempotent. */
+  /** Stop every queue's worker; idempotent. */
   async stop(): Promise<void> {
     if (this.stopped) return;
     this.stopped = true;
     logger.info({ role: this.role, instanceId: this.instanceId }, 'agent.stop');
-    if (this.worker) {
-      await this.worker.close();
+    for (const w of this.workers) {
+      await w.close().catch((err) => {
+        logger.warn(
+          { role: this.role, instanceId: this.instanceId, err },
+          'agent.stop.worker-close-failed',
+        );
+      });
     }
+    this.workers = [];
     await this.onStop();
   }
 

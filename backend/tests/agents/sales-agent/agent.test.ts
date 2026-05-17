@@ -85,9 +85,10 @@ class StubChannel implements ConversationChannel {
 class TestableSalesAgent extends SalesAgent {
   public handle(envelope: AgentMessageEnvelope): Promise<MessageHandlerResult> {
     // `onMessage` is protected; we're a subclass so we can access it directly.
-    // Cast to the same class type to call through the protected boundary.
+    // Cast through `unknown` to widen the protected member to a callable shape
+    // (TS rejects the direct intersection cast because of the protected modifier).
     return (
-      this as SalesAgent & {
+      this as unknown as {
         onMessage: (e: AgentMessageEnvelope) => Promise<MessageHandlerResult>;
       }
     ).onMessage(envelope);
@@ -206,7 +207,7 @@ d('SalesAgent.onMessage (live pg, stub channel, stub Claude)', () => {
       role: 'sales-agent',
       instanceId: 'lead-test',
       model: 'sonnet',
-      queue: 'lead',
+      queues: ['lead', 'customer'],
       db,
       meta,
     });
@@ -218,6 +219,10 @@ d('SalesAgent.onMessage (live pg, stub channel, stub Claude)', () => {
   it('test 1 (LEAD.SCORED): sends the opener verbatim, no Claude call', async () => {
     const { leadId, customerId } = await seedLead({ fullName: 'Marie' });
     const agent = newAgent({ leadId });
+
+    // Multi-queue subscription assertion: the Sales Agent listens on BOTH the
+    // lead queue (LEAD.SCORED) and the customer queue (CUSTOMER.MESSAGE_RECEIVED).
+    expect([...agent.queues].sort()).toEqual(['customer', 'lead']);
 
     const result = await agent.handle(
       makeEnvelope('LEAD.SCORED', {

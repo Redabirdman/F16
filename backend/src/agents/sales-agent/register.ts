@@ -28,10 +28,13 @@ export function registerSalesAgentClass(): void {
       role: 'sales-agent',
       instanceId: cfg.instanceId,
       model: 'sonnet',
-      // Placeholder uses the lead queue (LEAD.SCORED arrives here). M6 may
-      // move ongoing customer messages to a per-customer queue, but for
-      // M5.T4 we only consume LEAD.SCORED, which is routed to 'lead'.
-      queue: QUEUE_NAMES.LEAD,
+      // The Sales Agent consumes from BOTH queues:
+      //   - 'lead'     — receives LEAD.SCORED (first-turn welcome)
+      //   - 'customer' — receives CUSTOMER.MESSAGE_RECEIVED (ongoing chat)
+      // BaseAgent spins up one BullMQ worker per queue; both feed the same
+      // onMessage handler. `queues[0]` ('lead') is reported as the primary
+      // queue in agents_state for the admin's at-a-glance summary.
+      queues: [QUEUE_NAMES.LEAD, QUEUE_NAMES.CUSTOMER],
       db: cfg.db,
       ...(cfg.meta ? { meta: cfg.meta } : {}),
     });
