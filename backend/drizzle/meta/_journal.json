@@ -22,6 +22,20 @@
       "when": 1778994255049,
       "tag": "0002_lame_wiccan",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1778994997508,
+      "tag": "0003_brown_miss_america",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1778995019249,
+      "tag": "0004_realtime_triggers",
+      "breakpoints": true
     }
   ]
 }
