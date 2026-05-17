@@ -1,0 +1,77 @@
+# F16 local-dev data plane.
+#
+# Brings up Postgres (with pgvector + pgcrypto) and Redis on non-standard ports
+# so they don't collide with anything else you may have running on 5432/6379.
+# The F16 application services (backend, admin, pipecat, stagehand) run
+# natively via pnpm/uv in dev for fast iteration -- only the data plane is
+# containerised here. Production (on the VPS) runs everything in EasyPanel;
+# see ./easypanel/README.md for that layout.
+#
+# Usage:
+#   docker compose -f infra/docker-compose.dev.yml up -d
+#   docker compose -f infra/docker-compose.dev.yml down       # keep volumes
+#   docker compose -f infra/docker-compose.dev.yml down -v    # wipe volumes
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: f16-postgres-dev
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: f16
+      POSTGRES_PASSWORD: f16
+      POSTGRES_DB: f16
+    ports:
+      - "5433:5432"
+    volumes:
+      - f16_postgres_data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U f16 -d f16"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - f16
+
+  redis:
+    image: redis:7-alpine
+    container_name: f16-redis-dev
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6380:6379"
+    volumes:
+      - f16_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - f16
+
+  adminer:
+    image: adminer:latest
+    container_name: f16-adminer-dev
+    restart: unless-stopped
+    ports:
+      - "8081:8080"
+    environment:
+      ADMINER_DEFAULT_SERVER: postgres
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - f16
+
+networks:
+  f16:
+    name: f16
+    driver: bridge
+
+volumes:
+  f16_postgres_data:
+    name: f16_postgres_data
+  f16_redis_data:
+    name: f16_redis_data

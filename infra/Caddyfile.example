@@ -1,0 +1,20 @@
+# F16 production reverse proxy (OUTER Caddy, in front of all services on the
+# VPS). Distinct from admin/Caddyfile, which is the in-container Caddy that
+# serves the admin SPA's static assets.
+#
+# Copy to /etc/caddy/Caddyfile on the VPS (or place behind EasyPanel's
+# built-in proxy) and substitute YOUR_ADMIN_DOMAIN.
+
+YOUR_ADMIN_DOMAIN.example {
+  reverse_proxy f16-admin:8080
+}
+
+# Optional: expose the backend HTTP API on a subdomain
+# api.YOUR_ADMIN_DOMAIN.example {
+#   reverse_proxy f16-backend:3001
+# }
+
+# Optional: pipecat webhooks (SIP signaling endpoint) on a subdomain
+# voice.YOUR_ADMIN_DOMAIN.example {
+#   reverse_proxy f16-pipecat:8000
+# }
