@@ -8,6 +8,7 @@ later milestones — this file is intentionally minimal.
 
 from __future__ import annotations
 
+import os
 import time
 
 import uvicorn
@@ -15,6 +16,11 @@ from fastapi import FastAPI
 from pydantic import BaseModel, Field
 
 from f16_pipecat import __version__
+from f16_pipecat.logging import configure_logging, logger
+
+# Configure structured JSON logging once at import time. Matches the
+# backend's pino setup (timestamp, level, message, contextual fields).
+configure_logging()
 
 # Monotonic clock is the right choice for uptime: it is immune to
 # wall-clock jumps (NTP sync, DST). Captured at import time so the
@@ -50,4 +56,7 @@ def health() -> HealthResponse:
 
 
 if __name__ == "__main__":
-    uvicorn.run("f16_pipecat.server:app", host="0.0.0.0", port=8000, reload=False)
+    host = os.environ.get("HOST", "127.0.0.1")
+    port = int(os.environ.get("PORT", "8000"))
+    logger.info(f"Starting f16-pipecat on {host}:{port}")
+    uvicorn.run("f16_pipecat.server:app", host=host, port=port, reload=False)

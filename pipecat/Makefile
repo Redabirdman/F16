@@ -5,7 +5,11 @@
 
 install:
 	uv venv --python 3.12 .venv
-	uv pip install -e ".[dev]"
+	@if [ -f .venv/Scripts/python.exe ]; then \
+		uv pip install --python .venv/Scripts/python.exe -e ".[dev]"; \
+	else \
+		uv pip install --python .venv/bin/python -e ".[dev]"; \
+	fi
 
 test:
 	pytest -v
@@ -24,3 +28,4 @@ run:
 
 clean:
 	rm -rf .venv .pytest_cache .ruff_cache .mypy_cache build dist *.egg-info
+	find . -type d -name __pycache__ -prune -exec rm -rf {} +
