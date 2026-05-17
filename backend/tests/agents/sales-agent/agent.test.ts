@@ -20,8 +20,9 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from
 import { randomBytes } from 'node:crypto';
 import { sql, eq, desc } from 'drizzle-orm';
 import { createDb, type Database } from '../../../src/db/index.js';
-import { conversationTurns, leads } from '../../../src/db/schema/index.js';
+import { conversationTurns, humanActions, leads } from '../../../src/db/schema/index.js';
 import { insertCustomer } from '../../../src/db/repositories/customers.js';
+import { __resetForTests, shutdownQueues } from '../../../src/queue/index.js';
 import { registerChannel, __resetChannelsForTests } from '../../../src/channels/registry.js';
 import type {
   ChannelCapabilities,
@@ -108,23 +109,43 @@ class TestableSalesAgent extends SalesAgent {
  * are tracked separately as `sentryCalls`. This preserves the original
  * test assertions (`claudeStub.calls.length` counts Sales LLM calls only).
  */
+/**
+ * Sonnet response script entry. Either a text-only final turn, or a sequence
+ * of tool_use blocks to drive the M6.T5 tool-loop one iteration.
+ */
+type SonnetScriptedTurn =
+  | { kind: 'text'; text: string }
+  | {
+      kind: 'tool_use';
+      uses: Array<{ id: string; name: string; input: unknown }>;
+    };
+
 class StubAnthropic {
   public calls: Array<{
     model: string;
     max_tokens: number;
     system?: unknown;
-    messages: Array<{ role: string; content: string }>;
+    messages: Array<{ role: string; content: unknown }>;
+    tools?: unknown;
   }> = [];
   public sentryCalls: Array<{ model: string }> = [];
   public nextText = 'OK';
   /** When set, the sentry stub will return this JSON instead of pass. */
   public nextSentryText: string | null = null;
+  /**
+   * Optional scripted sequence for the Sonnet (sales) path. When set, each
+   * Sonnet `messages.create` pops one entry; once empty we fall back to a
+   * single `nextText` response. Lets the M6.T5 round-trip test queue a
+   * tool_use turn followed by a text turn.
+   */
+  public sonnetScript: SonnetScriptedTurn[] = [];
   public messages = {
     create: async (req: {
       model: string;
       max_tokens: number;
       system?: unknown;
-      messages: Array<{ role: string; content: string }>;
+      messages: Array<{ role: string; content: unknown }>;
+      tools?: unknown;
     }) => {
       // Haiku tier = sentry. Default to pass so existing tests are unaffected.
       if (req.model.includes('haiku')) {
@@ -136,12 +157,37 @@ class StubAnthropic {
           usage: { input_tokens: 50, output_tokens: 15 },
         };
       }
+      // Snapshot the request — the tool-loop mutates the messages array between
+      // iterations (pushes assistant + tool_result turns onto the same array
+      // it passed us), so a shallow reference would alias every call to the
+      // final state. structuredClone gives each recorded call its own copy.
       this.calls.push({
         model: req.model,
         max_tokens: req.max_tokens,
         system: req.system,
-        messages: req.messages,
+        messages: structuredClone(req.messages) as Array<{ role: string; content: unknown }>,
+        ...(req.tools !== undefined ? { tools: req.tools } : {}),
       });
+      const scripted = this.sonnetScript.shift();
+      if (scripted) {
+        if (scripted.kind === 'tool_use') {
+          return {
+            content: scripted.uses.map((u) => ({
+              type: 'tool_use' as const,
+              id: u.id,
+              name: u.name,
+              input: u.input,
+            })),
+            stop_reason: 'tool_use' as const,
+            usage: { input_tokens: 100, output_tokens: 25 },
+          };
+        }
+        return {
+          content: [{ type: 'text' as const, text: scripted.text }],
+          stop_reason: 'end_turn' as const,
+          usage: { input_tokens: 100, output_tokens: 25 },
+        };
+      }
       return {
         content: [{ type: 'text' as const, text: this.nextText }],
         stop_reason: 'end_turn' as const,
@@ -153,7 +199,7 @@ class StubAnthropic {
     model: string;
     max_tokens: number;
     system?: unknown;
-    messages: Array<{ role: string; content: string }>;
+    messages: Array<{ role: string; content: unknown }>;
   } {
     const c = this.calls[this.calls.length - 1];
     if (!c) throw new Error('StubAnthropic: no call recorded');
@@ -595,6 +641,101 @@ d('SalesAgent.onMessage (live pg, stub channel, stub Claude)', () => {
     expect(wa.sends).toHaveLength(0);
     expect(claudeStub.calls).toHaveLength(0);
   });
+
+  // -------------------------------------------------------------------------
+  // 13. M6.T5 — Sales Agent tool round-trip via `human.escalate`
+  //
+  // Stub scripts Sonnet to (a) request a `human_escalate` tool call, then
+  // (b) return text once it sees the tool_result. Asserts the tool actually
+  // ran (a `human_actions` row was inserted) AND the final text was sent on
+  // the channel.
+  //
+  // Gated on TEST_REDIS_URL because `human.escalate` dispatches a
+  // HUMAN_ACTION.REQUESTED agent_message via BullMQ — the rest of the file
+  // is pg-only.
+  // -------------------------------------------------------------------------
+  it.skipIf(!process.env.TEST_REDIS_URL)(
+    'test 13 (tool round-trip): human.escalate invoked mid-turn -> row created + final text sent',
+    async () => {
+      const prevRedisUrl = process.env.REDIS_URL;
+      const prevPrefix = process.env.BULLMQ_PREFIX;
+      process.env.REDIS_URL = process.env.TEST_REDIS_URL!;
+      process.env.BULLMQ_PREFIX = `f16-test-toolloop-${randomBytes(4).toString('hex')}`;
+      __resetForTests();
+      try {
+        const { leadId, customerId } = await seedLead({ fullName: 'Léa' });
+
+        // Script Sonnet: first turn = tool_use(human_escalate), second = text.
+        claudeStub.sonnetScript = [
+          {
+            kind: 'tool_use',
+            uses: [
+              {
+                id: 'toolu_esc_1',
+                name: 'human_escalate',
+                input: {
+                  intent: 'TEST_ESCALATE',
+                  severity: 1,
+                  summary: 'Client urgent, besoin humain',
+                },
+              },
+            ],
+          },
+          {
+            kind: 'text',
+            text: 'Un conseiller va vous rappeler très vite.',
+          },
+        ];
+
+        const agent = newAgent({ leadId });
+        const result = await agent.handle(
+          makeEnvelope('CUSTOMER.MESSAGE_RECEIVED', {
+            customerId,
+            channel: 'whatsapp',
+            content: "C'est urgent, j'ai besoin d'aide.",
+          }),
+        );
+
+        expect(result).toMatchObject({
+          ok: true,
+          result: { sent: true, channel: 'whatsapp' },
+        });
+
+        // Sonnet was called twice — once to get the tool_use, once for text.
+        expect(claudeStub.calls.length).toBe(2);
+        // Second Sonnet call carries a tool_result for the escalation.
+        const secondCall = claudeStub.calls[1]!;
+        const secondMsgs = secondCall.messages;
+        const lastMsg = secondMsgs[secondMsgs.length - 1]!;
+        expect(lastMsg.role).toBe('user');
+        const content = lastMsg.content as Array<{ type: string; tool_use_id: string }>;
+        expect(content[0]!.type).toBe('tool_result');
+        expect(content[0]!.tool_use_id).toBe('toolu_esc_1');
+
+        // human.escalate handler actually ran -> row landed in human_actions.
+        const actions = await db
+          .select()
+          .from(humanActions)
+          .where(eq(humanActions.intent, 'TEST_ESCALATE'));
+        expect(actions).toHaveLength(1);
+        expect(actions[0]!.severity).toBe(1);
+        expect(actions[0]!.summary).toMatch(/urgent/);
+
+        // Final text reached the channel.
+        expect(wa.sends).toHaveLength(1);
+        expect(wa.sends[0]!.body).toEqual([
+          { type: 'text', text: 'Un conseiller va vous rappeler très vite.' },
+        ]);
+      } finally {
+        await shutdownQueues().catch(() => {});
+        __resetForTests();
+        if (prevRedisUrl === undefined) delete process.env.REDIS_URL;
+        else process.env.REDIS_URL = prevRedisUrl;
+        if (prevPrefix === undefined) delete process.env.BULLMQ_PREFIX;
+        else process.env.BULLMQ_PREFIX = prevPrefix;
+      }
+    },
+  );
 });
 
 // ---------------------------------------------------------------------------

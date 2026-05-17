@@ -37,17 +37,34 @@ import { logger } from '../../logger.js';
 import { customers, leads } from '../../db/schema/index.js';
 import { decryptPII } from '../../db/crypto.js';
 import { listTurns } from '../../db/repositories/conversation-turns.js';
-import { callClaude } from '../../llm/claude.js';
+import { callClaudeWithTools } from '../../llm/tool-loop.js';
 import { buildSalesAgentSystemPrompt, type SalesAgentTurnContext } from './prompts/index.js';
 import { sendViaChannel } from '../../channels/send.js';
 import type { ChannelId, ContactRef } from '../../channels/types.js';
 import { checkComplianceFor } from '../../compliance/index.js';
 import * as humanActions from '../../db/repositories/human-actions.js';
 import { sendMessage } from '../../messaging/dispatcher.js';
+// Importing the tools barrel registers all four built-in tools at module load
+// (side-effect registration). The Sales Agent is the first user of the
+// tool-use loop, so this is the natural boot point until a dedicated tool
+// bootstrap module is needed (post M6).
+import { listTools } from '../../tools/index.js';
 
 const MAX_HISTORY_TURNS = 10;
 const MAX_REPLY_CHARS = 1500;
 const REPLY_TOKEN_BUDGET = 400;
+
+/**
+ * Curated allow-list of tools the Sales Agent is permitted to invoke. Other
+ * agent roles (Service, Quote) will declare their own list against the same
+ * registry. The tool-loop trusts this list — it does not enforce.
+ */
+const SALES_AGENT_TOOL_NAMES = [
+  'customer.read_profile',
+  'customer.update_profile',
+  'knowledge.search',
+  'human.escalate',
+] as const;
 
 export class SalesAgent extends BaseAgent {
   protected async onMessage(envelope: AgentMessageEnvelope): Promise<MessageHandlerResult> {
@@ -204,17 +221,39 @@ export class SalesAgent extends BaseAgent {
 
     // Call Claude — Sonnet for sales conversation. The system fragments
     // (M6.T2) include the cached prefix + per-turn context; userPrompt is
-    // ONLY the customer's current message.
-    const result = await callClaude({
+    // ONLY the customer's current message. The tool-loop (M6.T5) lets the
+    // model invoke registered tools mid-turn (customer profile read/update,
+    // knowledge search, human escalation) and only returns once the response
+    // is text-only.
+    const tools = listTools({ allowed: SALES_AGENT_TOOL_NAMES });
+    const llmResult = await callClaudeWithTools({
       tier: 'sonnet',
       systemFragments: buildSalesAgentSystemPrompt(ctx),
       userPrompt: payload.content,
+      tools,
+      toolContext: {
+        db: this.db,
+        agentRole: this.role,
+        agentInstance: this.instanceId,
+        correlationId: lead.id,
+      },
       maxTokens: REPLY_TOKEN_BUDGET,
-      structured: false,
       logContext: { agent: 'sales-agent', instanceId: this.instanceId, leadId },
     });
-    const draftRaw = typeof result === 'string' ? result : result.text;
-    const draft = cleanLLMReply(draftRaw);
+    const draft = cleanLLMReply(llmResult.text);
+
+    logger.info(
+      {
+        leadId: lead.id,
+        instanceId: this.instanceId,
+        iterations: llmResult.iterations,
+        toolCalls: llmResult.toolCalls.length,
+        inputTokens: llmResult.usage.inputTokens,
+        outputTokens: llmResult.usage.outputTokens,
+        stopReason: llmResult.stopReason,
+      },
+      'sales-agent: claude turn completed',
+    );
 
     if (!draft || draft.length === 0) {
       logger.warn(

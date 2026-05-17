@@ -121,6 +121,18 @@ export function __setClaudeClientForTests(client: unknown): void {
 }
 
 /**
+ * Accessor for the same lazily-constructed Anthropic client `callClaude` uses
+ * internally. M6.T5's tool-loop wrapper goes through this so it shares the
+ * `__setClaudeClientForTests` injection seam — tests don't need a second stub
+ * hook for the tool-using path. Returns the narrow `AnthropicLike` shape; the
+ * cast to `Anthropic` at the call site is fine since both `callClaude` and the
+ * tool-loop only touch `messages.create`.
+ */
+export function getClaudeClientForToolLoop(): AnthropicLike {
+  return getClient();
+}
+
+/**
  * Compose the request's `system` field. The raw SDK accepts a plain string OR
  * an array of `TextBlockParam`s. We always emit blocks when we have either
  * fragments OR a mix of fragments + plain prompt, so cache_control can land on

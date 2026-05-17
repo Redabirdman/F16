@@ -8,3 +8,4 @@
 export * from './router.js';
 export * from './cache.js';
 export * from './claude.js';
+export * from './tool-loop.js';
