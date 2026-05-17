@@ -5,3 +5,12 @@ coverage
 *.log
 tests
 vitest.config.ts
+.git
+.github
+.vscode
+.idea
+*.md
+docs/
+*.tsbuildinfo
+pnpm-debug.log*
+npm-debug.log*

@@ -1,64 +1,74 @@
 # syntax=docker/dockerfile:1.7
-# Multi-stage build for @f16/backend.
-# Build with BuildKit enabled (DOCKER_BUILDKIT=1) so the pnpm cache mounts work.
-
-ARG NODE_VERSION=22-alpine
+#
+# Multi-stage build for @f16/backend (pnpm workspace-aware).
+#
+# IMPORTANT: build context MUST be the F16 monorepo root, NOT backend/, so the
+# workspace metadata (pnpm-workspace.yaml, lockfile, sibling package.jsons) is
+# visible to pnpm. From F16/:
+#   DOCKER_BUILDKIT=1 docker build -f backend/Dockerfile -t f16-backend .
+#
+# Note: the `COPY admin/package.json` and `COPY stagehand/package.json` lines
+# below are commented out because those workspaces don't have their package.json
+# yet (they land in M1.T3 and M1.T5). Uncomment them once those tasks ship —
+# without them, the lockfile won't fully resolve. We don't actually build this
+# image until M16, so the Dockerfile being un-runnable today is acceptable; the
+# logic just needs to be correct so M16 is a flip-the-switch operation.
+#
+ARG NODE_IMAGE=node:22-alpine
 ARG PNPM_VERSION=10.33.0
 
-# -----------------------------------------------------------------------------
-# Stage 1 — deps: install full dependency tree (including dev) for the build step
-# -----------------------------------------------------------------------------
-FROM node:${NODE_VERSION} AS deps
+# ---------- deps: install full workspace dep tree (incl. dev) for the build ----------
+FROM ${NODE_IMAGE} AS deps
 ARG PNPM_VERSION
-WORKDIR /app
+WORKDIR /repo
 
 RUN corepack enable && corepack prepare pnpm@${PNPM_VERSION} --activate
 
-COPY package.json ./
-# Lockfile lives at the workspace root; expected to be copied in by the
-# build context (e.g. `docker build -f backend/Dockerfile .` from the F16 root).
-COPY pnpm-lock.yaml* ./
-COPY pnpm-workspace.yaml* ./
+# Workspace metadata — required for pnpm to recognize every workspace.
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
+COPY backend/package.json backend/package.json
+# Uncomment after M1.T3 / M1.T5 create their package.json:
+# COPY admin/package.json admin/package.json
+# COPY stagehand/package.json stagehand/package.json
 
 RUN --mount=type=cache,id=pnpm-store,target=/root/.local/share/pnpm/store \
-    pnpm install --prod=false --frozen-lockfile
+    pnpm install --frozen-lockfile --filter @f16/backend...
 
-# -----------------------------------------------------------------------------
-# Stage 2 — build: compile TypeScript to dist/
-# -----------------------------------------------------------------------------
-FROM node:${NODE_VERSION} AS build
-ARG PNPM_VERSION
-WORKDIR /app
-
-RUN corepack enable && corepack prepare pnpm@${PNPM_VERSION} --activate
-
-COPY --from=deps /app/node_modules ./node_modules
-COPY package.json tsconfig.json ./
-COPY src ./src
-
+# ---------- build: compile TypeScript to dist/ ----------
+FROM deps AS build
+WORKDIR /repo
+COPY backend ./backend
+WORKDIR /repo/backend
 RUN pnpm run build
 
-# Drop dev deps so the runtime stage only carries production modules.
-RUN --mount=type=cache,id=pnpm-store,target=/root/.local/share/pnpm/store \
-    pnpm install --prod --frozen-lockfile --ignore-scripts || \
-    pnpm prune --prod
-
-# -----------------------------------------------------------------------------
-# Stage 3 — runtime: minimal image, non-root user
-# -----------------------------------------------------------------------------
-FROM node:${NODE_VERSION} AS runtime
-WORKDIR /app
-
+# ---------- runtime: minimal image, prod-only deps, non-root user ----------
+FROM ${NODE_IMAGE} AS runtime
+ARG PNPM_VERSION
 ENV NODE_ENV=production \
     PORT=3001
+WORKDIR /app
 
-# node:alpine ships a `node` user (uid 1000) — reuse it instead of creating one.
-COPY --from=build --chown=node:node /app/node_modules ./node_modules
-COPY --from=build --chown=node:node /app/dist ./dist
-COPY --from=build --chown=node:node /app/package.json ./package.json
+RUN corepack enable && corepack prepare pnpm@${PNPM_VERSION} --activate
+
+# Re-copy workspace metadata (same set as deps) so prod install resolves identically.
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
+COPY backend/package.json backend/package.json
+# Uncomment after M1.T3 / M1.T5 create their package.json:
+# COPY admin/package.json admin/package.json
+# COPY stagehand/package.json stagehand/package.json
+
+RUN --mount=type=cache,id=pnpm-store,target=/root/.local/share/pnpm/store \
+    pnpm install --prod --frozen-lockfile --filter @f16/backend...
+
+COPY --from=build /repo/backend/dist ./backend/dist
 
 USER node
+WORKDIR /app/backend
 
 EXPOSE 3001
+
+# Use Node 22's built-in fetch — no extra runtime deps for the healthcheck.
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||3001)+'/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
 CMD ["node", "dist/index.js"]
