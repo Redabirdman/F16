@@ -1,0 +1,50 @@
+[project]
+name = "f16-pipecat"
+version = "0.0.1"
+description = "F16 Pipecat audio I/O bridge — connects OVH SIP voice channel to the F16 sales agent backend via Deepgram STT (FR) and Azure Neural TTS (FR)."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+authors = [{ name = "Assuryal Conseil" }]
+license = { text = "Proprietary" }
+dependencies = [
+    "pipecat-ai>=0.0.50",
+    "fastapi>=0.115.0,<1.0",
+    "uvicorn[standard]>=0.32.0,<1.0",
+    "pydantic>=2.0,<3.0",
+    "httpx>=0.27.0,<1.0",
+    "deepgram-sdk>=3.7.0,<4.0",
+    "azure-cognitiveservices-speech>=1.40.0,<2.0",
+    "python-dotenv>=1.0.0,<2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0,<9.0",
+    "pytest-asyncio>=0.24.0,<1.0",
+    "ruff>=0.7.0,<1.0",
+    "mypy>=1.11.0,<2.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/f16_pipecat"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+strict = true
+python_version = "3.12"
+plugins = ["pydantic.mypy"]
