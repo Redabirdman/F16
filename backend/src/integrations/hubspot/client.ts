@@ -1,0 +1,429 @@
+/**
+ * HubSpot REST client (M5.T2).
+ *
+ * Thin wrapper over the HubSpot V3 CRM REST API. Speaks JSON, knows nothing
+ * about BullMQ / drizzle / lead semantics — those live in `dual-write.ts`.
+ *
+ * Auth: HubSpot Service Keys + Private App tokens share the same shape:
+ *   `Authorization: Bearer <token>`. We never read the env directly here;
+ *   the token is passed in via constructor so tests can swap it.
+ *
+ * PII discipline:
+ *   - The token is NEVER logged. Only the HTTP method + path + status code
+ *     surface to logs.
+ *   - On error, we surface `status + short prefix of HubSpot's response
+ *     body (≤200 chars)`. HubSpot's error JSON normally echoes field names +
+ *     error codes, not values — but the truncation is the safety net.
+ *   - We never echo the REQUEST body (contains email/phone/name) into errors
+ *     or log lines.
+ *
+ * Retry:
+ *   - 429 + 5xx are retryable. 3 attempts total, exponential backoff (1s,2s,4s).
+ *   - 4xx other than 429 surface immediately — the caller (dual-write) gets a
+ *     chance to detect "property does not exist" and degrade.
+ *
+ * Pipeline discovery:
+ *   - Every portal has a default deal pipeline. If callers don't supply
+ *     `HUBSPOT_PIPELINE_ID` + `HUBSPOT_NEW_DEAL_STAGE`, we hit
+ *     `GET /crm/v3/pipelines/deals` ONCE per process and cache.
+ */
+import { logger } from '../../logger.js';
+
+const DEFAULT_BASE_URL = 'https://api.hubapi.com';
+const DEFAULT_TIMEOUT_MS = 15_000;
+const MAX_ATTEMPTS = 3;
+const INITIAL_BACKOFF_MS = 1_000;
+/** HubSpot's error bodies are usually small JSON; cap to keep logs PII-safe. */
+const ERROR_BODY_PREFIX_LEN = 200;
+
+export interface HubSpotClientOptions {
+  accessToken: string;
+  /** Default https://api.hubapi.com — overridden for the test stub server. */
+  baseUrl?: string;
+  /** Injection point for tests; defaults to global fetch. */
+  fetchImpl?: typeof fetch;
+  /** Override for retry sleep — tests set this to 0 to skip real waiting. */
+  sleepMs?: (ms: number) => Promise<void>;
+}
+
+export interface UpsertContactInput {
+  email: string;
+  firstName?: string;
+  lastName?: string;
+  /** E.164 preferred. */
+  phone?: string;
+  /** Free-form custom properties — HubSpot's snake_case property names. */
+  properties?: Record<string, string>;
+}
+
+export interface UpsertContactOutput {
+  hubspotContactId: string;
+  isNew: boolean;
+}
+
+export interface CreateDealInput {
+  dealName: string;
+  amount?: number;
+  /** Pipeline ID; defaults to discovered default when omitted. */
+  pipeline?: string;
+  /** Stage ID. */
+  dealStage?: string;
+  /** Passes through to the `product_line` custom property if it exists. */
+  productLine?: 'scooter' | 'car';
+  properties?: Record<string, string>;
+}
+
+export interface CreateDealOutput {
+  hubspotDealId: string;
+}
+
+export interface DefaultPipelineAndStage {
+  pipelineId: string;
+  newDealStageId: string;
+}
+
+interface HubSpotErrorBody {
+  status?: string;
+  message?: string;
+  category?: string;
+  errors?: Array<{ message?: string; in?: string }>;
+}
+
+/**
+ * Custom error subclass — lets dual-write.ts detect "property does not exist"
+ * and retry without those properties. Carries the HubSpot status + a short
+ * body prefix (PII-safe), the raw error code, and the property name HubSpot
+ * complained about (when extractable).
+ */
+export class HubSpotApiError extends Error {
+  readonly status: number;
+  readonly bodyPrefix: string;
+  readonly code: string | null;
+  readonly missingProperty: string | null;
+
+  constructor(opts: {
+    method: string;
+    path: string;
+    status: number;
+    body: string;
+    code?: string | null;
+    missingProperty?: string | null;
+  }) {
+    const prefix = opts.body.slice(0, ERROR_BODY_PREFIX_LEN);
+    super(`HubSpot ${opts.method} ${opts.path} -> ${opts.status}: ${prefix}`);
+    this.name = 'HubSpotApiError';
+    this.status = opts.status;
+    this.bodyPrefix = prefix;
+    this.code = opts.code ?? null;
+    this.missingProperty = opts.missingProperty ?? null;
+  }
+}
+
+export class HubSpotClient {
+  private readonly token: string;
+  private readonly baseUrl: string;
+  private readonly fetchImpl: typeof fetch;
+  private readonly sleep: (ms: number) => Promise<void>;
+  /** Per-instance pipeline cache. */
+  private pipelineCache: DefaultPipelineAndStage | null = null;
+
+  constructor(opts: HubSpotClientOptions) {
+    if (!opts.accessToken) {
+      throw new Error('HubSpotClient: accessToken is required');
+    }
+    this.token = opts.accessToken;
+    this.baseUrl = (opts.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, '');
+    this.fetchImpl = opts.fetchImpl ?? fetch;
+    this.sleep =
+      opts.sleepMs ?? ((ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms)));
+  }
+
+  /**
+   * Idempotent upsert by email. Uses HubSpot's batch upsert endpoint with
+   * `idProperty=email`, which:
+   *   - creates a new contact when none has that email,
+   *   - merges into the existing contact otherwise,
+   *   - returns `new: true` when the row was just created.
+   *
+   * This is the right primitive for V1 because we receive leads from multiple
+   * sources (website, Meta, organic). A returning visitor on a different
+   * channel must not duplicate the HubSpot contact.
+   */
+  async upsertContact(input: UpsertContactInput): Promise<UpsertContactOutput> {
+    const properties: Record<string, string> = {
+      email: input.email,
+      ...(input.firstName ? { firstname: input.firstName } : {}),
+      ...(input.lastName ? { lastname: input.lastName } : {}),
+      ...(input.phone ? { phone: input.phone } : {}),
+      ...(input.properties ?? {}),
+    };
+
+    const body = {
+      inputs: [
+        {
+          idProperty: 'email',
+          id: input.email,
+          properties,
+        },
+      ],
+    };
+
+    const json = await this.request<{
+      results?: Array<{ id?: string; new?: boolean }>;
+    }>('POST', '/crm/v3/objects/contacts/batch/upsert', body);
+
+    const first = json.results?.[0];
+    if (!first?.id) {
+      throw new Error('HubSpot upsertContact: no result id in response');
+    }
+    return {
+      hubspotContactId: first.id,
+      isNew: Boolean(first.new),
+    };
+  }
+
+  async createDeal(input: CreateDealInput): Promise<CreateDealOutput> {
+    const properties: Record<string, string | number> = {
+      dealname: input.dealName,
+      ...(typeof input.amount === 'number' ? { amount: input.amount } : {}),
+      ...(input.pipeline ? { pipeline: input.pipeline } : {}),
+      ...(input.dealStage ? { dealstage: input.dealStage } : {}),
+      ...(input.productLine ? { product_line: input.productLine } : {}),
+      ...(input.properties ?? {}),
+    };
+
+    const json = await this.request<{ id?: string }>('POST', '/crm/v3/objects/deals', {
+      properties,
+    });
+    if (!json.id) {
+      throw new Error('HubSpot createDeal: no id in response');
+    }
+    return { hubspotDealId: json.id };
+  }
+
+  /**
+   * Associate a contact with a deal using HubSpot V3's default association.
+   * HubSpot V3 uses PUT for "default" (their term for the system-managed
+   * association type between two standard object types).
+   */
+  async associateContactDeal(contactId: string, dealId: string): Promise<void> {
+    await this.request<unknown>(
+      'PUT',
+      `/crm/v3/objects/contacts/${encodeURIComponent(contactId)}` +
+        `/associations/default/deals/${encodeURIComponent(dealId)}`,
+      null,
+    );
+  }
+
+  /**
+   * Resolve the default deal pipeline + the first stage in it (the "new" stage).
+   * Cached for the life of this client instance — pipelines rarely change.
+   */
+  async getDefaultDealPipelineAndStage(): Promise<DefaultPipelineAndStage> {
+    if (this.pipelineCache) return this.pipelineCache;
+
+    const json = await this.request<{
+      results?: Array<{
+        id: string;
+        label?: string;
+        displayOrder?: number;
+        stages?: Array<{ id: string; label?: string; displayOrder?: number }>;
+      }>;
+    }>('GET', '/crm/v3/pipelines/deals', null);
+
+    const pipelines = json.results ?? [];
+    if (pipelines.length === 0) {
+      throw new Error('HubSpot getDefaultDealPipelineAndStage: no pipelines returned');
+    }
+    // Pick the lowest displayOrder (== the "default" in HubSpot UI ordering).
+    const sortedPipelines = [...pipelines].sort(
+      (a, b) => (a.displayOrder ?? 0) - (b.displayOrder ?? 0),
+    );
+    const pipeline = sortedPipelines[0];
+    if (!pipeline) {
+      // Already guarded by pipelines.length above; defensive duplicate so the
+      // narrowed type carries through without a non-null assertion.
+      throw new Error('HubSpot getDefaultDealPipelineAndStage: no pipelines returned');
+    }
+    const stages = pipeline.stages ?? [];
+    if (stages.length === 0) {
+      throw new Error(
+        `HubSpot getDefaultDealPipelineAndStage: pipeline ${pipeline.id} has no stages`,
+      );
+    }
+    const sortedStages = [...stages].sort((a, b) => (a.displayOrder ?? 0) - (b.displayOrder ?? 0));
+    const firstStage = sortedStages[0];
+    if (!firstStage) {
+      throw new Error(
+        `HubSpot getDefaultDealPipelineAndStage: pipeline ${pipeline.id} has no stages`,
+      );
+    }
+
+    this.pipelineCache = {
+      pipelineId: pipeline.id,
+      newDealStageId: firstStage.id,
+    };
+    return this.pipelineCache;
+  }
+
+  /**
+   * Cheap health probe — fetches one contact. Returns `{healthy:true}` on any
+   * 2xx, `{healthy:false}` otherwise. Connection errors (ECONNREFUSED, DNS,
+   * timeouts) surface as `healthy:false` with a short detail.
+   */
+  async healthCheck(): Promise<{ healthy: boolean; detail?: string }> {
+    try {
+      await this.rawRequest('GET', '/crm/v3/objects/contacts?limit=1', null);
+      return { healthy: true };
+    } catch (err) {
+      const detail = err instanceof Error ? err.message.slice(0, 200) : 'unknown';
+      return { healthy: false, detail };
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Internals
+  // ---------------------------------------------------------------------------
+
+  /**
+   * One JSON request with retry on 429/5xx. Returns parsed JSON (or `{}` when
+   * the response had no body, e.g. associate). Throws `HubSpotApiError` on
+   * any non-2xx that survives the retry budget.
+   */
+  private async request<T>(method: string, path: string, body: unknown): Promise<T> {
+    let lastErr: unknown;
+
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      let res: Response;
+      try {
+        res = await this.rawRequest(method, path, body);
+      } catch (err) {
+        // Network-layer failure (DNS, connection refused, timeout). Retry if
+        // we have budget left; otherwise rethrow with a sanitized message.
+        lastErr = err;
+        if (attempt < MAX_ATTEMPTS) {
+          const wait = INITIAL_BACKOFF_MS * 2 ** (attempt - 1);
+          logger.warn(
+            { method, path, attempt, err: err instanceof Error ? err.message : 'unknown' },
+            'hubspot: network error, retrying',
+          );
+          await this.sleep(wait);
+          continue;
+        }
+        throw err instanceof Error
+          ? new Error(`HubSpot ${method} ${path} network error: ${err.message}`)
+          : new Error(`HubSpot ${method} ${path} network error`);
+      }
+
+      if (res.status >= 200 && res.status < 300) {
+        // 204 No Content + endpoints that return empty bodies (like associate).
+        const text = await res.text();
+        if (!text) return {} as T;
+        try {
+          return JSON.parse(text) as T;
+        } catch {
+          // Non-JSON 2xx is unexpected but not fatal — return empty object so
+          // callers downstream don't crash on a missing field.
+          return {} as T;
+        }
+      }
+
+      // Retryable: 429 + 5xx.
+      const retryable = res.status === 429 || res.status >= 500;
+      if (retryable && attempt < MAX_ATTEMPTS) {
+        const wait = INITIAL_BACKOFF_MS * 2 ** (attempt - 1);
+        logger.warn(
+          { method, path, status: res.status, attempt },
+          'hubspot: retryable status, backing off',
+        );
+        await this.sleep(wait);
+        continue;
+      }
+
+      // Non-retryable, OR retry budget exhausted. Build a PII-safe error.
+      const errBodyText = await this.safeReadText(res);
+      const parsed = this.tryParseErrorBody(errBodyText);
+      throw new HubSpotApiError({
+        method,
+        path,
+        status: res.status,
+        body: errBodyText,
+        code: parsed.code,
+        missingProperty: parsed.missingProperty,
+      });
+    }
+
+    // Unreachable — the loop always returns or throws — but TS needs it.
+    throw lastErr instanceof Error
+      ? lastErr
+      : new Error(`HubSpot ${method} ${path} failed after ${MAX_ATTEMPTS} attempts`);
+  }
+
+  private async rawRequest(method: string, path: string, body: unknown): Promise<Response> {
+    const url = `${this.baseUrl}${path}`;
+    const init: RequestInit = {
+      method,
+      headers: {
+        Authorization: `Bearer ${this.token}`,
+        ...(body !== null && body !== undefined ? { 'content-type': 'application/json' } : {}),
+        accept: 'application/json',
+      },
+      signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
+    };
+    if (body !== null && body !== undefined) {
+      init.body = JSON.stringify(body);
+    }
+    return this.fetchImpl(url, init);
+  }
+
+  private async safeReadText(res: Response): Promise<string> {
+    try {
+      return await res.text();
+    } catch {
+      return '';
+    }
+  }
+
+  /**
+   * Best-effort parse of HubSpot's error JSON. We pull two things:
+   *   - a short code/category for logs
+   *   - the name of a property HubSpot rejected as nonexistent
+   *
+   * HubSpot's typical body looks like:
+   *   {"status":"error","message":"Property values were not valid: ...",
+   *    "category":"VALIDATION_ERROR",
+   *    "errors":[{"message":"Property \"f16_lead_id\" does not exist", ...}]}
+   *
+   * The regex is conservative — failing to extract just leaves the field null.
+   */
+  private tryParseErrorBody(text: string): { code: string | null; missingProperty: string | null } {
+    if (!text) return { code: null, missingProperty: null };
+    let parsed: HubSpotErrorBody | null = null;
+    try {
+      parsed = JSON.parse(text) as HubSpotErrorBody;
+    } catch {
+      return { code: null, missingProperty: null };
+    }
+
+    const code = parsed.category ?? parsed.status ?? null;
+
+    // Look in the top-level message and each sub-error for the "does not
+    // exist" / "Property \"X\" does not exist" pattern.
+    const candidates: string[] = [];
+    if (parsed.message) candidates.push(parsed.message);
+    for (const e of parsed.errors ?? []) {
+      if (e.message) candidates.push(e.message);
+    }
+
+    for (const msg of candidates) {
+      const m =
+        msg.match(/Property\s+"([^"]+)"\s+does not exist/i) ??
+        msg.match(/property\s+([a-z0-9_]+)\s+does not exist/i);
+      if (m && m[1]) {
+        return { code, missingProperty: m[1] };
+      }
+    }
+
+    return { code, missingProperty: null };
+  }
+}

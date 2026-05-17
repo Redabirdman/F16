@@ -133,15 +133,19 @@ d('ingestLead (live)', () => {
     expect(ls[0]!.productLine).toBe('scooter');
     expect(ls[0]!.customerId).toBe(result.customerId);
 
-    // 1 LEAD.NEW agent_message correlated to the leadId.
+    // 2 LEAD.NEW agent_messages correlated to the leadId — one per
+    // consumer role in the M5.T2 fan-out (lead-scorer + hubspot-sync).
     const msgs = await db
       .select()
       .from(agentMessages)
       .where(eq(agentMessages.correlationId, result.leadId));
-    expect(msgs).toHaveLength(1);
-    expect(msgs[0]!.intent).toBe('LEAD.NEW');
-    expect(msgs[0]!.toRole).toBe('lead-scorer');
-    expect(msgs[0]!.fromRole).toBe('channel.intake');
+    expect(msgs).toHaveLength(2);
+    for (const m of msgs) {
+      expect(m.intent).toBe('LEAD.NEW');
+      expect(m.fromRole).toBe('channel.intake');
+    }
+    const roles = msgs.map((m) => m.toRole).sort();
+    expect(roles).toEqual(['hubspot-sync', 'lead-scorer']);
   });
 
   // -------------------------------------------------------------------------
@@ -244,11 +248,14 @@ d('ingestLead (live)', () => {
       productLine: 'scooter',
       phone: '0612345680',
     });
-    const [msg] = await db
+    const msgs = await db
       .select()
       .from(agentMessages)
       .where(eq(agentMessages.correlationId, result.leadId));
-    expect(msg!.priority).toBe(4);
+    expect(msgs).toHaveLength(2);
+    for (const m of msgs) {
+      expect(m.priority).toBe(4);
+    }
   });
 
   // -------------------------------------------------------------------------

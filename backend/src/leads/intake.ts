@@ -190,25 +190,37 @@ export async function ingestLead(db: Database, payload: LeadIntakePayload): Prom
   // 4. Emit LEAD.NEW. Priority 4 sits one slot above the default (5) — leads
   //    are time-sensitive (first-touch SLA) but not as urgent as inbound
   //    customer messages (which run at default).
-  const messageId = await sendMessage(
-    { db },
-    {
-      fromRole: 'channel.intake',
-      toRole: 'lead-scorer',
-      intent: 'LEAD.NEW',
-      payload: {
-        leadId: insertedLead.id,
-        source: payload.source,
-        ...(payload.sourceId ? { sourceId: payload.sourceId } : {}),
-        productLine: payload.productLine,
-        // The intent schema accepts `raw` as the audit blob — merge form
-        // answers + the source-payload there so the Scorer has one field.
-        ...(mergedRaw ? { raw: mergedRaw } : {}),
+  //
+  //    Fan-out: one row per consumer role. The `lead-scorer` reads the lead
+  //    for in-product follow-up; `hubspot-sync` (M5.T2) mirrors the lead into
+  //    the HubSpot CRM. Each consumer's `claimSpecific` filters by role, so
+  //    both rows hit the `lead` BullMQ queue without interfering. If a third
+  //    consumer joins later, append it here.
+  const fanoutRoles = ['lead-scorer', 'hubspot-sync'] as const;
+  const intentPayload = {
+    leadId: insertedLead.id,
+    source: payload.source,
+    ...(payload.sourceId ? { sourceId: payload.sourceId } : {}),
+    productLine: payload.productLine,
+    // The intent schema accepts `raw` as the audit blob — merge form answers
+    // + the source-payload there so consumers don't need a second DB hop.
+    ...(mergedRaw ? { raw: mergedRaw } : {}),
+  };
+  const messageIds: string[] = [];
+  for (const toRole of fanoutRoles) {
+    const id = await sendMessage(
+      { db },
+      {
+        fromRole: 'channel.intake',
+        toRole,
+        intent: 'LEAD.NEW',
+        payload: intentPayload,
+        correlationId: insertedLead.id,
+        priority: 4,
       },
-      correlationId: insertedLead.id,
-      priority: 4,
-    },
-  );
+    );
+    messageIds.push(id);
+  }
 
   // Log without payload — `formAnswers` may contain plaintext PII the
   // upstream form happened to include (DOB, address, etc.).
@@ -219,7 +231,8 @@ export async function ingestLead(db: Database, payload: LeadIntakePayload): Prom
       source: payload.source,
       productLine: payload.productLine,
       dedup: customer.dedup,
-      messageId,
+      messageIds,
+      fanout: fanoutRoles,
     },
     'lead ingested',
   );
