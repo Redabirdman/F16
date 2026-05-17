@@ -6,3 +6,4 @@ export * from './customers.js';
 export * from './leads.js';
 export * from './conversation-turns.js';
 export * from './quotes.js';
+export * from './ads.js';
