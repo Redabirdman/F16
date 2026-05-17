@@ -1,3 +1,7 @@
-// Schema barrel. Tables are added by M2.T3+.
-// When tables exist, re-export them all from here so drizzle.config.ts gets the full schema.
-export {};
+// Schema barrel — exported into the drizzle client as `db.query.<table>`
+// and consumed by drizzle-kit (see drizzle.config.ts) to generate migrations.
+// Order is not significant; circular FKs are resolved by drizzle at build.
+export * from './_enums.js';
+export * from './customers.js';
+export * from './leads.js';
+export * from './conversation-turns.js';

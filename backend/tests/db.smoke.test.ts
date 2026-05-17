@@ -15,10 +15,13 @@ describe('db client factory', () => {
     expect(instance.query).toBeDefined();
   });
 
-  it('exposes the schema barrel (importable, currently empty)', () => {
+  it('exposes the schema barrel with M2.T3 tables', () => {
     expect(schema).toBeDefined();
-    // No tables yet — M2.T3+ will populate this.
-    expect(Object.keys(schema).filter((k) => k !== 'default')).toEqual([]);
+    const keys = Object.keys(schema).filter((k) => k !== 'default');
+    // Core tables wired up by M2.T3. Add more here as M2.T4+ lands.
+    for (const t of ['customers', 'customerFacts', 'leads', 'conversationTurns']) {
+      expect(keys).toContain(t);
+    }
   });
 });
 
