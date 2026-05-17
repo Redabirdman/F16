@@ -15,9 +15,17 @@ import { Redis } from 'ioredis';
 import { sql, eq, and } from 'drizzle-orm';
 import type { Worker } from 'bullmq';
 import { createDb, type Database } from '../../src/db/index.js';
-import { agentMessages, leads } from '../../src/db/schema/index.js';
+import { agentMessages, leads, conversationTurns } from '../../src/db/schema/index.js';
 import { agentsState } from '../../src/db/schema/agents-state.js';
 import { insertCustomer } from '../../src/db/repositories/customers.js';
+import { registerChannel, __resetChannelsForTests } from '../../src/channels/registry.js';
+import type {
+  ChannelCapabilities,
+  ChannelId,
+  ConversationChannel,
+  DeliveryReceipt,
+  SendOptions,
+} from '../../src/channels/types.js';
 import { sendMessage } from '../../src/messaging/dispatcher.js';
 import {
   listRunning,
@@ -75,6 +83,33 @@ async function waitFor(
   throw new Error(`waitFor: predicate not true within ${timeoutMs}ms`);
 }
 
+/**
+ * Stub channel — records every send. Used by test 5 because the real Sales
+ * Agent (M6.T3) now calls `sendViaChannel` on LEAD.SCORED, so the channel
+ * adapter must exist.
+ */
+class StubChannel implements ConversationChannel {
+  readonly id: ChannelId;
+  readonly sends: SendOptions[] = [];
+  private _seq = 0;
+  constructor(id: ChannelId) {
+    this.id = id;
+  }
+  capabilities(): ChannelCapabilities {
+    return { interactive: true, voice: false, attachments: true, markdown: true };
+  }
+  async send(opts: SendOptions): Promise<DeliveryReceipt> {
+    this.sends.push(opts);
+    this._seq += 1;
+    return {
+      channel: this.id,
+      externalId: `stub-${this.id}-${this._seq}`,
+      acceptedAt: new Date('2026-05-17T12:00:00.000Z'),
+      raw: { stub: true },
+    };
+  }
+}
+
 /** Stub callClaude used by the e2e lead-scorer flow. */
 function makeStub(resp: string): typeof callClaude {
   return (async (input: Parameters<typeof callClaude>[0]) => {
@@ -109,6 +144,7 @@ d('sales-spawn orchestrator (live)', () => {
     __resetForTests();
     __resetAgentRegistryForTests();
     __resetSalesAgentRegistrationForTests();
+    __resetChannelsForTests();
 
     db = createDb(pgUrl!);
     await db.execute(sql`TRUNCATE TABLE customers RESTART IDENTITY CASCADE`);
@@ -144,6 +180,7 @@ d('sales-spawn orchestrator (live)', () => {
     __resetForTests();
     __resetAgentRegistryForTests();
     __resetSalesAgentRegistrationForTests();
+    __resetChannelsForTests();
   });
 
   // -------------------------------------------------------------------------
@@ -407,12 +444,16 @@ d('sales-spawn orchestrator (live)', () => {
   // 5. End-to-end: LEAD.NEW -> lead-scorer -> orchestrator spawns -> instance
   //    consumes its addressed LEAD.SCORED row.
   // -------------------------------------------------------------------------
-  it('test 5 (end-to-end): full pipeline LEAD.NEW -> scored -> spawn -> instance handles message', async () => {
+  it('test 5 (end-to-end): full pipeline LEAD.NEW -> scored -> spawn -> instance sends opener', async () => {
     const stub = makeStub(
       '{"score":88,"channel":"whatsapp","opening":"Bonjour Eve, c\'est Assuryal.","rationale":"hot"}',
     );
     leadScorerWorker = startLeadScorerWorker({ db, callClaudeImpl: stub });
     orchestratorWorker = startSalesSpawnOrchestrator({ db });
+    // The Sales Agent (M6.T3) sends the welcome opener via the channel
+    // layer on LEAD.SCORED — register a stub so the send succeeds.
+    const wa = new StubChannel('whatsapp');
+    registerChannel(wa);
 
     const customer = await insertCustomer(db, {
       fullName: 'Eve E2E',
@@ -444,7 +485,9 @@ d('sales-spawn orchestrator (live)', () => {
     );
 
     // The instance should come online (orchestrator spawns it) and then
-    // consume the LEAD.SCORED message addressed to it.
+    // consume the LEAD.SCORED message addressed to it — wait for the
+    // handler `result` rather than just `consumedAt` (the latter is set
+    // when the row is claimed, before the handler finishes running).
     await waitFor(async () => {
       const rows = await db
         .select()
@@ -454,7 +497,7 @@ d('sales-spawn orchestrator (live)', () => {
         (r) =>
           r.intent === 'LEAD.SCORED' && r.toRole === 'sales-agent' && r.toInstance === instanceId,
       );
-      return toInstance?.consumedAt != null;
+      return toInstance?.result != null;
     }, 10_000);
 
     // Lead persisted with score.
@@ -467,8 +510,8 @@ d('sales-spawn orchestrator (live)', () => {
     expect(inst).toBeDefined();
     expect(inst!.isRunning()).toBe(true);
 
-    // The instance-addressed LEAD.SCORED row was consumed by the placeholder
-    // and returned {placeholder:true}.
+    // The instance-addressed LEAD.SCORED row was consumed by the real M6.T3
+    // handler: it called sendViaChannel and wrote a conversation_turns row.
     const rows = await db
       .select()
       .from(agentMessages)
@@ -478,9 +521,21 @@ d('sales-spawn orchestrator (live)', () => {
         r.intent === 'LEAD.SCORED' && r.toRole === 'sales-agent' && r.toInstance === instanceId,
     )!;
     expect(toInstance.consumedAt).not.toBeNull();
-    const placeholderResult = toInstance.result as Record<string, unknown>;
-    expect(placeholderResult['placeholder']).toBe(true);
-    expect(placeholderResult['intent']).toBe('LEAD.SCORED');
+    const handlerResult = toInstance.result as Record<string, unknown>;
+    expect(handlerResult['sent']).toBe(true);
+    expect(handlerResult['channel']).toBe('whatsapp');
+    expect(handlerResult['intent']).toBe('LEAD.SCORED');
+
+    // The opener landed on the channel verbatim AND in conversation_turns.
+    expect(wa.sends).toHaveLength(1);
+    expect(wa.sends[0]!.body).toEqual([{ type: 'text', text: "Bonjour Eve, c'est Assuryal." }]);
+    const turns = await db
+      .select()
+      .from(conversationTurns)
+      .where(eq(conversationTurns.leadId, leadId));
+    expect(turns).toHaveLength(1);
+    expect(turns[0]!.direction).toBe('outbound');
+    expect(turns[0]!.content).toBe("Bonjour Eve, c'est Assuryal.");
 
     // The orchestrator-addressed row was also consumed with spawned:true.
     const toOrch = rows.find(
