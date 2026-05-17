@@ -5,6 +5,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { Server } from 'node:http';
 import type { HealthResponse } from './types.js';
 import { logger } from './logger.js';
+import type { Database } from './db/index.js';
+import { buildWhatsAppWebhook } from './channels/whatsapp/webhook.js';
 
 /**
  * Read package.json once at module load to surface the running version on /health.
@@ -18,17 +20,54 @@ const pkg = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf8
 
 const startedAt = Date.now();
 
-export const app = new Hono();
+export interface BuildAppOptions {
+  /**
+   * Database handle for routes that need persistence. Optional so the simple
+   * `/health` server can be booted without a DB connection (helpful for
+   * smoke tests + early-boot health probes before the schema is ready).
+   */
+  db?: Database;
+  /** Shared HMAC secret used to verify the WAHA inbound webhook. */
+  wahaHmacSecret?: string;
+}
 
-app.get('/health', (c) => {
-  const body: HealthResponse = {
-    ok: true,
-    service: 'f16-backend',
-    version: pkg.version,
-    uptime: Date.now() - startedAt,
-  };
-  return c.json(body, 200);
-});
+/**
+ * Build a Hono app wired with the routes available given the provided
+ * dependencies. Keeping this as a factory (instead of mutating a module-level
+ * `app`) lets tests construct a fresh app per case with a mocked DB and a
+ * known HMAC secret without leaking state between files.
+ */
+export function buildApp(opts: BuildAppOptions = {}): Hono {
+  const app = new Hono();
+
+  app.get('/health', (c) => {
+    const body: HealthResponse = {
+      ok: true,
+      service: 'f16-backend',
+      version: pkg.version,
+      uptime: Date.now() - startedAt,
+    };
+    return c.json(body, 200);
+  });
+
+  if (opts.db) {
+    // Mount channel webhooks only when we have a DB to write to. Without
+    // one, the `/webhooks/waha` route would just 500 on every request — a
+    // missing route is a clearer failure mode.
+    const wahaApp = buildWhatsAppWebhook({
+      db: opts.db,
+      // exactOptionalPropertyTypes: only set the key when defined.
+      ...(opts.wahaHmacSecret ? { hmacSecret: opts.wahaHmacSecret } : {}),
+    });
+    app.route('/', wahaApp);
+  }
+
+  return app;
+}
+
+// Default app instance — bare /health only. Tests and `start()` build their
+// own via `buildApp({ db, ... })` once the DB is available.
+export const app = buildApp();
 
 /**
  * Start the HTTP server. Lazily imports @hono/node-server and dotenv-safe only when
@@ -44,7 +83,16 @@ export async function start(port: number = Number(process.env.PORT ?? 3001)): Pr
   dotenvSafe.default.config();
   const { serve } = await import('@hono/node-server');
 
-  const server = serve({ fetch: app.fetch, port }) as Server;
+  // Wire the DB-backed app once env is loaded. `db()` is the lazy singleton
+  // from `./db/index.ts` — first call validates DATABASE_URL.
+  const { db } = await import('./db/index.js');
+  const wahaSecret = process.env['WAHA_HMAC_SECRET'];
+  const liveApp = buildApp({
+    db: db(),
+    ...(wahaSecret ? { wahaHmacSecret: wahaSecret } : {}),
+  });
+
+  const server = serve({ fetch: liveApp.fetch, port }) as Server;
   logger.info({ port }, 'f16-backend listening');
 
   const shutdown = (signal: NodeJS.Signals): void => {

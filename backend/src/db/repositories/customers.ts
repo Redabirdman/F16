@@ -58,6 +58,10 @@ export async function insertCustomer(db: Database, input: CustomerInput): Promis
       fullName: fullNameCt,
       email: encryptPII(input.email ?? null),
       phone: encryptPII(input.phone ?? null),
+      // Mirror the IBAN pattern: encrypt the phone for retrieval, store an
+      // HMAC alongside so the inbound webhook can match repeat senders
+      // (M4.T3) without scanning + decrypting every row.
+      phoneHash: hashPII(input.phone ?? null),
       address: encryptPII(addressJson),
       ibanCiphertext: encryptPII(input.iban ?? null),
       ibanHash: hashPII(input.iban ?? null),
@@ -90,6 +94,22 @@ export async function getCustomerByIban(
   const hash = hashPII(iban);
   if (!hash) return null;
   const [row] = await db.select().from(customers).where(eq(customers.ibanHash, hash)).limit(1);
+  if (!row) return null;
+  return decryptCustomerRow(row);
+}
+
+/**
+ * Fetch a customer by E.164 phone — uses the dedup hash, never decrypts.
+ * The inbound WhatsApp webhook (M4.T3) is the primary caller: it needs to
+ * map a sender to an existing customer before falling back to a stub create.
+ */
+export async function getCustomerByPhone(
+  db: Database,
+  e164: string,
+): Promise<CustomerOutput | null> {
+  const hash = hashPII(e164);
+  if (!hash) return null;
+  const [row] = await db.select().from(customers).where(eq(customers.phoneHash, hash)).limit(1);
   if (!row) return null;
   return decryptCustomerRow(row);
 }

@@ -6,6 +6,9 @@
  *       full_name, email, phone, address (JSON-stringified), iban_ciphertext
  *   - HMAC-SHA256 (43-char base64url) for dedup without decryption:
  *       iban_hash    — UNIQUE; the lookup key for IBAN dedup at intake
+ *       phone_hash   — UNIQUE (partial); inbound-channel sender dedup so the
+ *                      WhatsApp webhook can match repeat senders without
+ *                      decrypting every customer row (M4.T3).
  *   - Plaintext jsonb (design treats as "lower sensitivity", needs to be
  *     queryable for matching/segmentation):
  *       vehicle, driver, preferences, consent
@@ -46,6 +49,9 @@ export const customers = pgTable(
     fullName: text('full_name').notNull(),
     email: text('email'),
     phone: text('phone'),
+    // Stable HMAC of the E.164 phone for dedup at intake (M4.T3). Nullable —
+    // historical rows + customers we only know by IBAN/email won't have one.
+    phoneHash: varchar('phone_hash', { length: 43 }),
     address: text('address'), // encrypted JSON string
 
     // --- IBAN: ciphertext for decrypt, hash for dedup ---
@@ -69,6 +75,11 @@ export const customers = pgTable(
   (t) => [
     // IBAN dedup at intake — unique only when present (partial via NULLS DISTINCT default).
     uniqueIndex('customers_iban_hash_uniq').on(t.ibanHash),
+    // Phone dedup for inbound-channel sender match (M4.T3). Partial — we
+    // never want to collapse the NULL bucket into a single customer.
+    uniqueIndex('customers_phone_hash_uniq')
+      .on(t.phoneHash)
+      .where(sql`${t.phoneHash} IS NOT NULL`),
     // Default leads/list ordering — recent first.
     index('customers_created_at_idx').on(sql`${t.createdAt} DESC`),
     // HubSpot lookup (sync flows match by external ID).

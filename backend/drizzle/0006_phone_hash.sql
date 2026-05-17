@@ -1,0 +1,2 @@
+ALTER TABLE "customers" ADD COLUMN "phone_hash" varchar(43);--> statement-breakpoint
+CREATE UNIQUE INDEX "customers_phone_hash_uniq" ON "customers" USING btree ("phone_hash") WHERE "customers"."phone_hash" IS NOT NULL;

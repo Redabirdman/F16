@@ -43,6 +43,13 @@
       "when": 1779024688162,
       "tag": "0005_public_the_hand",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1779028406515,
+      "tag": "0006_phone_hash",
+      "breakpoints": true
     }
   ]
 }
