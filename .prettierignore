@@ -9,3 +9,4 @@ pipecat
 .vite
 .cache
 *.tsbuildinfo
+infra/

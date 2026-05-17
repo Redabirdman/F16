@@ -36,8 +36,22 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Install Playwright browsers (stagehand needs Chromium)
+      - name: Cache Playwright browsers
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('stagehand/package.json') }}
+          restore-keys: |
+            playwright-${{ runner.os }}-
+
+      - name: Install Playwright browsers
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
         run: pnpm --filter @f16/stagehand exec playwright install --with-deps chromium
+
+      - name: Install Playwright system deps (always, even on cache hit)
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        run: pnpm --filter @f16/stagehand exec playwright install-deps chromium
 
       - name: Lint
         run: pnpm lint
@@ -71,6 +85,16 @@ jobs:
 
       - name: Install uv
         run: pip install uv
+
+      - name: Cache uv venv + cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/uv
+            pipecat/.venv
+          key: uv-${{ runner.os }}-${{ hashFiles('pipecat/pyproject.toml') }}
+          restore-keys: |
+            uv-${{ runner.os }}-
 
       - name: Create venv and install deps
         run: |

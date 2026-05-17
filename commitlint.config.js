@@ -18,6 +18,7 @@ export default {
         'ci',
         'tooling',
         'repo',
+        'release',
       ],
     ],
     // Body / footer line length is noisy for paste-in CI logs; relax.
