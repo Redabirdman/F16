@@ -29,6 +29,7 @@
     "db:studio": "drizzle-kit studio",
     "seed:dev": "tsx scripts/seed-dev.ts",
     "seed:dev:confirm": "tsx scripts/seed-dev.ts --yes",
+    "ingest:knowledge": "tsx scripts/ingest-knowledge.ts",
     "test:e2e:db": "vitest run tests/e2e"
   },
   "dependencies": {
