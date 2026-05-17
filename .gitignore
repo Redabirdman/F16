@@ -26,3 +26,21 @@ __pycache__/
 
 # Playwright / Stagehand
 playwright-report/
+
+# Build caches
+*.tsbuildinfo
+.cache/
+.vite/
+
+# Local-only overrides
+*.local
+
+# SQLite scratch (Drizzle dev)
+*.sqlite
+*.sqlite-journal
+*.db
+
+# JetBrains personal config
+.idea/
+*.swp
+*.swo

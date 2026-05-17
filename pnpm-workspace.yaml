@@ -1,3 +1,6 @@
+# Only TypeScript/Node workspaces are listed here.
+# pipecat/ is a Python workspace (managed by uv/pip, not pnpm).
+# infra/  is compose files + docs only (no package.json).
 packages:
   - backend
   - admin
