@@ -1,62 +1,60 @@
 /**
- * Claude wrapper — F16 M3.T5.
+ * Claude wrapper — F16 M3.T5 / M6.T1.
  *
- * Thin single-turn text-in / text-out facade over `@anthropic-ai/claude-agent-sdk`.
- * Tool use, sub-agents, MCP servers, and full agent loops land in M3.T6+ / M6;
- * this module exists so M3 agents can already invoke the right model tier with
- * proper prompt caching and predictable structured outcomes.
+ * Thin single-turn text-in / text-out facade over the raw `@anthropic-ai/sdk`.
  *
- * SDK shape (Agent SDK 0.3.143):
- *   - `query({ prompt, options })` returns an async iterable of `SDKMessage`s.
- *   - The Agent SDK spawns the bundled `claude` binary as a subprocess and
- *     streams messages back over stdout. To keep that subprocess inert (no
- *     filesystem writes, no permission prompts, no Claude.md auto-loading) we
- *     pin `settingSources: []`, `tools: []`, and `permissionMode: 'bypassPermissions'`.
- *   - Prompt-caching uses `systemPrompt: string[]` with the SDK-exported sentinel
- *     `SYSTEM_PROMPT_DYNAMIC_BOUNDARY` to split the cacheable prefix from the
- *     per-turn dynamic suffix.
- *   - Usage stats (input/output/cache tokens) arrive on the terminal
- *     `SDKResultSuccess` message.
+ * Why the raw SDK and not `@anthropic-ai/claude-agent-sdk` (M6.T1 swap):
+ *   - The Agent SDK spawns the bundled `claude` CLI as a subprocess per call
+ *     (~200-500ms cold start) and ignores `max_tokens` (advisory only). M5.T3
+ *     surfaced this — a Haiku call with maxTokens=300 burned 2291 output tokens.
+ *   - The Agent SDK also injects ~95 tokens of fresh per-call dynamic content,
+ *     fighting prompt caching.
+ *   - The raw SDK is pure HTTP — no subprocess, `max_tokens` is a real hard
+ *     cap, and per-block `cache_control: { type: 'ephemeral' }` works natively
+ *     against the same Anthropic endpoints, billing, and caching pricing.
+ *
+ * Public surface (`callClaude`, `ClaudeCallInput`, `ClaudeCallStructuredOutcome`)
+ * is preserved verbatim so downstream callers (Lead Scorer M5.T3, future
+ * Sales Agent M6.T3) do not need to change.
  *
  * R2 routing: this wrapper goes Anthropic-direct (the SDK reads `ANTHROPIC_API_KEY`
  * from the env). OpenRouter is reserved for non-Claude calls (e.g. Nano Banana Pro
  * image gen in M12), because OpenRouter does not preserve prompt caching.
  */
-import {
-  query,
-  SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
-  type Options as QueryOptions,
-  type SDKMessage,
-  type SDKResultSuccess,
-} from '@anthropic-ai/claude-agent-sdk';
+import Anthropic from '@anthropic-ai/sdk';
+import type {
+  Message,
+  MessageParam,
+  TextBlockParam,
+} from '@anthropic-ai/sdk/resources/messages.mjs';
 import type { ModelTier } from '../agents/base.js';
 import { modelIdForTier } from './router.js';
-import type { SystemFragment } from './cache.js';
+import { buildSystemPrompt, type SystemFragment } from './cache.js';
 import { logger } from '../logger.js';
 
 export interface ClaudeCallInput {
   tier: ModelTier;
-  /** Plain-string system prompt — mutually exclusive with `systemFragments`. */
+  /** Plain-string system prompt — combinable with `systemFragments`. */
   systemPrompt?: string;
   /**
-   * Ordered fragments with cache markers. The last fragment marked `cache: true`
-   * becomes the cache breakpoint; everything before is cached, everything after
-   * is dynamic per-turn content.
+   * Ordered fragments with cache markers. The LAST fragment marked
+   * `cache: true` carries the `cache_control` breakpoint; everything before
+   * it sits inside the implicitly cached prefix; everything after it is
+   * dynamic per-turn content.
    */
   systemFragments?: readonly SystemFragment[];
   userPrompt: string;
   /**
-   * Cap on output tokens. The Agent SDK does not expose a direct max_tokens
-   * knob, so this maps to `maxTurns: 1` plus a `maxBudgetUsd` derived from the
-   * tier's output price. For M3.T5 this is purely advisory — the live tests
-   * keep prompts short, so a single turn produces ≤ this many tokens in practice.
+   * Hard cap on output tokens. With the raw SDK this is the real Anthropic
+   * `max_tokens` knob (unlike the Agent SDK, where it was advisory only).
+   * Defaults to 1024 when omitted.
    */
   maxTokens?: number;
   /** When true, returns a structured outcome object. When false (default), returns just the text. */
   structured?: boolean;
   /**
-   * Optional AbortSignal — pass through to cancel mid-call. The SDK accepts an
-   * `AbortController`; we adapt the signal here.
+   * Optional AbortSignal — forwarded to the SDK request. The raw SDK accepts
+   * `signal` directly so no AbortController adapter is needed.
    */
   signal?: AbortSignal;
   /** Optional log context — never sent to the model. */
@@ -71,7 +69,11 @@ export interface ClaudeCallStructuredOutcome {
   outputTokens: number;
   cacheReadInputTokens: number;
   cacheCreationInputTokens: number;
-  /** Total cost in USD, as reported by the SDK's result message. */
+  /**
+   * Total cost in USD. The raw SDK does not report this directly; we report
+   * 0 here so the shape stays stable for callers. Cost is best derived from
+   * token usage × tier price tables at the call site.
+   */
   costUsd: number;
   /** `'end_turn'`, `'max_tokens'`, `'stop_sequence'`, `'tool_use'`, or null. */
   stopReason: string | null;
@@ -80,87 +82,91 @@ export interface ClaudeCallStructuredOutcome {
 }
 
 /**
- * Compose the SDK's `systemPrompt` argument from a plain string or cache-aware
- * fragments. Returns `undefined` if there is no system content at all.
+ * Lazily-constructed singleton Anthropic client. Re-created the first time
+ * `callClaude` runs after `__setClaudeClientForTests(null)` resets it.
  */
-function composeSystemPrompt(
-  systemPrompt: string | undefined,
-  systemFragments: readonly SystemFragment[] | undefined,
-): string | string[] | undefined {
-  if (systemFragments && systemFragments.length > 0) {
-    // Walk fragments; insert SYSTEM_PROMPT_DYNAMIC_BOUNDARY right after the last
-    // cached fragment. Everything up to and including the cached fragment is the
-    // cacheable prefix; everything after the boundary is dynamic.
-    let lastCacheIdx = -1;
-    systemFragments.forEach((f, i) => {
-      if (f.cache) lastCacheIdx = i;
-    });
+let _client: Anthropic | null = null;
 
-    const out: string[] = [];
-    systemFragments.forEach((f, i) => {
-      out.push(f.text);
-      // Insert the boundary AFTER the last cached fragment (only if there are
-      // dynamic fragments after it; otherwise the whole prompt is cacheable and
-      // the boundary adds nothing).
-      if (i === lastCacheIdx && i < systemFragments.length - 1) {
-        out.push(SYSTEM_PROMPT_DYNAMIC_BOUNDARY);
-      }
-    });
+/** Minimal contract we need from the SDK at runtime — kept narrow so tests can stub it. */
+interface AnthropicLike {
+  messages: {
+    create: (
+      req: Parameters<Anthropic['messages']['create']>[0],
+    ) => Promise<Awaited<ReturnType<Anthropic['messages']['create']>>>;
+  };
+}
 
-    // If a plain `systemPrompt` was also supplied, append it as a final dynamic block.
-    if (systemPrompt) {
-      // If there's no boundary yet (i.e. nothing was marked cacheable), there's
-      // nothing to cache — fall through and just join with the dynamic prompt.
-      if (lastCacheIdx === -1) {
-        out.push(systemPrompt);
-      } else {
-        // Ensure a boundary separates cache from this trailing dynamic content.
-        if (!out.includes(SYSTEM_PROMPT_DYNAMIC_BOUNDARY)) {
-          out.push(SYSTEM_PROMPT_DYNAMIC_BOUNDARY);
-        }
-        out.push(systemPrompt);
-      }
-    }
-
-    return out;
+function getClient(): AnthropicLike {
+  if (_client) return _client;
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    throw new Error(
+      'ANTHROPIC_API_KEY is not set — required for callClaude. Set it in the environment.',
+    );
   }
-  if (systemPrompt && systemPrompt.length > 0) return systemPrompt;
-  return undefined;
+  _client = new Anthropic({ apiKey });
+  return _client;
 }
 
 /**
- * Run a single Claude completion via the Agent SDK.
+ * Test-only seam. Lets unit tests inject a stub Anthropic-like client so the
+ * code path can be exercised without an API key or network call. Pass `null`
+ * to reset back to the lazily-constructed real client.
+ *
+ * Typed as `unknown` so tests can hand in minimal stub objects that only
+ * implement the surface `callClaude` actually touches (`messages.create`).
+ */
+export function __setClaudeClientForTests(client: unknown): void {
+  _client = client as Anthropic | null;
+}
+
+/**
+ * Compose the request's `system` field. The raw SDK accepts a plain string OR
+ * an array of `TextBlockParam`s. We always emit blocks when we have either
+ * fragments OR a mix of fragments + plain prompt, so cache_control can land on
+ * the right block. Returns `undefined` if there is no system content at all.
+ */
+function composeSystemBlocks(
+  systemPrompt: string | undefined,
+  systemFragments: readonly SystemFragment[] | undefined,
+): TextBlockParam[] | undefined {
+  const blocks: TextBlockParam[] = [];
+
+  // A plain string prompt becomes the first block (no cache_control). When
+  // combined with fragments, this lets callers put a tiny role preamble in
+  // front of a long cached rubric without touching cache.ts.
+  if (systemPrompt && systemPrompt.length > 0) {
+    blocks.push({ type: 'text', text: systemPrompt });
+  }
+
+  if (systemFragments && systemFragments.length > 0) {
+    // buildSystemPrompt already returns `TextBlockParam`-shaped blocks with
+    // cache_control on the LAST fragment marked `cache: true`. No translation
+    // needed for the raw SDK.
+    for (const block of buildSystemPrompt(systemFragments)) {
+      blocks.push(block as TextBlockParam);
+    }
+  }
+
+  return blocks.length > 0 ? blocks : undefined;
+}
+
+/**
+ * Run a single Claude completion via the raw Anthropic SDK.
  *
  * Returns the assistant text (default) or a structured outcome with usage
- * stats when `structured: true`. Throws if the SDK reports an error result.
+ * stats when `structured: true`. Throws on transport / API errors — the SDK
+ * surfaces these as typed exceptions, no result-shape inspection needed.
  */
 export async function callClaude(
   input: ClaudeCallInput,
 ): Promise<string | ClaudeCallStructuredOutcome> {
   const modelId = modelIdForTier(input.tier);
-  const systemPrompt = composeSystemPrompt(input.systemPrompt, input.systemFragments);
+  const system = composeSystemBlocks(input.systemPrompt, input.systemFragments);
 
-  // Adapt AbortSignal → AbortController (SDK option).
-  let abortController: AbortController | undefined;
-  if (input.signal) {
-    abortController = new AbortController();
-    if (input.signal.aborted) abortController.abort();
-    else input.signal.addEventListener('abort', () => abortController?.abort(), { once: true });
-  }
+  const messages: MessageParam[] = [{ role: 'user', content: input.userPrompt }];
 
-  // Lock the subprocess down to a single inert turn. The SDK still spawns the
-  // bundled `claude` binary; these flags keep it from loading user/project
-  // settings, prompting for permissions, or invoking built-in tools.
-  const options: QueryOptions = {
-    model: modelId,
-    ...(systemPrompt !== undefined ? { systemPrompt } : {}),
-    maxTurns: 1,
-    tools: [],
-    settingSources: [],
-    permissionMode: 'bypassPermissions',
-    allowDangerouslySkipPermissions: true,
-    ...(abortController ? { abortController } : {}),
-  };
+  const maxTokens = input.maxTokens ?? 1024;
 
   const startedAt = Date.now();
   logger.debug(
@@ -168,41 +174,17 @@ export async function callClaude(
     'claude.call.start',
   );
 
-  let textOut = '';
-  let result: SDKResultSuccess | undefined;
-  let errorResult: { subtype: string; message?: string } | undefined;
-
+  let resp: Message;
   try {
-    for await (const msg of query({
-      prompt: input.userPrompt,
-      options,
-    }) as AsyncIterable<SDKMessage>) {
-      if (msg.type === 'assistant') {
-        // The assistant message holds a BetaMessage with a `content` array.
-        // Each content block is either {type:'text', text} or {type:'tool_use', ...}.
-        // We disabled tools, so only text is expected.
-        const content = msg.message.content;
-        if (Array.isArray(content)) {
-          for (const block of content) {
-            if (block.type === 'text' && typeof block.text === 'string') {
-              textOut += block.text;
-            }
-          }
-        }
-      } else if (msg.type === 'result') {
-        if (msg.subtype === 'success') {
-          result = msg;
-        } else {
-          const errMsg = (msg as { result?: string }).result;
-          errorResult =
-            errMsg !== undefined
-              ? { subtype: msg.subtype, message: errMsg }
-              : { subtype: msg.subtype };
-        }
-      }
-      // Other message types (system init, status, partial assistant) are ignored
-      // for M3.T5 — they're observability noise for a single-turn text call.
-    }
+    // We never pass `stream: true`, so the SDK returns a `Message` (not a
+    // `Stream<...>`). The cast narrows the union for downstream code.
+    resp = (await getClient().messages.create({
+      model: modelId,
+      max_tokens: maxTokens,
+      ...(system !== undefined ? { system } : {}),
+      messages,
+      ...(input.signal ? { signal: input.signal } : {}),
+    })) as Message;
   } catch (err) {
     logger.error(
       {
@@ -216,25 +198,29 @@ export async function callClaude(
     throw err;
   }
 
-  if (errorResult) {
-    throw new Error(`claude.call.failed: ${errorResult.subtype} ${errorResult.message ?? ''}`);
-  }
-  if (!result) {
-    throw new Error('claude.call.failed: no result message received');
+  // Aggregate text from response.content blocks. Tool use is out of scope for
+  // M6.T1 — M6.T5 will extend this.
+  let textOut = '';
+  for (const block of resp.content) {
+    if (block.type === 'text') textOut += block.text;
   }
 
-  const usage = result.usage;
+  const usage = resp.usage;
+  const inputTokens = usage.input_tokens;
+  const outputTokens = usage.output_tokens;
+  const cacheReadInputTokens = usage.cache_read_input_tokens ?? 0;
+  const cacheCreationInputTokens = usage.cache_creation_input_tokens ?? 0;
   const durationMs = Date.now() - startedAt;
 
   logger.debug(
     {
       tier: input.tier,
       model: modelId,
-      inputTokens: usage.input_tokens,
-      outputTokens: usage.output_tokens,
-      cacheReadInputTokens: usage.cache_read_input_tokens,
-      cacheCreationInputTokens: usage.cache_creation_input_tokens,
-      costUsd: result.total_cost_usd,
+      inputTokens,
+      outputTokens,
+      cacheReadInputTokens,
+      cacheCreationInputTokens,
+      stopReason: resp.stop_reason,
       durationMs,
       ...(input.logContext ?? {}),
     },
@@ -246,12 +232,14 @@ export async function callClaude(
       text: textOut,
       model: modelId,
       tier: input.tier,
-      inputTokens: usage.input_tokens,
-      outputTokens: usage.output_tokens,
-      cacheReadInputTokens: usage.cache_read_input_tokens,
-      cacheCreationInputTokens: usage.cache_creation_input_tokens,
-      costUsd: result.total_cost_usd,
-      stopReason: result.stop_reason,
+      inputTokens,
+      outputTokens,
+      cacheReadInputTokens,
+      cacheCreationInputTokens,
+      // Cost is not reported by the raw SDK. Callers that need it should
+      // derive from tokens × tier price tables.
+      costUsd: 0,
+      stopReason: resp.stop_reason,
       durationMs,
     };
   }

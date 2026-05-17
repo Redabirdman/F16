@@ -88,6 +88,12 @@ d('callClaude (live)', () => {
     // And the cache read dominates: most of the prefix is re-used on call 2,
     // far more than any fresh per-turn metadata.
     expect(call2.cacheReadInputTokens).toBeGreaterThan(call2.cacheCreationInputTokens);
+    // M6.T1 swap (raw @anthropic-ai/sdk): the Agent SDK used to inject ~95
+    // tokens of fresh dynamic content per call, which fought caching. With
+    // the raw SDK there is no such injection — call 2 should write essentially
+    // nothing new to the cache. We allow a small slack window (<50 tokens) for
+    // Anthropic-side variance.
+    expect(call2.cacheCreationInputTokens).toBeLessThan(50);
     // Sanity: both calls hit the correct model.
     expect(call1.model).toBe('claude-sonnet-4-6');
     expect(call2.model).toBe('claude-sonnet-4-6');

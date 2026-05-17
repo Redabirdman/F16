@@ -6,13 +6,14 @@
  * including that breakpoint is cached server-side; subsequent calls that share
  * the same cached prefix pay ~10% of the input-token cost for that prefix.
  *
- * The Claude Agent SDK exposes this via `systemPrompt: string[]` plus the
- * sentinel `SYSTEM_PROMPT_DYNAMIC_BOUNDARY` — blocks before the marker are
- * cacheable, blocks after it are per-turn dynamic content.
+ * The raw Anthropic SDK exposes this via per-block `cache_control: { type:
+ * 'ephemeral' }` on system content blocks. (Prior to M6.T1 we routed through
+ * `@anthropic-ai/claude-agent-sdk`, which used a `SYSTEM_PROMPT_DYNAMIC_BOUNDARY`
+ * sentinel inside a `string[]`; the raw SDK uses the native Anthropic shape.)
  *
  * Our helpers build a `SystemFragment[]` (a richer in-app representation) and
- * convert to the SDK's `string[]` shape at call time inside `claude.ts`. This
- * keeps the surface area testable without requiring a live API call.
+ * emit `TextBlockParam`-shaped `SystemBlock`s consumed directly by `claude.ts`.
+ * This keeps the surface area testable without requiring a live API call.
  *
  * Design rule: only ONE cache breakpoint per system prompt — the LAST fragment
  * marked `cache: true`. Anything before is cached implicitly (Anthropic caches
@@ -31,10 +32,8 @@ export interface SystemFragment {
  * Mirrors the shape Anthropic's Messages API accepts for system content blocks:
  *   `{ type: 'text', text, cache_control?: { type: 'ephemeral' } }`
  *
- * The Claude Agent SDK's `systemPrompt: string[]` uses a sentinel string
- * (`SYSTEM_PROMPT_DYNAMIC_BOUNDARY`) instead of per-block cache_control — the
- * wrapper in `claude.ts` translates this representation to whichever shape the
- * underlying transport requires.
+ * This is directly assignable to `TextBlockParam` from `@anthropic-ai/sdk` —
+ * no translation required at the call site.
  */
 export interface SystemBlock {
   type: 'text';
