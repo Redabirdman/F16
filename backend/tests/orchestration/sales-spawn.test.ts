@@ -500,10 +500,12 @@ d('sales-spawn orchestrator (live)', () => {
       return toInstance?.result != null;
     }, 10_000);
 
-    // Lead persisted with score.
+    // Lead persisted with score. Status was 'scored' after the scorer, then
+    // M6.T7's welcome flow transitions it to 'qualifying' once the opener
+    // sends successfully.
     const [final] = await db.select().from(leads).where(eq(leads.id, leadId));
     expect(final!.score).toBe(88);
-    expect(final!.status).toBe('scored');
+    expect(final!.status).toBe('qualifying');
 
     // Instance is running.
     const inst = getInstance('sales-agent', instanceId);

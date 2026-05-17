@@ -22,13 +22,11 @@
  * PII boundary: phone/email/full_name decrypt happens here (the agent
  * process is the encryption boundary); decrypted values are NEVER logged.
  *
- * Future M6 plug-in points:
- *   - M6.T4 — Compliance Sentry on the draft before send (TODO marker below).
- *   - M6.T5 — tool-use invocation (so Claude can call OCR/quote tools mid-turn).
- *   - M6.T6 — Mem0 recall fed into `recalledFacts`.
- *   - M6.T7 — welcome flow polish (multi-step opener, A/B variants).
+ * Future plug-in points:
  *   - M10   — voice channel (Pipecat); for now we skip when `channel='voice'`
  *             cannot send (no phone hashed).
+ *   - M11   — Customer Engagement Agent schedules a 24h-no-reply follow-up
+ *             from the welcome event-fact recorded by `handleLeadScored`.
  */
 import { eq } from 'drizzle-orm';
 import { BaseAgent } from '../base.js';
@@ -49,7 +47,7 @@ import { sendMessage } from '../../messaging/dispatcher.js';
 // tool-use loop, so this is the natural boot point until a dedicated tool
 // bootstrap module is needed (post M6).
 import { listTools } from '../../tools/index.js';
-import { recallCustomerFacts } from '../../memory/index.js';
+import { recallCustomerFacts, recordCustomerFact } from '../../memory/index.js';
 
 const MAX_HISTORY_TURNS = 10;
 const MAX_REPLY_CHARS = 1500;
@@ -102,8 +100,16 @@ export class SalesAgent extends BaseAgent {
   }
 
   /**
-   * First-turn welcome: uses the Lead Scorer's opener verbatim — no LLM call.
-   * Idempotent on `(customerId, leadId)`: skips if an outbound turn already exists.
+   * First-turn welcome: uses the Lead Scorer's opener verbatim — no LLM call
+   * to GENERATE (the scorer already framed it), but we DO run the Compliance
+   * Sentry on the opener defensively in case the LLM-authored draft slipped a
+   * guardrail violation through. Then on a successful send we transition the
+   * lead `'scored' → 'qualifying'` and record an `event`-type fact in memory
+   * so downstream turns know "we welcomed via X at T".
+   *
+   * Idempotent on `(customerId, leadId)`: skips if an outbound turn already
+   * exists. Compliance-blocked sends do NOT transition the status — the lead
+   * stays in `'scored'` so a human can pick up cleanly.
    */
   private async handleLeadScored(envelope: AgentMessageEnvelope): Promise<MessageHandlerResult> {
     const payload = envelope.payload as { leadId: string; opening: string; channel: ChannelId };
@@ -131,6 +137,72 @@ export class SalesAgent extends BaseAgent {
       );
       return { ok: true, result: { skipped: 'already-welcomed' } };
     }
+
+    // M6.T7 — Compliance Sentry on the Lead-Scorer-authored opener. Lead status
+    // here is `'scored'` (the scorer's terminal state) because the welcome
+    // hasn't been sent yet. No `lastInboundContent` — this is first contact.
+    const compliance = await checkComplianceFor(this.db, {
+      draft: payload.opening,
+      ctx: {
+        customerId: customer.id,
+        channel: payload.channel,
+        productLine: (lead.productLine ?? 'car') as 'scooter' | 'car',
+        leadStatus: 'scored',
+      },
+    });
+
+    if (compliance.verdict === 'block') {
+      logger.warn(
+        {
+          leadId: lead.id,
+          instanceId: this.instanceId,
+          reasons: compliance.reasons,
+          ruleHits: compliance.ruleHits,
+          durationMs: compliance.durationMs,
+        },
+        'sales-agent: compliance blocked welcome opener, escalating to human',
+      );
+
+      const action = await humanActions.createAction(this.db, {
+        createdByAgent: `${this.role}#${this.instanceId}`,
+        correlationId: lead.id,
+        intent: 'COMPLIANCE_BLOCKED',
+        severity: 2,
+        summary: `Sales Agent welcome opener bloqué (${compliance.ruleHits.join(', ') || 'LLM'}). Raisons : ${compliance.reasons.join(' ; ')}`,
+        options: [
+          { id: 'send_as_is', label: 'Envoyer quand même', kind: 'approve' },
+          { id: 'reject_send', label: "Refuser l'envoi", kind: 'reject' },
+          { id: 'revise', label: 'Demander une révision', kind: 'revise' },
+        ],
+      });
+
+      await sendMessage(
+        { db: this.db },
+        {
+          fromRole: this.role,
+          fromInstance: this.instanceId,
+          toRole: 'supervisor',
+          intent: 'COMPLIANCE.BLOCKED',
+          payload: { messageId: action.id, reasons: compliance.reasons },
+          correlationId: lead.id,
+          requiresHuman: true,
+          priority: 2,
+        },
+      );
+
+      // Lead status stays 'scored' — human resolves before we re-attempt.
+      return {
+        ok: true,
+        result: {
+          intent: envelope.intent,
+          sent: false,
+          blocked: true,
+          reasons: compliance.reasons,
+          humanActionId: action.id,
+        },
+      };
+    }
+
     const send = await sendViaChannel({
       db: this.db,
       customerId: customer.id,
@@ -141,13 +213,51 @@ export class SalesAgent extends BaseAgent {
       agentInstance: this.instanceId,
       correlationId: lead.id,
     });
+
+    // Status transition: scored → qualifying. Atomic single-statement update.
+    await this.db
+      .update(leads)
+      .set({ status: 'qualifying', updatedAt: new Date() })
+      .where(eq(leads.id, lead.id));
+
+    // Memory event-fact. Best-effort — if embeddings are down we still want
+    // the welcome (already sent above) to register as a success. Same fallback
+    // policy as M6.T6's recall path: log a warning, swallow.
+    try {
+      await recordCustomerFact(this.db, {
+        customerId: customer.id,
+        factType: 'event',
+        content: `Welcomed via ${payload.channel} at ${new Date().toISOString()}`,
+        confidence: 1.0,
+        recordedBy: `${this.role}#${this.instanceId}`,
+      });
+    } catch (err) {
+      logger.warn(
+        { err, leadId: lead.id, customerId: customer.id, instanceId: this.instanceId },
+        'sales-agent: failed to record welcome event-fact; continuing',
+      );
+    }
+
+    logger.info(
+      {
+        leadId: lead.id,
+        customerId: customer.id,
+        instanceId: this.instanceId,
+        channel: payload.channel,
+        externalId: send.receipt.externalId,
+      },
+      'sales-agent: welcome sent + lead transitioned to qualifying',
+    );
+
     return {
       ok: true,
       result: {
         intent: envelope.intent,
         sent: true,
+        blocked: false,
         channel: payload.channel,
         externalId: send.receipt.externalId,
+        leadStatus: 'qualifying',
       },
     };
   }

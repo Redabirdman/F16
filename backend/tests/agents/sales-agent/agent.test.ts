@@ -20,7 +20,13 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from
 import { randomBytes } from 'node:crypto';
 import { sql, eq, desc } from 'drizzle-orm';
 import { createDb, type Database } from '../../../src/db/index.js';
-import { conversationTurns, humanActions, leads } from '../../../src/db/schema/index.js';
+import {
+  agentMessages,
+  conversationTurns,
+  customerFacts,
+  humanActions,
+  leads,
+} from '../../../src/db/schema/index.js';
 import { insertCustomer } from '../../../src/db/repositories/customers.js';
 import { __resetForTests, shutdownQueues } from '../../../src/queue/index.js';
 import { registerChannel, __resetChannelsForTests } from '../../../src/channels/registry.js';
@@ -32,6 +38,7 @@ import type {
   SendOptions,
 } from '../../../src/channels/types.js';
 import { __setClaudeClientForTests } from '../../../src/llm/claude.js';
+import { __setEmbeddingClientForTests, type EmbeddingClient } from '../../../src/llm/embeddings.js';
 import { SalesAgent, cleanLLMReply } from '../../../src/agents/sales-agent/agent.js';
 import type { AgentMessageEnvelope, MessageHandlerResult } from '../../../src/agents/types.js';
 
@@ -220,14 +227,45 @@ function makeEnvelope(intent: string, payload: unknown): AgentMessageEnvelope {
   };
 }
 
+/**
+ * Stub embedding client — deterministic 1536-dim zero vector. Lets the M6.T7
+ * welcome flow (which records an `event`-type customer fact on success) run
+ * without an OPENROUTER_API_KEY. Tests that want to simulate an embeddings
+ * outage swap this for `BrokenEmbeddingClient` via `__setEmbeddingClientForTests`.
+ */
+class StubEmbeddingClient implements Pick<EmbeddingClient, 'embed' | 'embedBatch'> {
+  public embedCalls: string[] = [];
+  async embed(text: string): Promise<number[]> {
+    this.embedCalls.push(text);
+    return new Array(1536).fill(0);
+  }
+  async embedBatch(texts: string[]): Promise<number[][]> {
+    this.embedCalls.push(...texts);
+    return texts.map(() => new Array(1536).fill(0));
+  }
+}
+
+/** Always-throws embedding client — used by the "embeddings down" test. */
+class BrokenEmbeddingClient implements Pick<EmbeddingClient, 'embed' | 'embedBatch'> {
+  async embed(): Promise<number[]> {
+    throw new Error('stub-embeddings-down');
+  }
+  async embedBatch(): Promise<number[][]> {
+    throw new Error('stub-embeddings-down');
+  }
+}
+
 d('SalesAgent.onMessage (live pg, stub channel, stub Claude)', () => {
   let db: Database;
   let wa: StubChannel;
   let claudeStub: StubAnthropic;
+  let embedStub: StubEmbeddingClient;
 
   beforeEach(async () => {
     db = createDb(pgUrl!);
     await db.execute(sql`TRUNCATE TABLE customers RESTART IDENTITY CASCADE`);
+    await db.execute(sql`TRUNCATE TABLE agent_messages RESTART IDENTITY CASCADE`);
+    await db.execute(sql`TRUNCATE TABLE human_actions RESTART IDENTITY CASCADE`);
 
     __resetChannelsForTests();
     wa = new StubChannel('whatsapp');
@@ -235,10 +273,14 @@ d('SalesAgent.onMessage (live pg, stub channel, stub Claude)', () => {
 
     claudeStub = new StubAnthropic();
     __setClaudeClientForTests(claudeStub);
+
+    embedStub = new StubEmbeddingClient();
+    __setEmbeddingClientForTests(embedStub as unknown as EmbeddingClient);
   });
 
   afterEach(() => {
     __setClaudeClientForTests(null);
+    __setEmbeddingClientForTests(null);
     __resetChannelsForTests();
   });
 
@@ -306,7 +348,7 @@ d('SalesAgent.onMessage (live pg, stub channel, stub Claude)', () => {
 
     expect(result).toMatchObject({
       ok: true,
-      result: { sent: true, channel: 'whatsapp' },
+      result: { sent: true, blocked: false, channel: 'whatsapp', leadStatus: 'qualifying' },
     });
     // Channel saw the exact text.
     expect(wa.sends).toHaveLength(1);
@@ -323,8 +365,23 @@ d('SalesAgent.onMessage (live pg, stub channel, stub Claude)', () => {
     expect(turns).toHaveLength(1);
     expect(turns[0]!.direction).toBe('outbound');
     expect(turns[0]!.content).toBe('Bonjour Marie, c’est Assuryal — vous m’entendez ?');
-    // No Claude call.
+    // No Sonnet call — the opener is verbatim. (Haiku sentry call IS expected.)
     expect(claudeStub.calls).toHaveLength(0);
+    expect(claudeStub.sentryCalls.length).toBeGreaterThanOrEqual(1);
+
+    // M6.T7 — status transition: scored → qualifying.
+    const [updatedLead] = await db.select().from(leads).where(eq(leads.id, leadId)).limit(1);
+    expect(updatedLead!.status).toBe('qualifying');
+
+    // M6.T7 — event-fact recorded in memory.
+    const facts = await db
+      .select()
+      .from(customerFacts)
+      .where(eq(customerFacts.customerId, customerId));
+    expect(facts).toHaveLength(1);
+    expect(facts[0]!.factType).toBe('event');
+    expect(facts[0]!.content).toMatch(/^Welcomed via whatsapp at /);
+    expect(facts[0]!.recordedBy).toBe('sales-agent#lead-test');
   });
 
   // -------------------------------------------------------------------------
@@ -376,6 +433,128 @@ d('SalesAgent.onMessage (live pg, stub channel, stub Claude)', () => {
       result: { skipped: 'no-contact-address', channel: 'whatsapp' },
     });
     expect(wa.sends).toHaveLength(0);
+  });
+
+  // -------------------------------------------------------------------------
+  // 3b. LEAD.SCORED compliance-blocked opener — M6.T7
+  //
+  // Lead Scorer's opening contains a hard-rule violation (asserts the contract
+  // is bound). Sentry MUST block before send. Lead stays in 'scored', a
+  // human_actions row + COMPLIANCE.BLOCKED agent_message are emitted.
+  // -------------------------------------------------------------------------
+  // Gated on TEST_REDIS_URL: the compliance-block path emits a
+  // COMPLIANCE.BLOCKED `agent_message` via `sendMessage`, which BullMQ-enqueues
+  // the row — same dependency as test 13.
+  it.skipIf(!process.env.TEST_REDIS_URL)(
+    'test 3b (LEAD.SCORED compliance block): hard rule violation blocks send + escalates',
+    async () => {
+      const prevRedisUrl = process.env.REDIS_URL;
+      const prevPrefix = process.env.BULLMQ_PREFIX;
+      process.env.REDIS_URL = process.env.TEST_REDIS_URL!;
+      process.env.BULLMQ_PREFIX = `f16-test-welcome-block-${randomBytes(4).toString('hex')}`;
+      __resetForTests();
+      try {
+        const { leadId, customerId } = await seedLead({ fullName: 'Marie' });
+        const agent = newAgent({ leadId });
+
+        const result = await agent.handle(
+          makeEnvelope('LEAD.SCORED', {
+            leadId,
+            score: 80,
+            // Hard rule: `contract-already-bound` matches "votre contrat est validé".
+            opening: 'Bonjour Marie, votre contrat est validé.',
+            channel: 'whatsapp',
+          }),
+        );
+
+        expect(result.ok).toBe(true);
+        const r = (result as { ok: true; result: Record<string, unknown> }).result;
+        expect(r['sent']).toBe(false);
+        expect(r['blocked']).toBe(true);
+        expect(typeof r['humanActionId']).toBe('string');
+        expect(Array.isArray(r['reasons'])).toBe(true);
+
+        // No channel send.
+        expect(wa.sends).toHaveLength(0);
+        // No outbound conversation_turns row.
+        const turns = await db
+          .select()
+          .from(conversationTurns)
+          .where(eq(conversationTurns.customerId, customerId));
+        expect(turns).toHaveLength(0);
+        // Lead status unchanged — still 'scored'.
+        const [unchangedLead] = await db.select().from(leads).where(eq(leads.id, leadId)).limit(1);
+        expect(unchangedLead!.status).toBe('scored');
+        // human_actions row exists with severity 2 + intent COMPLIANCE_BLOCKED.
+        const actions = await db
+          .select()
+          .from(humanActions)
+          .where(eq(humanActions.intent, 'COMPLIANCE_BLOCKED'));
+        expect(actions).toHaveLength(1);
+        expect(actions[0]!.severity).toBe(2);
+        expect(actions[0]!.summary).toMatch(/welcome opener bloqué/i);
+        // agent_messages COMPLIANCE.BLOCKED audit row exists.
+        const audit = await db
+          .select()
+          .from(agentMessages)
+          .where(eq(agentMessages.intent, 'COMPLIANCE.BLOCKED'));
+        expect(audit).toHaveLength(1);
+        expect(audit[0]!.correlationId).toBe(leadId);
+        expect(audit[0]!.requiresHuman).toBe(true);
+        // No event-fact recorded — welcome did not happen.
+        const facts = await db
+          .select()
+          .from(customerFacts)
+          .where(eq(customerFacts.customerId, customerId));
+        expect(facts).toHaveLength(0);
+      } finally {
+        await shutdownQueues().catch(() => {});
+        __resetForTests();
+        if (prevRedisUrl === undefined) delete process.env.REDIS_URL;
+        else process.env.REDIS_URL = prevRedisUrl;
+        if (prevPrefix === undefined) delete process.env.BULLMQ_PREFIX;
+        else process.env.BULLMQ_PREFIX = prevPrefix;
+      }
+    },
+  );
+
+  // -------------------------------------------------------------------------
+  // 3c. LEAD.SCORED embeddings outage doesn't block welcome — M6.T7
+  //
+  // Same happy-path send + status transition, but the embeddings client
+  // throws. The welcome must still succeed; only the event-fact recording
+  // degrades silently.
+  // -------------------------------------------------------------------------
+  it('test 3c (LEAD.SCORED embeddings down): send + status transition succeed, no fact recorded', async () => {
+    const { leadId, customerId } = await seedLead({ fullName: 'Marie' });
+    // Swap to the broken client AFTER seedLead (insertCustomer doesn't embed).
+    __setEmbeddingClientForTests(new BrokenEmbeddingClient() as unknown as EmbeddingClient);
+    const agent = newAgent({ leadId });
+
+    const result = await agent.handle(
+      makeEnvelope('LEAD.SCORED', {
+        leadId,
+        score: 80,
+        opening: 'Bonjour Marie, je suis Assuryal.',
+        channel: 'whatsapp',
+      }),
+    );
+
+    // Welcome still went through.
+    expect(result).toMatchObject({
+      ok: true,
+      result: { sent: true, blocked: false, channel: 'whatsapp', leadStatus: 'qualifying' },
+    });
+    expect(wa.sends).toHaveLength(1);
+    // Status updated.
+    const [updatedLead] = await db.select().from(leads).where(eq(leads.id, leadId)).limit(1);
+    expect(updatedLead!.status).toBe('qualifying');
+    // No fact recorded (embeddings client threw, agent swallowed).
+    const facts = await db
+      .select()
+      .from(customerFacts)
+      .where(eq(customerFacts.customerId, customerId));
+    expect(facts).toHaveLength(0);
   });
 
   // -------------------------------------------------------------------------
