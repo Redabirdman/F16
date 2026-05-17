@@ -224,14 +224,42 @@ export function consume(
 
       // Atomically claim the specific row. Returns null when:
       //   - the row was already consumed (duplicate BullMQ delivery)
-      //   - the row's to_role doesn't match (misrouted job — should never
-      //     happen in normal flow, but defensive)
+      //   - the row's to_role doesn't match (the job landed on a different
+      //     consumer because multiple roles share this queue)
       //   - the row doesn't exist (race against TRUNCATE / GDPR purge)
       const claimed = await agentMessages.claimSpecific(opts.db, messageId, opts.role);
       if (!claimed) {
+        // Disambiguate: if the row IS still unclaimed but addressed to a
+        // different role, requeue it so the correct consumer gets a turn.
+        // This is the normal case when multiple roles share a queue (e.g.
+        // 'sales-spawn-orchestrator' + 'sales-agent' both on 'lead'). The
+        // first pickup of each duplicate BullMQ delivery is essentially a
+        // re-route. Without this, the message would sit unclaimed forever.
+        const row = await agentMessages.getById(opts.db, messageId);
+        if (row && row.consumedAt === null && row.toRole !== opts.role) {
+          logger.debug(
+            { messageId, jobName, role: opts.role, toRole: row.toRole },
+            'agent_message wrong role on this worker — requeueing for correct consumer',
+          );
+          // Cap re-routes: when a queue has N roles, a stray job can ping-pong
+          // between workers. The job's attemptsMade isn't visible here, so we
+          // rely on BullMQ removeOnFail to bound it; we still re-enqueue once.
+          await getQueue(opts.queue).add(
+            row.intent,
+            { messageId: row.id },
+            {
+              priority: row.priority,
+              removeOnComplete: { count: 1000 },
+              removeOnFail: { count: 5000 },
+              // Small delay so we don't spin on a same-worker re-pickup.
+              delay: 25,
+            },
+          );
+          return;
+        }
         logger.debug(
           { messageId, jobName, role: opts.role },
-          'agent_message not claimable (already consumed, misrouted, or missing)',
+          'agent_message not claimable (already consumed or missing)',
         );
         return;
       }
