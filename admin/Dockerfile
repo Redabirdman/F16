@@ -12,7 +12,9 @@
 #
 ARG NODE_IMAGE=node:22-alpine
 ARG PNPM_VERSION=10.33.0
-ARG CADDY_IMAGE=caddy:2-alpine
+# Pin Caddy to a minor version so a future base-image revision doesn't
+# silently change the prod runtime (e.g. flag/header semantics).
+ARG CADDY_IMAGE=caddy:2.8-alpine
 
 # ---------- deps: install full workspace dep tree (incl. dev) for the build ----------
 FROM ${NODE_IMAGE} AS deps
@@ -40,16 +42,25 @@ RUN pnpm run build
 
 # ---------- runtime: static SPA served by Caddy, non-root ----------
 FROM ${CADDY_IMAGE} AS runtime
+
+# Install wget explicitly (~200 KB) so HEALTHCHECK doesn't break if a future
+# Caddy base image drops it.
+RUN apk add --no-cache wget
+
 WORKDIR /srv
 
 COPY --from=build /repo/admin/dist /srv
 COPY admin/Caddyfile /etc/caddy/Caddyfile
 
-EXPOSE 80
+# Listen on :8080 inside the container so we can run as the unprivileged
+# `caddy` user (binding :80 requires CAP_NET_BIND_SERVICE).
+EXPOSE 8080
 
-# Caddy ships with `wget`; HEALTHCHECK polls the SPA root. -q quiet, -O- to
-# stdout (discarded), --spider does HEAD-like fetch without saving.
+# Drop privileges. The caddy:alpine image ships a `caddy` user/group.
+USER caddy
+
+# HEALTHCHECK polls the SPA root via wget (installed above).
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD wget --quiet --spider http://127.0.0.1/ || exit 1
+  CMD wget --quiet --spider http://127.0.0.1:8080/ || exit 1
 
 CMD ["caddy", "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]

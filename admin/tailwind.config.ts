@@ -1,3 +1,4 @@
+// shadcn baseColor=slate chosen for the admin tool's neutral palette; do not change without team sign-off.
 import type { Config } from 'tailwindcss';
 import tailwindcssAnimate from 'tailwindcss-animate';
 

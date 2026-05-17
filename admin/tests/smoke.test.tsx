@@ -1,12 +1,14 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { ErrorBoundary } from 'react-error-boundary';
 import { existsSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import App from '../src/App';
+import { RootErrorFallback } from '../src/components/error-fallback';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -49,6 +51,30 @@ describe('App (smoke)', () => {
     expect(button).toBeInTheDocument();
     // shadcn Button applies bg-primary class via cva variants
     expect(button.className).toMatch(/bg-primary/);
+  });
+});
+
+describe('RootErrorFallback', () => {
+  it('renders the fallback UI when a child throws', () => {
+    // Suppress React's expected error console noise from the thrown error.
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const Bomb = (): never => {
+      throw new Error('boom: synthetic failure');
+    };
+
+    render(
+      <ErrorBoundary FallbackComponent={RootErrorFallback}>
+        <Bomb />
+      </ErrorBoundary>,
+    );
+
+    expect(
+      screen.getByRole('heading', { level: 1, name: /something went wrong/i }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/boom: synthetic failure/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /reload/i })).toBeInTheDocument();
+
+    errSpy.mockRestore();
   });
 });
 
