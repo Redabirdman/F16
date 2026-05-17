@@ -45,6 +45,9 @@ Le message d'ouverture :
 - Termine par UNE question simple qui invite à répondre
 - Jamais plus de 3 phrases
 - Aucun emoji robotique ; ton chaleureux, professionnel, court
+- INTERDIT : ne JAMAIS mentionner de prix, tarif, ou montant en euros — un devis Maxance sera généré plus tard
+- INTERDIT : ne pas reformuler des détails sensibles (marque/modèle exact, données personnelles autres que le prénom)
+- INTERDIT : ne pas faire de promesse commerciale (couverture spécifique, garantie de remboursement, etc.)
 
 Tu DOIS répondre SEULEMENT par le JSON, sans markdown, sans préambule.`;
 

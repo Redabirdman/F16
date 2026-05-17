@@ -22,11 +22,13 @@
  */
 import { Hono } from 'hono';
 import { createHmac, timingSafeEqual } from 'node:crypto';
+import { desc, eq } from 'drizzle-orm';
 import type { Database } from '../../db/index.js';
 import { logger } from '../../logger.js';
 import { sendMessage } from '../../messaging/dispatcher.js';
 import { insertCustomer, getCustomerByPhone } from '../../db/repositories/customers.js';
 import { insertTurn } from '../../db/repositories/conversation-turns.js';
+import { leads } from '../../db/schema/leads.js';
 import {
   WahaWebhookEnvelopeSchema,
   WahaMessagePayloadSchema,
@@ -127,15 +129,26 @@ export function buildWhatsAppWebhook(opts: WhatsAppWebhookOptions): Hono {
       occurredAt,
     });
 
-    // 8. Emit the agent-bus intent. The Sales Agent (M6) is the eventual
-    // consumer; it routes via `toInstance = customer-<id>` so a singleton
-    // worker per customer can keep conversation state warm.
+    // 8. Resolve the live conversation instance. The Sales Agent is spawned
+    // per-lead (`lead-<leadId>`) by the M5.T4 orchestrator, so we look up the
+    // customer's most-recent lead to find the running instance. Falls back
+    // to `customer-<id>` (the legacy addressing) when no lead exists yet —
+    // WhatsApp-first strangers who haven't gone through the website intake
+    // still need a deliverable target.
+    //
+    // `correlationId` carries the leadId when known so the SalesAgent's
+    // `handleCustomerMessage` can resolve the conversation context even
+    // when the agent's `meta.leadId` isn't set (e.g. cross-process replay).
+    const activeLead = await findActiveLeadForCustomer(opts.db, customer.id);
+    const toInstance = activeLead ? `lead-${activeLead.id}` : `customer-${customer.id}`;
+    const correlationId = activeLead?.id ?? customer.id;
+
     await sendMessage(
       { db: opts.db },
       {
         fromRole: 'channel.whatsapp',
         toRole: 'sales-agent',
-        toInstance: `customer-${customer.id}`,
+        toInstance,
         intent: 'CUSTOMER.MESSAGE_RECEIVED',
         payload: {
           customerId: customer.id,
@@ -149,7 +162,7 @@ export function buildWhatsAppWebhook(opts: WhatsAppWebhookOptions): Hono {
           // ISO datetime. Reuse the same instant as the conversation_turns row.
           occurredAt: occurredAt.toISOString(),
         },
-        correlationId: customer.id,
+        correlationId,
       },
     );
 
@@ -157,6 +170,36 @@ export function buildWhatsAppWebhook(opts: WhatsAppWebhookOptions): Hono {
   });
 
   return app;
+}
+
+/**
+ * Find the most-recent lead for a customer that we'd still consider
+ * "active" — i.e. NOT closed/won/lost. The Sales Agent for that lead is
+ * the natural recipient of the inbound customer message. Returns null
+ * when no lead exists yet (WhatsApp-first stranger who hasn't been
+ * through the website intake).
+ *
+ * Ordering by `created_at DESC` is good enough for V1 — multi-lead
+ * customers are rare and the freshest lead is the conversation we want
+ * to continue. M11's Customer Engagement Agent will revisit this.
+ */
+async function findActiveLeadForCustomer(
+  db: Database,
+  customerId: string,
+): Promise<{ id: string } | null> {
+  const rows = await db
+    .select({ id: leads.id, status: leads.status })
+    .from(leads)
+    .where(eq(leads.customerId, customerId))
+    .orderBy(desc(leads.createdAt))
+    .limit(5);
+  // Prefer leads that are mid-conversation. Terminal states route through
+  // `customer-<id>` legacy addressing so a new conversation doesn't keep
+  // poking a dead lead's agent. `dormant` is included — a customer who
+  // pings after a long silence deserves a fresh lead, not a stale agent.
+  const TERMINAL: ReadonlySet<string> = new Set(['closed_won', 'closed_lost', 'dormant']);
+  const active = rows.find((r) => !TERMINAL.has(r.status));
+  return active ? { id: active.id } : null;
 }
 
 /**
