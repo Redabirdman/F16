@@ -7,6 +7,7 @@ import type { HealthResponse } from './types.js';
 import { logger } from './logger.js';
 import type { Database } from './db/index.js';
 import { buildWhatsAppWebhook } from './channels/whatsapp/webhook.js';
+import { buildLeadIntakeRouter } from './leads/intake-http.js';
 
 /**
  * Read package.json once at module load to surface the running version on /health.
@@ -29,6 +30,12 @@ export interface BuildAppOptions {
   db?: Database;
   /** Shared HMAC secret used to verify the WAHA inbound webhook. */
   wahaHmacSecret?: string;
+  /**
+   * Shared HMAC secret used to verify the public lead intake webhook
+   * (`POST /v1/leads`). Falls back to `HMAC_WEBHOOK_SECRET` from env in
+   * `start()`. When unset, signature verification is skipped — dev only.
+   */
+  leadIntakeHmacSecret?: string;
 }
 
 /**
@@ -60,6 +67,14 @@ export function buildApp(opts: BuildAppOptions = {}): Hono {
       ...(opts.wahaHmacSecret ? { hmacSecret: opts.wahaHmacSecret } : {}),
     });
     app.route('/', wahaApp);
+
+    // M5.T1 — public lead intake webhook (`POST /v1/leads`). Same
+    // exactOptionalPropertyTypes discipline as the WAHA route.
+    const leadIntakeApp = buildLeadIntakeRouter({
+      db: opts.db,
+      ...(opts.leadIntakeHmacSecret ? { hmacSecret: opts.leadIntakeHmacSecret } : {}),
+    });
+    app.route('/', leadIntakeApp);
   }
 
   return app;
@@ -87,9 +102,13 @@ export async function start(port: number = Number(process.env.PORT ?? 3001)): Pr
   // from `./db/index.ts` — first call validates DATABASE_URL.
   const { db } = await import('./db/index.js');
   const wahaSecret = process.env['WAHA_HMAC_SECRET'];
+  // Shared webhook secret consumed by the M5.T1 `/v1/leads` route. The same
+  // value is used by the website + Meta forwarders to sign their POSTs.
+  const leadIntakeSecret = process.env['HMAC_WEBHOOK_SECRET'];
   const liveApp = buildApp({
     db: db(),
     ...(wahaSecret ? { wahaHmacSecret: wahaSecret } : {}),
+    ...(leadIntakeSecret ? { leadIntakeHmacSecret: leadIntakeSecret } : {}),
   });
 
   const server = serve({ fetch: liveApp.fetch, port }) as Server;
