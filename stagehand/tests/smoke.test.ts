@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
+import { Stagehand } from '@browserbasehq/stagehand';
 import { app } from '../src/index.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -34,6 +35,15 @@ describe('GET /health', () => {
     expect(body.uptime).toBeLessThan(60_000);
     // Pool starts empty (real pool lands in M8).
     expect(body.browsers).toBe(0);
+  });
+});
+
+describe('Stagehand package import', () => {
+  it('Stagehand class is constructable from @browserbasehq/stagehand', () => {
+    // Cheap smoke check that the package resolves and exports the expected
+    // class symbol. Doesn't actually instantiate (would need an API key + browser);
+    // catches the "wrong package shape after upgrade" footgun.
+    expect(typeof Stagehand).toBe('function');
   });
 });
 

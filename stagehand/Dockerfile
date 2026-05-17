@@ -46,6 +46,9 @@ FROM ${PLAYWRIGHT_IMAGE} AS runtime
 ARG PNPM_VERSION
 ENV NODE_ENV=production \
     PORT=4001
+# Playwright image already ships Chromium at /ms-playwright; skip redundant download.
+# Makes the contract explicit and prevents silent ~150MB downloads on version drift.
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 WORKDIR /app
 
 # Playwright image ships Node 22 + corepack; just activate the pinned pnpm.

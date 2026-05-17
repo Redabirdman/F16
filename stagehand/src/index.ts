@@ -51,14 +51,25 @@ export async function start(port: number = Number(process.env.PORT ?? 4001)): Pr
   const server = serve({ fetch: app.fetch, port }) as Server;
   logger.info({ port }, 'f16-stagehand listening');
 
-  const shutdown = (signal: NodeJS.Signals): void => {
+  const shutdown = async (signal: NodeJS.Signals): Promise<void> => {
     logger.info({ signal }, 'shutting down');
+    // Drain browser pool BEFORE closing the HTTP server so in-flight intents
+    // finish cleanly. Catch + log so a pool failure can't block the http close.
+    try {
+      await pool.closeAll();
+    } catch (err) {
+      logger.error({ err }, 'pool drain failed');
+    }
     server.close(() => process.exit(0));
     // Hard-exit fallback if connections hang past the grace window.
     setTimeout(() => process.exit(1), 10_000).unref();
   };
-  process.on('SIGINT', shutdown);
-  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', (sig) => {
+    void shutdown(sig);
+  });
+  process.on('SIGTERM', (sig) => {
+    void shutdown(sig);
+  });
 
   return server;
 }
