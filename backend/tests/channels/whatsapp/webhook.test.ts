@@ -20,7 +20,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from
 import { createHmac, randomBytes } from 'node:crypto';
 import { sql, eq } from 'drizzle-orm';
 import { createDb, type Database } from '../../../src/db/index.js';
-import { agentMessages, customers } from '../../../src/db/schema/index.js';
+import { agentMessages, customers, conversationTurns } from '../../../src/db/schema/index.js';
 import { hashPII } from '../../../src/db/crypto.js';
 import { buildWhatsAppWebhook } from '../../../src/channels/whatsapp/webhook.js';
 import { __resetForTests, shutdownQueues } from '../../../src/queue/index.js';
@@ -165,6 +165,21 @@ d('WAHA inbound webhook (live)', () => {
     expect(payload['content']).toBe('salut');
     expect(payload['attachments']).toEqual([]);
     expect(typeof payload['occurredAt']).toBe('string');
+
+    // M4.T7: inbound message persisted to conversation_turns as the
+    // companion to the outbound `sendViaChannel` wrapper. agentRole is
+    // null because inbound messages have no agent attribution.
+    const turns = await db
+      .select()
+      .from(conversationTurns)
+      .where(eq(conversationTurns.customerId, j.customerId));
+    expect(turns).toHaveLength(1);
+    expect(turns[0]!.direction).toBe('inbound');
+    expect(turns[0]!.channel).toBe('whatsapp');
+    expect(turns[0]!.content).toBe('salut');
+    expect(turns[0]!.attachments).toBeNull();
+    expect(turns[0]!.agentRole).toBeNull();
+    expect(turns[0]!.agentInstance).toBeNull();
   });
 
   // -------------------------------------------------------------------------
@@ -369,5 +384,17 @@ d('WAHA inbound webhook (live)', () => {
     const payload = msg!.payload as { attachments: { url: string }[] };
     expect(payload.attachments).toHaveLength(1);
     expect(payload.attachments[0]!.url).toBe('https://files.waha.example.com/abc.jpg');
+
+    // M4.T7: the inbound conversation_turns row also carries the mediaUrl
+    // so the admin timeline can render the attachment alongside the body.
+    const turns = await db
+      .select()
+      .from(conversationTurns)
+      .where(eq(conversationTurns.customerId, j.customerId));
+    expect(turns).toHaveLength(1);
+    expect(turns[0]!.direction).toBe('inbound');
+    expect(turns[0]!.content).toBe('photo');
+    expect(turns[0]!.attachments).toHaveLength(1);
+    expect(turns[0]!.attachments![0]!.url).toBe('https://files.waha.example.com/abc.jpg');
   });
 });

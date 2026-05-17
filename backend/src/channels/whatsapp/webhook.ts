@@ -11,7 +11,6 @@
  *      dispatcher so the Sales Agent (M6) picks it up.
  *
  * Out of scope (intentionally deferred):
- *   - Writing `conversation_turns` (M4.T7 will unify inbound + outbound writes).
  *   - Triggering OCR for media attachments (M11).
  *   - Lead creation flow (M5); for now an inbound stranger gets a customer
  *     stub with `fullName = "WhatsApp <phone>"`.
@@ -27,6 +26,7 @@ import type { Database } from '../../db/index.js';
 import { logger } from '../../logger.js';
 import { sendMessage } from '../../messaging/dispatcher.js';
 import { insertCustomer, getCustomerByPhone } from '../../db/repositories/customers.js';
+import { insertTurn } from '../../db/repositories/conversation-turns.js';
 import {
   WahaWebhookEnvelopeSchema,
   WahaMessagePayloadSchema,
@@ -111,7 +111,23 @@ export function buildWhatsAppWebhook(opts: WhatsAppWebhookOptions): Hono {
     // this lookup.
     const customer = await findOrCreateCustomerByPhone(opts.db, e164);
 
-    // 7. Emit the agent-bus intent. The Sales Agent (M6) is the eventual
+    // 7. Audit the inbound message in `conversation_turns` BEFORE emitting
+    // the intent. The admin timeline must include every inbound message,
+    // regardless of whether downstream agent dispatch later fails. agentRole
+    // is null — inbound messages have no agent attribution.
+    const occurredAt = new Date(msg.timestamp * 1000);
+    const attachments =
+      msg.hasMedia && msg.mediaUrl ? [{ url: msg.mediaUrl, type: 'media' }] : undefined;
+    await insertTurn(opts.db, {
+      customerId: customer.id,
+      channel: 'whatsapp',
+      direction: 'inbound',
+      content: msg.body,
+      ...(attachments ? { attachments } : {}),
+      occurredAt,
+    });
+
+    // 8. Emit the agent-bus intent. The Sales Agent (M6) is the eventual
     // consumer; it routes via `toInstance = customer-<id>` so a singleton
     // worker per customer can keep conversation state warm.
     await sendMessage(
@@ -130,8 +146,8 @@ export function buildWhatsAppWebhook(opts: WhatsAppWebhookOptions): Hono {
           // (email with N attachments) reuse the same shape.
           attachments: msg.hasMedia && msg.mediaUrl ? [{ url: msg.mediaUrl }] : [],
           // WAHA emits seconds since epoch; the intent schema requires an
-          // ISO datetime.
-          occurredAt: new Date(msg.timestamp * 1000).toISOString(),
+          // ISO datetime. Reuse the same instant as the conversation_turns row.
+          occurredAt: occurredAt.toISOString(),
         },
         correlationId: customer.id,
       },
