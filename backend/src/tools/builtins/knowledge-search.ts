@@ -6,25 +6,27 @@
  * ordered nearest-first (smallest cosine distance), with enough metadata for
  * the agent to cite the source.
  *
- * STUB EMBEDDING (M3.T6 → M7):
- *   Until M7 wires real query embeddings through the embedding provider, this
- *   tool uses a fixed synthetic query vector (Array(1536).fill(0.001)). That
- *   makes the tool exercisable from tests with seeded data (the test seeds
- *   chunks with known vectors and the cosine distance to the stub is
- *   predictable), but it is NOT useful in production yet. The description
- *   below makes that explicit so an agent reading its own toolset knows the
- *   limitation.
+ * M7.T5: replaced the M3.T6 synthetic stub embedding with a real call to the
+ * embedding client (OpenRouter-hosted `text-embedding-3-small`, 1536 dims, the
+ * same model the corpus is indexed with). Test isolation is still possible —
+ * `__setEmbeddingClientForTests` in `src/llm/embeddings.ts` lets unit tests
+ * inject a deterministic stub so no network call is made.
+ *
+ * The Sales Agent allow-lists this tool, but is instructed (see
+ * prompts/playbook.ts) to call it sparingly — once or twice per conversation
+ * at most — because every invocation is an embedding round-trip.
  */
 import { z } from 'zod';
 import { registerTool } from '../registry.js';
 import { searchSimilar } from '../../db/repositories/knowledge.js';
+import { getDefaultEmbeddingClient } from '../../llm/embeddings.js';
 
 export const knowledgeSearchToolName = 'knowledge.search';
 
 const inputSchema = z.object({
-  query: z.string().min(1),
-  /** Max results to return. Default 5, capped to 50 to bound cost. */
-  limit: z.number().int().positive().max(50).optional(),
+  query: z.string().min(2),
+  /** Max results to return. Default 5, capped to 20 to bound cost. */
+  limit: z.number().int().positive().max(20).optional(),
 });
 
 const outputSchema = z.array(
@@ -36,23 +38,22 @@ const outputSchema = z.array(
   }),
 );
 
-/** Stub query embedding used until M7. See file header for rationale. */
-const STUB_QUERY_EMBEDDING: number[] = new Array<number>(1536).fill(0.001);
-
 registerTool({
   name: knowledgeSearchToolName,
   description:
-    'Search the organisation knowledge corpus (pricing, FAQs, catalogs) by ' +
-    'natural-language query. Returns the top-k most-similar chunks with ' +
-    'source attribution. NOTE: currently uses a stub query embedding; real ' +
-    'embedding-based lookup arrives in M7.',
+    'Recherche dans la base de connaissances Assuryal (produits, ' +
+    'réglementation, FAQ, règles tarifaires) le contexte pertinent pour la ' +
+    'question du client. Renvoie les chunks sémantiquement les plus proches ' +
+    'avec leur source. À utiliser avec parcimonie — une ou deux fois par ' +
+    'conversation, quand le client demande quelque chose de spécifique que tu ' +
+    'ne sais pas déjà.',
   inputSchema,
   outputSchema,
   handler: async (ctx, input) => {
     const limit = input.limit ?? 5;
-    // input.query is intentionally NOT yet embedded — see file header.
-    void input.query;
-    const hits = await searchSimilar(ctx.db, STUB_QUERY_EMBEDDING, { limit });
+    const ec = getDefaultEmbeddingClient();
+    const queryEmbedding = await ec.embed(input.query);
+    const hits = await searchSimilar(ctx.db, queryEmbedding, { limit });
 
     return hits.map((h) => ({
       chunk: h.chunk.chunkText,

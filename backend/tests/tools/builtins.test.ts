@@ -31,6 +31,7 @@ import {
   humanEscalateToolName,
 } from '../../src/tools/builtins/index.js';
 import { __resetForTests, shutdownQueues } from '../../src/queue/index.js';
+import { EmbeddingClient, __setEmbeddingClientForTests } from '../../src/llm/embeddings.js';
 
 const pgUrl = process.env.TEST_DATABASE_URL;
 const redisUrl = process.env.TEST_REDIS_URL;
@@ -73,8 +74,34 @@ function sha(): string {
   return randomBytes(32).toString('hex');
 }
 
+/**
+ * Deterministic embedding stub for knowledge.search.
+ *
+ * The real M7.T5 wiring calls `getDefaultEmbeddingClient().embed(query)`
+ * before kNN. To keep this DB-only test offline, we inject a tiny stub that
+ * returns a fixed 1536-dim vector regardless of input — same shape as the
+ * pre-M7.T5 synthetic vector — so the existing seeded chunks (which were
+ * authored against that exact baseline) keep the same distance ordering and
+ * the test's assertions stay meaningful as "the tool round-trips embed →
+ * searchSimilar → results", which is what M7.T5 changed.
+ */
+class StubEmbeddingClient extends EmbeddingClient {
+  public embedCalls = 0;
+  constructor() {
+    super({ apiKey: 'stub', fetchImpl: (async () => ({}) as Response) as typeof fetch });
+  }
+  override async embed(_text: string): Promise<number[]> {
+    this.embedCalls += 1;
+    return new Array<number>(1536).fill(0.001);
+  }
+  override async embedBatch(texts: string[]): Promise<number[][]> {
+    return texts.map(() => new Array<number>(1536).fill(0.001));
+  }
+}
+
 dPg('builtin tools — DB-only (live pg)', () => {
   let db: Database;
+  let embedStub: StubEmbeddingClient;
   const ctx = (over: Partial<ToolContext> = {}): ToolContext => ({
     db,
     agentRole: 'test-agent',
@@ -86,6 +113,12 @@ dPg('builtin tools — DB-only (live pg)', () => {
     db = createDb(pgUrl!);
     await db.execute(sql`TRUNCATE TABLE customers RESTART IDENTITY CASCADE`);
     await db.execute(sql`TRUNCATE TABLE knowledge_chunks RESTART IDENTITY CASCADE`);
+    embedStub = new StubEmbeddingClient();
+    __setEmbeddingClientForTests(embedStub);
+  });
+
+  afterEach(() => {
+    __setEmbeddingClientForTests(null);
   });
 
   // -------------------------------------------------------------------------
@@ -220,10 +253,10 @@ dPg('builtin tools — DB-only (live pg)', () => {
   // -------------------------------------------------------------------------
 
   it('test 7 (knowledge.search): returns chunks in distance order', async () => {
-    // Stub query embedding is Array(1536).fill(0.001) — so chunks whose
-    // vectors point in directions less anti-correlated with that all-positive
-    // baseline sort nearer. We seed three with deliberately distinct lead
-    // dimensions.
+    // M7.T5 — knowledge.search now calls the embedding client. The stub
+    // returns a constant Array(1536).fill(0.001) regardless of input, so the
+    // chunks we seed below sort by their cosine distance against that
+    // baseline — predictable enough to assert monotonic ordering.
     await upsertChunk(db, {
       source: 'assuryalconseil.fr',
       sourcePath: '/pricing.html',
@@ -257,6 +290,9 @@ dPg('builtin tools — DB-only (live pg)', () => {
     expect(hits[1]!.distance).toBeLessThanOrEqual(hits[2]!.distance);
     // Source attribution flows through.
     expect(hits.every((h) => typeof h.source === 'string' && h.source.length > 0)).toBe(true);
+    // M7.T5 — the tool actually went through the embedding client (vs the
+    // pre-M7.T5 constant stub baked into the tool).
+    expect(embedStub.embedCalls).toBe(1);
   });
 
   it('test 8 (knowledge.search limit): respects limit', async () => {
