@@ -21,3 +21,5 @@ export type { KnowledgeSourceConfig, AdapterKind } from './source-registry.js';
 export { startKnowledgeCurator, handleReindex } from './curator.js';
 export type { KnowledgeCuratorOptions, KnowledgeCuratorHandle } from './curator.js';
 export { bootstrapKnowledgeSources, __resetBootstrapForTests } from './bootstrap.js';
+export { ingestSourceWithDrift, snapshotSource } from './drift.js';
+export type { DriftKind, DriftSummary, IngestWithDriftResult } from './drift.js';

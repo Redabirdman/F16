@@ -45,7 +45,8 @@ import {
 } from '../messaging/dispatcher.js';
 import { logger } from '../logger.js';
 import { getKnowledgeSource, listKnowledgeSources, adapterFor } from './source-registry.js';
-import { ingestSource, type IngestSourceOptions } from './ingest.js';
+import { type IngestSourceOptions } from './ingest.js';
+import { ingestSourceWithDrift } from './drift.js';
 
 export interface KnowledgeCuratorOptions {
   db: Database;
@@ -170,7 +171,7 @@ export async function handleReindex(
   const t0 = Date.now();
   try {
     const adapter = adapterFor(cfg.adapter);
-    const result = await ingestSource(
+    const result = await ingestSourceWithDrift(
       opts.db,
       adapter,
       {
@@ -202,6 +203,38 @@ export async function handleReindex(
       },
     );
 
+    // Drift fan-out — only fires when something actually changed. Price
+    // changes flag the row as `requiresHuman` so an operator reviews them
+    // before downstream prompts/pricing surfaces consume the new corpus.
+    if (result.drift.kind) {
+      await sendMessage(
+        { db: opts.db },
+        {
+          fromRole: 'knowledge-curator',
+          toRole: 'supervisor',
+          intent: 'KNOWLEDGE.DRIFT_DETECTED',
+          payload: {
+            source: cfg.name,
+            kind: result.drift.kind,
+            details: {
+              added: result.drift.added,
+              removed: result.drift.removed,
+              changed: result.drift.changed,
+              counts: {
+                added: result.drift.added.length,
+                removed: result.drift.removed.length,
+                changed: result.drift.changed.length,
+                unchanged: result.drift.unchanged,
+              },
+            },
+          },
+          correlationId: env.correlationId ?? `reindex:${cfg.name}`,
+          requiresHuman: result.drift.kind === 'price_change',
+          priority: result.drift.kind === 'price_change' ? 2 : 6,
+        },
+      );
+    }
+
     logger.info(
       {
         source: cfg.name,
@@ -209,6 +242,8 @@ export async function handleReindex(
         inserted: result.chunksInserted,
         updated: result.chunksUpdated,
         failed: result.chunksFailed,
+        driftKind: result.drift.kind,
+        orphansDeleted: result.orphansDeleted,
         durationMs,
       },
       'knowledge-curator: reindex done',
@@ -221,6 +256,8 @@ export async function handleReindex(
         chunksInserted: result.chunksInserted,
         chunksUpdated: result.chunksUpdated,
         chunksFailed: result.chunksFailed,
+        orphansDeleted: result.orphansDeleted,
+        driftKind: result.drift.kind,
         durationMs,
       },
     };

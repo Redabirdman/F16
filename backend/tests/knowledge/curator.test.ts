@@ -340,6 +340,98 @@ d('knowledge-curator (live pg + redis, stub embeddings)', () => {
   });
 
   // -------------------------------------------------------------------------
+  // 8. Curator emits KNOWLEDGE.DRIFT_DETECTED when the source evolves.
+  // -------------------------------------------------------------------------
+  it('test 8: curator emits KNOWLEDGE.DRIFT_DETECTED on second reindex with new chunk', async () => {
+    // Reuse FIXTURE_MD as the initial corpus, then append a new H2 section to
+    // force `added.length == 1` (kind='new_product') on the second pass.
+    writeFileSync(fixturePath, FIXTURE_MD, 'utf8');
+
+    registerKnowledgeSource({
+      name: FIX_SRC,
+      adapter: 'markdown-file',
+      path: fixturePath,
+      scheduled: false,
+    });
+
+    handle = startKnowledgeCurator({ db, schedulerIntervalMs: 60_000 });
+    await handle.worker.waitUntilReady();
+
+    // First reindex — seeds the corpus, no drift expected.
+    const firstId = await sendMessage(
+      { db },
+      {
+        fromRole: 'admin',
+        toRole: 'knowledge-curator',
+        intent: 'KNOWLEDGE.REINDEX_REQUESTED',
+        payload: { source: FIX_SRC },
+        correlationId: 'drift-seed',
+      },
+    );
+    await waitFor(async () => {
+      const [row] = await db.select().from(agentMessages).where(eq(agentMessages.id, firstId));
+      return Boolean(row && row.consumedAt && row.result);
+    });
+
+    // No DRIFT_DETECTED yet — the seed is `new_product` (all chunks added),
+    // which would emit. To isolate the "evolution" assertion, count rows now.
+    const driftRowsAfterSeed = await db
+      .select()
+      .from(agentMessages)
+      .where(eq(agentMessages.intent, 'KNOWLEDGE.DRIFT_DETECTED'));
+    // The very first ingest treats every chunk as "added" → seed run produces
+    // exactly one DRIFT_DETECTED row of kind=new_product.
+    expect(driftRowsAfterSeed).toHaveLength(1);
+    const seedPayload = driftRowsAfterSeed[0]!.payload as Record<string, unknown>;
+    expect(seedPayload['kind']).toBe('new_product');
+
+    // Mutate the fixture — add an H2 section.
+    const mutated = `${FIXTURE_MD}\n\n## 3. NEW SECTION\n\nDu contenu fraîchement ajouté pour le test de drift.\n`;
+    writeFileSync(fixturePath, mutated, 'utf8');
+
+    const secondId = await sendMessage(
+      { db },
+      {
+        fromRole: 'admin',
+        toRole: 'knowledge-curator',
+        intent: 'KNOWLEDGE.REINDEX_REQUESTED',
+        payload: { source: FIX_SRC },
+        correlationId: 'drift-evolve',
+      },
+    );
+    await waitFor(async () => {
+      const [row] = await db.select().from(agentMessages).where(eq(agentMessages.id, secondId));
+      return Boolean(row && row.consumedAt && row.result);
+    });
+
+    // A second DRIFT_DETECTED row should now exist with kind=new_product and
+    // exactly one added path.
+    await waitFor(async () => {
+      const rows = await db
+        .select()
+        .from(agentMessages)
+        .where(eq(agentMessages.intent, 'KNOWLEDGE.DRIFT_DETECTED'));
+      return rows.length >= 2;
+    });
+
+    const driftRows = await db
+      .select()
+      .from(agentMessages)
+      .where(eq(agentMessages.intent, 'KNOWLEDGE.DRIFT_DETECTED'));
+    expect(driftRows.length).toBe(2);
+
+    // Find the one with correlationId='drift-evolve'.
+    const evolveRow = driftRows.find((r) => r.correlationId === 'drift-evolve');
+    expect(evolveRow).toBeDefined();
+    const payload = evolveRow!.payload as Record<string, unknown>;
+    expect(payload['source']).toBe(FIX_SRC);
+    expect(payload['kind']).toBe('new_product');
+    const details = payload['details'] as Record<string, unknown>;
+    const added = details['added'] as string[];
+    expect(added).toHaveLength(1);
+  });
+
+  // -------------------------------------------------------------------------
   // 5. stop() clears the scheduler interval AND closes the worker.
   // -------------------------------------------------------------------------
   it('test 5: stop() cleans up the scheduler and the worker', async () => {
