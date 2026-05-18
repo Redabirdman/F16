@@ -10,3 +10,14 @@ export { ingestSource } from './ingest.js';
 export type { IngestSourceOptions } from './ingest.js';
 export { markdownFileAdapter, chunkMarkdown, slugify } from './adapters/markdown-file.js';
 export { reactSourceAdapter, extractStrings } from './adapters/react-source.js';
+export {
+  registerKnowledgeSource,
+  getKnowledgeSource,
+  listKnowledgeSources,
+  adapterFor,
+  __resetKnowledgeSourcesForTests,
+} from './source-registry.js';
+export type { KnowledgeSourceConfig, AdapterKind } from './source-registry.js';
+export { startKnowledgeCurator, handleReindex } from './curator.js';
+export type { KnowledgeCuratorOptions, KnowledgeCuratorHandle } from './curator.js';
+export { bootstrapKnowledgeSources, __resetBootstrapForTests } from './bootstrap.js';
