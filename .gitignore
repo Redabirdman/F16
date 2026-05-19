@@ -27,6 +27,7 @@ __pycache__/
 
 # Playwright / Stagehand
 playwright-report/
+stagehand/data/
 
 # Build caches
 *.tsbuildinfo
