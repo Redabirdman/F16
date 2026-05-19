@@ -54,7 +54,13 @@ export interface PooledSession {
   dataDir: string;
 }
 
-const DEFAULT_MODEL = 'claude-sonnet-4-5-20250929';
+// Stagehand v3 requires `provider/model` format. The bare model id raises
+// UnsupportedModelError at Stagehand.init(). Anthropic Sonnet is our default
+// per the design's LLM tiering (R2 routing — Anthropic direct, not OpenRouter).
+// Stagehand v3 requires `provider/model` format. Use the dated Anthropic API
+// model id (the bare alias `claude-sonnet-4-5` is Stagehand-internal and the
+// AI SDK forwards it as-is to Anthropic, which 404s).
+const DEFAULT_MODEL = 'anthropic/claude-sonnet-4-5-20250929';
 
 export class BrowserPool {
   private sessions = new Map<string, PooledSession>();
@@ -108,6 +114,12 @@ export class BrowserPool {
       model: {
         modelName: DEFAULT_MODEL,
         apiKey,
+        // Pin the Anthropic API URL explicitly. The AI SDK's createAnthropic
+        // honors process.env.ANTHROPIC_BASE_URL — and if any caller exports
+        // that var as the host root ('https://api.anthropic.com', without
+        // '/v1'), every request 404s. Hard-coding the canonical /v1 endpoint
+        // keeps Stagehand's LLM calls robust against env pollution.
+        baseURL: process.env.STAGEHAND_ANTHROPIC_BASE_URL ?? 'https://api.anthropic.com/v1',
       },
       localBrowserLaunchOptions: {
         headless,
