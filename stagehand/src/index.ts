@@ -10,6 +10,8 @@ import type { HealthResponse } from './types.js';
 import { logger } from './logger.js';
 import { pool } from './browser-pool.js';
 import { executeIntent, type IntentName } from './intents.js';
+import { loginMaxance } from './maxance/login.js';
+import type { HumanActionRequest, MaxanceLoginResult } from './maxance/types.js';
 
 /**
  * Read package.json once at module load to surface the running version on /health.
@@ -193,6 +195,130 @@ app.get('/v1/sessions/:id/screenshot', async (c) => {
   } finally {
     pool.release(sessionId);
   }
+});
+
+/**
+ * Pending 2FA prompts, keyed by sessionId. When `loginMaxance` hits the SMS
+ * branch it pushes a `{ resolve, reject, request }` entry here, then awaits.
+ * The `/v1/maxance/2fa-code` handler pops the entry and resolves with the code.
+ *
+ * In-memory by design: the M8.T2 service is the only writer/reader, and a
+ * pending login that gets restarted across a process bounce is unrecoverable
+ * anyway (the Stagehand browser session lives in the same process).
+ */
+interface Pending2fa {
+  request: HumanActionRequest;
+  resolve: (code: string) => void;
+  reject: (err: Error) => void;
+}
+const pending2fa = new Map<string, Pending2fa>();
+
+/**
+ * POST /v1/maxance/login — drive the Maxance login + Proximéo SSO bootstrap.
+ *
+ * Body: `{ sessionName?: string }`. If a session with that name already
+ * exists in the pool we reuse it (cookies persist via the pool's userDataDir);
+ * otherwise we create a fresh session.
+ *
+ * Returns: MaxanceLoginResult. On a 2FA prompt the handler PARKS the login
+ * function and registers a pending entry — the caller must POST the code to
+ * /v1/maxance/2fa-code. The login function's 15min default timeout bounds
+ * the wait; an exceeded timeout fails the request with a sanitised error.
+ */
+app.post('/v1/maxance/login', async (c) => {
+  const raw = await c.req.text();
+  if (!verifyHmac(c, raw)) {
+    return c.json({ error: 'invalid_signature' }, 401);
+  }
+  let body: { sessionName?: string } = {};
+  if (raw) {
+    try {
+      body = JSON.parse(raw) as typeof body;
+    } catch {
+      return c.json({ error: 'invalid_json' }, 400);
+    }
+  }
+  const sessionName = body.sessionName ?? 'maxance-default';
+
+  // Look up by name (reuse) or create. The pool's userDataDir is per-sessionId
+  // so cookies actually survive only within a single Stagehand instance for
+  // V1 — M8.T5 will fold name-keyed reuse across restarts.
+  const existing = pool.list().find((s) => s.name === sessionName);
+  let sessionId: string;
+  if (existing) {
+    sessionId = existing.sessionId;
+  } else {
+    try {
+      const info = await pool.create({ name: sessionName });
+      sessionId = info.sessionId;
+    } catch (err) {
+      logger.error({ err }, 'maxance: session create failed');
+      const msg = err instanceof Error ? err.message : String(err);
+      return c.json({ error: msg }, 500);
+    }
+  }
+
+  let session;
+  try {
+    session = pool.borrow(sessionId);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    const status = msg.endsWith('not found') ? 404 : 409;
+    return c.json({ error: msg }, status);
+  }
+
+  try {
+    const result: MaxanceLoginResult = await loginMaxance(session.stagehand, sessionId, {
+      dataRoot: dataRoot(),
+      humanActionResolver: (request) =>
+        new Promise<string>((resolve, reject) => {
+          // Drop any prior pending entry for this session (caller restarted).
+          const prior = pending2fa.get(sessionId);
+          if (prior) {
+            prior.reject(new Error('superseded_by_new_2fa_request'));
+          }
+          pending2fa.set(sessionId, { request, resolve, reject });
+          logger.info({ sessionId, summary: request.summary }, 'maxance: 2FA prompt parked');
+        }).finally(() => {
+          pending2fa.delete(sessionId);
+        }),
+    });
+    return c.json(result, 200);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.warn({ sessionId, err: msg }, 'maxance: login failed');
+    return c.json({ error: msg }, 500);
+  } finally {
+    pool.release(sessionId);
+  }
+});
+
+/**
+ * POST /v1/maxance/2fa-code — resolve a pending SMS prompt.
+ *
+ * Body: `{ sessionId: string; code: string }`. Returns 200 on success, 404
+ * if no prompt is pending for that session. Authenticated with the same HMAC.
+ */
+app.post('/v1/maxance/2fa-code', async (c) => {
+  const raw = await c.req.text();
+  if (!verifyHmac(c, raw)) {
+    return c.json({ error: 'invalid_signature' }, 401);
+  }
+  let body: { sessionId?: string; code?: string };
+  try {
+    body = JSON.parse(raw) as typeof body;
+  } catch {
+    return c.json({ error: 'invalid_json' }, 400);
+  }
+  if (!body.sessionId || typeof body.code !== 'string' || body.code.trim().length === 0) {
+    return c.json({ error: 'missing_fields' }, 400);
+  }
+  const pending = pending2fa.get(body.sessionId);
+  if (!pending) {
+    return c.json({ error: 'no_pending_2fa' }, 404);
+  }
+  pending.resolve(body.code.trim());
+  return c.json({ accepted: true }, 200);
 });
 
 /**
