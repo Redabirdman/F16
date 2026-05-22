@@ -35,6 +35,9 @@ if (liveShellOverride === '') {
 // back into the production timings.
 if (process.env.MAXANCE_LIVE !== '1') {
   process.env.MAXANCE_LOGIN_STEP_DELAY_MS = '0';
+  // Same logic for the M8.T3 quote-flow library — its detectTab() retries
+  // on `unknown` with a 1.5s settle by default; in tests we want 0ms.
+  process.env.MAXANCE_QUOTE_STEP_DELAY_MS = '0';
 }
 
 // One-line trace so the live-gate state is obvious when vitest verbose=true.
