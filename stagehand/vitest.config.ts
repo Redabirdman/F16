@@ -9,5 +9,8 @@ export default defineConfig({
     environment: 'node',
     include: ['tests/**/*.test.ts'],
     testTimeout: 30_000,
+    // Load .env once before any test imports so the live-gated suites see
+    // MAXANCE_LIVE / ANTHROPIC_API_KEY without needing a shell export.
+    setupFiles: ['tests/setup-env.ts'],
   },
 });

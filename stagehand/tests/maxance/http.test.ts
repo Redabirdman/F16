@@ -135,7 +135,7 @@ describe('POST /v1/maxance/login — happy path', () => {
   });
 
   it('returns 500 with sanitised error on login failure', async () => {
-    const planted = plantSession('maxance-fail', ['login_form', 'login_form']);
+    const planted = plantSession('maxance-fail', ['login_form', 'password_form', 'login_form']);
     try {
       const res = await app.request('/v1/maxance/login', {
         method: 'POST',
@@ -208,6 +208,7 @@ describe('POST /v1/maxance/2fa-code', () => {
   it('resolves a pending prompt end-to-end', async () => {
     const planted = plantSession('maxance-2fa', [
       'login_form',
+      'password_form',
       'sms_prompt',
       'dashboard',
       'proximeo_home',

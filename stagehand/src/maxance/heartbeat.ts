@@ -20,17 +20,27 @@ import { logger } from '../logger.js';
 import type { BrowserPool } from '../browser-pool.js';
 
 const HEALTHY_PAGE_TYPES = ['dashboard', 'proximeo_home'] as const;
-const LOST_SESSION_PAGE_TYPES = ['login_form', 'sms_prompt'] as const;
+// Either step of the auth flow means we got logged out and bounced back to
+// login. Treat both as "session lost" so the supervisor re-runs loginMaxance.
+const LOST_SESSION_PAGE_TYPES = ['login_form', 'password_form', 'sms_prompt'] as const;
 
 const HeartbeatDetection = z.object({
-  pageType: z.enum(['dashboard', 'proximeo_home', 'login_form', 'sms_prompt', 'unknown']),
+  pageType: z.enum([
+    'dashboard',
+    'proximeo_home',
+    'login_form',
+    'password_form',
+    'sms_prompt',
+    'unknown',
+  ]),
 });
 
 const HeartbeatInstruction =
   'What kind of page is currently displayed on Maxance? Reply with one of:' +
   ' "dashboard" (broker dashboard with sidebar links),' +
   ' "proximeo_home" (Proximéo home with "Tarif - Nouveau Client" menu),' +
-  ' "login_form" (the login form is shown — session expired),' +
+  ' "login_form" (the login form\'s identifiant step is shown — session expired),' +
+  ' "password_form" (the login form\'s password step is shown — session expired),' +
   ' "sms_prompt" (asking for an SMS code — session expired),' +
   ' "unknown" (anything else).';
 

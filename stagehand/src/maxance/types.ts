@@ -13,6 +13,7 @@
  */
 export type MaxancePageType =
   | 'login_form'
+  | 'password_form'
   | 'dashboard'
   | 'sms_prompt'
   | 'proximeo_home'
@@ -76,4 +77,17 @@ export interface MaxanceLoginOptions {
   twoFactorTimeoutMs?: number;
   /** Optional callback fired after each screenshot capture (for streaming UIs). */
   screenshotCallback?: (shot: MaxanceLoginScreenshot) => void;
+  /**
+   * When true, the function does NOT try to fill / submit the MFA code itself.
+   * It pauses on the SMS prompt and polls the page until a human has manually
+   * typed the code, ticked "Se souvenir 30 jours", and clicked Continuer in
+   * the visible browser. Use for the first-of-the-month bootstrap when SMS
+   * codes expire faster than we can route them through chat.
+   *
+   * Polls every `manualSmsPollIntervalMs` (default 2000ms) up to
+   * `twoFactorTimeoutMs`. Throws `maxance_2fa_timeout` if exceeded.
+   */
+  manualSmsHandling?: boolean;
+  /** Poll interval for manualSmsHandling mode. Default 2000ms. */
+  manualSmsPollIntervalMs?: number;
 }

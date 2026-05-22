@@ -41,8 +41,28 @@ import type {
 const PROXIMEO_SSO_URL = 'https://www.maxance.com/Proximeo/ConnexionCourtierSSO.do';
 const DEFAULT_2FA_TIMEOUT_MS = 15 * 60 * 1000;
 
+/**
+ * Read the live-run settle-delay budget. The login flow waits this many ms
+ * between act calls to let Maxance's SPA swap pages. Tests override to 0 via
+ * `MAXANCE_LOGIN_STEP_DELAY_MS=0` so the stubbed-Stagehand cases run fast.
+ */
+function settleMs(defaultMs: number): number {
+  const raw = process.env.MAXANCE_LOGIN_STEP_DELAY_MS;
+  if (raw !== undefined) {
+    const n = Number(raw);
+    if (Number.isFinite(n) && n >= 0) return n;
+  }
+  return defaultMs;
+}
+
+function sleep(ms: number): Promise<void> {
+  if (ms <= 0) return Promise.resolve();
+  return new Promise<void>((r) => setTimeout(r, ms));
+}
+
 const PAGE_TYPE_VALUES = [
   'login_form',
+  'password_form',
   'dashboard',
   'sms_prompt',
   'proximeo_home',
@@ -59,19 +79,28 @@ const PageDetectionSchema = z.object({
 });
 
 const PageDetectionInstruction =
-  'Identify which Maxance page is currently displayed. Use exactly one of these labels:' +
-  ' "login_form" (the broker login form with username and password fields is visible),' +
-  ' "dashboard" (the Maxance broker dashboard is shown — "MaXance" header and a sidebar with' +
-  ' "Accès Proximéo" or "Mon tableau de bord" is visible),' +
-  ' "sms_prompt" (a one-time SMS / code verification is being requested),' +
-  ' "proximeo_home" (the Proximéo home is shown — top menu includes "Tarif - Nouveau Client" or' +
-  ' a heading "Faire un devis pour un nouveau client" is visible),' +
+  'Identify which Maxance authentication page is currently displayed. Use exactly one of these labels:' +
+  ' "login_form" (step 1 — only an "Identifiant" field is visible, no password field, with a "Continuer" button),' +
+  ' "password_form" (step 2 — heading "Saisissez votre mot de passe" with a "Mot de passe" field visible and a "Modifier" link next to the previously-entered identifiant),' +
+  ' "sms_prompt" (a one-time SMS / code verification is being requested — heading "Vérifiez votre identité" and "Code MFA" field),' +
+  ' "proximeo_home" (the broker is logged in and the quote-creation home is visible — i.e. the' +
+  ' "Faire un devis pour un nouveau client" heading is shown above a grid of vehicle / product cards' +
+  ' such as Auto, Camping car, VSP, Deux Roues, Nouvelles mobilités, Habitation, Santé. The MaXance' +
+  ' sidebar may also be visible — that is fine, still "proximeo_home". This is also valid when the' +
+  ' top menu shows "Tarif - Nouveau Client"),' +
+  ' "dashboard" (logged-in broker view that does NOT show the "Faire un devis" card grid — e.g. a' +
+  ' contracts list, a documentation page, or another sub-tab),' +
   ' "error_page" (an explicit error / locked-account / rate-limit page),' +
-  ' "unknown" (anything else, including a blank page or a cookie-consent banner).';
+  ' "unknown" (anything else, including a blank page or a cookie-consent banner).' +
+  ' IMPORTANT: if BOTH the sidebar AND the "Faire un devis" card grid are visible, ALWAYS pick' +
+  ' "proximeo_home" — the card grid is the stronger signal.';
 
 const ProximeoConfirmInstruction =
-  'Has the Proximéo home page loaded? Look for the top menu item "Tarif - Nouveau Client",' +
-  ' or a heading like "Faire un devis pour un nouveau client". Answer only the pageType.';
+  'Is the Maxance quote-creation home currently loaded? It shows the heading' +
+  ' "Faire un devis pour un nouveau client" above a grid of vehicle / product cards' +
+  ' (Auto, Camping car, VSP, Deux Roues, Nouvelles mobilités, Habitation, Santé, etc.).' +
+  ' The MaXance sidebar may also be visible — that is fine. Answer only the pageType,' +
+  ' preferring "proximeo_home" when the card grid is visible regardless of sidebar.';
 
 /**
  * Read MAXANCE_USERNAME / MAXANCE_PASSWORD at call time. Throws cleanly if
@@ -143,11 +172,61 @@ async function captureStep(
 
 /**
  * Run one page-type detection. Wraps `stagehand.extract` with our narrow
- * schema and returns the label.
+ * schema and returns the label. Retries up to `attempts` times on `unknown`,
+ * waiting `waitMs` between tries — defends against slow client-side renders
+ * (Maxance is a JSP app whose login form is painted in a second pass).
+ *
+ * Best-effort dismisses an "Accepter / Tout accepter / Continuer" cookie
+ * banner between the first and second attempt — common cause of `unknown`
+ * on a cold visit.
  */
-async function detectPage(stagehand: Stagehand): Promise<MaxancePageType> {
-  const out = await stagehand.extract(PageDetectionInstruction, PageDetectionSchema);
-  return out.pageType;
+async function detectPage(
+  stagehand: Stagehand,
+  attempts = 3,
+  waitMs = 1500,
+): Promise<MaxancePageType> {
+  let last: MaxancePageType = 'unknown';
+  for (let i = 0; i < attempts; i++) {
+    const out = await stagehand.extract(PageDetectionInstruction, PageDetectionSchema);
+    last = out.pageType;
+    if (last !== 'unknown') return last;
+    // On the first unknown, try to dismiss the cookie / CGU banner before
+    // retrying. Stagehand's `act` is a no-op if no such element exists, so
+    // this is safe to call unconditionally.
+    if (i === 0) {
+      try {
+        await stagehand.act(
+          'If a cookie consent or "Accepter" / "Tout accepter" / "Continuer" banner is visible, click it to dismiss. Otherwise do nothing.',
+        );
+      } catch {
+        // Banner-dismiss best-effort; ignore.
+      }
+    }
+    await sleep(settleMs(waitMs));
+  }
+  return last;
+}
+
+/**
+ * Collect a small diagnostic payload to embed in the `unknown` error message.
+ * Includes the live URL + the page title so the operator can tell from the
+ * error alone whether we got redirected, blocked, or just couldn't classify.
+ */
+async function pageDiagnostic(stagehand: Stagehand): Promise<string> {
+  try {
+    const page = stagehand.context.activePage();
+    if (!page) return 'no_active_page';
+    const url = page.url();
+    let title = '';
+    try {
+      title = await page.title();
+    } catch {
+      title = '<no_title>';
+    }
+    return `url=${url}|title=${title.slice(0, 120)}`;
+  } catch {
+    return 'diagnostic_unavailable';
+  }
 }
 
 /**
@@ -171,8 +250,61 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
 }
 
 /**
- * Handle the SMS-prompt branch: ask the human for the code, then submit it.
- * Returns the new pageType after submitting. Throws on timeout.
+ * Maximum number of SMS-code attempts per login. If the human pastes a wrong
+ * or expired code, we re-prompt (rather than tearing down the browser session
+ * and burning a fresh SMS-send to Achraf on the next run).
+ */
+const MAX_SMS_ATTEMPTS = 3;
+
+/**
+ * Manual-MFA mode: the agent stops on the MFA screen and lets a human type the
+ * code, tick "30 days", and click Continuer in the visible Chromium window.
+ * We just poll until the page changes. Used during the first-of-the-month
+ * bootstrap when relaying the code via env-var would race the SMS TTL.
+ *
+ * Returns the new pageType when the human has advanced. Throws on timeout.
+ */
+async function waitForManualSmsCompletion(
+  stagehand: Stagehand,
+  timeoutMs: number,
+  pollIntervalMs: number,
+  sessionId: string,
+): Promise<MaxancePageType> {
+  const start = Date.now();
+  logger.info(
+    { sessionId, timeoutMs },
+    'maxance: manual-MFA mode — waiting for human to complete the SMS challenge in the open browser',
+  );
+  // First detection is implicit (caller already classified as sms_prompt).
+  // Loop on a single (no-retry) extract so each poll is one cheap LLM call.
+  while (Date.now() - start < timeoutMs) {
+    await sleep(pollIntervalMs);
+    let pageType: MaxancePageType;
+    try {
+      // Single-shot — no retries on 'unknown' here. The human is mid-typing,
+      // brief 'unknown' states are normal and we just want to keep polling.
+      const out = await stagehand.extract(PageDetectionInstruction, PageDetectionSchema);
+      pageType = out.pageType;
+    } catch (err) {
+      logger.warn({ err, sessionId }, 'maxance: manual-MFA poll extract failed, retrying');
+      continue;
+    }
+    if (pageType !== 'sms_prompt' && pageType !== 'unknown') {
+      logger.info(
+        { sessionId, pageType, elapsedMs: Date.now() - start },
+        'maxance: manual-MFA — human advanced past SMS challenge',
+      );
+      return pageType;
+    }
+  }
+  throw new Error('maxance_2fa_timeout');
+}
+
+/**
+ * Handle the SMS-prompt branch: ask the human for the code, submit it, and on
+ * rejection ("Le code que vous avez saisi n'est pas valide") re-prompt up to
+ * MAX_SMS_ATTEMPTS times. Returns the new pageType after a successful submit.
+ * Throws on timeout or after exhausting retries.
  */
 async function handleSmsPrompt(
   stagehand: Stagehand,
@@ -180,27 +312,56 @@ async function handleSmsPrompt(
   timeoutMs: number,
   sessionId: string,
 ): Promise<MaxancePageType> {
-  const correlationId = `maxance-2fa-${sessionId}`;
-  const code = await withTimeout(
-    resolver({
-      summary:
-        'Maxance broker portal is asking for the monthly SMS verification code. Please paste the 6-digit code Achraf received.',
-      options: [{ type: 'free_text', label: 'SMS code' }],
-      correlationId,
-    }),
-    timeoutMs,
-    'maxance_2fa_timeout',
-  );
-  if (typeof code !== 'string' || code.trim().length === 0) {
-    throw new Error('maxance_2fa_empty_code');
+  for (let attempt = 1; attempt <= MAX_SMS_ATTEMPTS; attempt++) {
+    const correlationId = `maxance-2fa-${sessionId}-${attempt}`;
+    const summarySuffix =
+      attempt === 1
+        ? ''
+        : ` (attempt ${attempt}/${MAX_SMS_ATTEMPTS} — the previous code was rejected by Maxance)`;
+    const code = await withTimeout(
+      resolver({
+        summary:
+          'Maxance broker portal is asking for the monthly SMS verification code. Please paste the 6-digit code Achraf received.' +
+          summarySuffix,
+        options: [{ type: 'free_text', label: 'SMS code' }],
+        correlationId,
+      }),
+      timeoutMs,
+      'maxance_2fa_timeout',
+    );
+    if (typeof code !== 'string' || code.trim().length === 0) {
+      throw new Error('maxance_2fa_empty_code');
+    }
+    await stagehand.act('Fill the "Code MFA" SMS verification code field with %code%', {
+      variables: { code: code.trim() },
+    });
+    // Critical (first attempt only — Maxance keeps the checkbox state across
+    // retries). Tick "Se souvenir de cet appareil pendant 30 jours" so the
+    // next 30 days of logins don't re-prompt for SMS. Per Achraf, the session
+    // window is ~1 month — that's this checkbox. Soft-fail if it's missing.
+    if (attempt === 1) {
+      try {
+        await stagehand.act(
+          'If a checkbox labelled "Se souvenir de cet appareil pendant 30 jours" is present and unchecked, tick it. Otherwise do nothing.',
+        );
+      } catch (err) {
+        logger.warn({ err, sessionId }, 'maxance: remember-device checkbox tick failed');
+      }
+    }
+    await stagehand.act(
+      'Click the "Continuer" button to submit the MFA verification code (also labelled "Valider" or "Confirmer" on some variants)',
+    );
+    const next = await detectPage(stagehand);
+    if (next !== 'sms_prompt') {
+      // Either dashboard / proximeo_home (success) or error_page (give up).
+      return next;
+    }
+    logger.warn(
+      { sessionId, attempt },
+      'maxance: SMS code rejected by Maxance — re-prompting human',
+    );
   }
-  await stagehand.act('Fill the SMS verification code field with %code%', {
-    variables: { code: code.trim() },
-  });
-  await stagehand.act(
-    'Click the button that submits the SMS verification code (typically labelled "Valider", "Confirmer", or "Suivant")',
-  );
-  return detectPage(stagehand);
+  throw new Error('maxance_2fa_exhausted');
 }
 
 /**
@@ -227,11 +388,16 @@ export async function loginMaxance(
     const page = stagehand.context.activePage();
     if (!page) throw new Error('maxance_no_active_page');
 
-    // Step 1: navigate to the broker portal.
+    // Step 1: navigate to the broker portal. We deliberately use
+    // `domcontentloaded` (not `networkidle`) because Maxance keeps a few
+    // tracking pixels open indefinitely; `networkidle` would time out.
+    // Instead we follow up with a short sleep so the JSP's second-pass
+    // form render finishes before we screenshot/detect.
     await page.goto(baseUrl, { waitUntil: 'domcontentloaded' });
+    await sleep(settleMs(1500));
     await pushShot('initial_load');
 
-    // Step 2: classify what's on screen.
+    // Step 2: classify what's on screen (with retry + cookie-banner dismiss).
     let pageType = await detectPage(stagehand);
     let alreadyLoggedIn = false;
     let requiredHumanAction = false;
@@ -242,43 +408,72 @@ export async function loginMaxance(
     } else if (pageType === 'sms_prompt') {
       // The previous run left us mid-prompt — surface to the human.
       requiredHumanAction = true;
-      pageType = await handleSmsPrompt(
-        stagehand,
-        opts.humanActionResolver,
-        twoFactorTimeoutMs,
-        sessionId,
-      );
+      pageType = opts.manualSmsHandling
+        ? await waitForManualSmsCompletion(
+            stagehand,
+            twoFactorTimeoutMs,
+            opts.manualSmsPollIntervalMs ?? 2000,
+            sessionId,
+          )
+        : await handleSmsPrompt(stagehand, opts.humanActionResolver, twoFactorTimeoutMs, sessionId);
       await pushShot('post_2fa');
-    } else if (pageType === 'login_form') {
-      // Fill creds via Stagehand variable substitution — the LLM only sees
-      // the placeholder names. v3 substitutes the real values into the DOM
-      // at action time without exposing them in its reasoning trace.
-      await stagehand.act('Fill the username / identifiant field with %username%', {
-        variables: { username },
-      });
-      await stagehand.act('Fill the password / mot de passe field with %password%', {
-        variables: { password },
-      });
-      await pushShot('credentials_filled');
-      await stagehand.act(
-        'Click the login submit button (typically labelled "Connexion", "Se connecter", or "Valider")',
-      );
-      await pushShot('post_submit');
-      pageType = await detectPage(stagehand);
+    } else if (pageType === 'login_form' || pageType === 'password_form') {
+      // Maxance auth is a two-step OAuth-style flow:
+      //   step 1 ("login_form")   — Identifiant only, click Continuer
+      //   step 2 ("password_form") — Mot de passe field, click Continuer
+      // We may land on step 2 directly if the browser remembered the
+      // identifiant from a previous session (rare on a fresh userDataDir,
+      // common on subsequent runs).
+      if (pageType === 'login_form') {
+        await stagehand.act('Fill the "Identifiant" field with %username%', {
+          variables: { username },
+        });
+        await pushShot('identifiant_filled');
+        // Click prompt deliberately avoids the word "password" so callers that
+        // grep `instruction.includes('password')` for the variable-bearing act
+        // don't pick up this click instead.
+        await stagehand.act(
+          'Click the Continuer button to confirm the identifiant and move forward',
+        );
+        // Give the SPA a moment to swap to the password page.
+        await sleep(settleMs(1500));
+        await pushShot('post_identifiant_submit');
+        pageType = await detectPage(stagehand);
+      }
+
+      if (pageType === 'password_form') {
+        await stagehand.act('Fill the "Mot de passe" field with %password%', {
+          variables: { password },
+        });
+        await pushShot('password_filled');
+        await stagehand.act('Click the Continuer button to sign in after the Mot de passe field');
+        // Auth roundtrip + redirect to dashboard / SSO can take a couple of seconds.
+        await sleep(settleMs(2500));
+        await pushShot('post_password_submit');
+        pageType = await detectPage(stagehand);
+      }
 
       if (pageType === 'sms_prompt') {
         requiredHumanAction = true;
-        pageType = await handleSmsPrompt(
-          stagehand,
-          opts.humanActionResolver,
-          twoFactorTimeoutMs,
-          sessionId,
-        );
+        pageType = opts.manualSmsHandling
+          ? await waitForManualSmsCompletion(
+              stagehand,
+              twoFactorTimeoutMs,
+              opts.manualSmsPollIntervalMs ?? 2000,
+              sessionId,
+            )
+          : await handleSmsPrompt(
+              stagehand,
+              opts.humanActionResolver,
+              twoFactorTimeoutMs,
+              sessionId,
+            );
         await pushShot('post_2fa');
       }
-      if (pageType === 'login_form') {
+      if (pageType === 'login_form' || pageType === 'password_form') {
         // Form re-rendered → either bad creds, locked account, or rate-limit.
-        throw new Error('maxance_bad_credentials');
+        const diag = await pageDiagnostic(stagehand);
+        throw new Error(`maxance_bad_credentials|${diag}`);
       }
       if (pageType === 'error_page') {
         throw new Error('maxance_error_page');
@@ -288,7 +483,8 @@ export async function loginMaxance(
       if (pageType === 'proximeo_home') {
         alreadyLoggedIn = true;
       } else {
-        throw new Error(`maxance_unexpected_initial_page:${pageType}`);
+        const diag = await pageDiagnostic(stagehand);
+        throw new Error(`maxance_unexpected_initial_page:${pageType}|${diag}`);
       }
     }
 

@@ -23,11 +23,31 @@
  * records created. Per the M8.T2 spec, stops after the screenshot.
  */
 import { describe, it, expect } from 'vitest';
-import { mkdtemp, rm, readdir } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { mkdir, readdir } from 'node:fs/promises';
+import { resolve, join } from 'node:path';
 import { pool } from '../../src/browser-pool.js';
 import { loginMaxance } from '../../src/maxance/login.js';
+
+/**
+ * Stable on-disk paths for the Maxance broker session. Two separate dirs:
+ *
+ *   - `userDataDir`   — Chromium profile. Holds the "Se souvenir 30 jours"
+ *                       MFA cookie + Maxance session cookie. MUST persist
+ *                       across test runs for the 30-day-no-SMS contract to
+ *                       hold. Lives outside tmpdir so it survives OS reboots.
+ *   - `screenshotDir` — Per-run capture root passed to loginMaxance as
+ *                       `dataRoot`. Reused across runs (overwrites are fine);
+ *                       we never delete it so the most recent screenshots
+ *                       always sit there for inspection.
+ *
+ * Both are gitignored via `stagehand/.gitignore`.
+ */
+const MAXANCE_BOOTSTRAP_ROOT = resolve(
+  process.cwd(),
+  process.env.MAXANCE_BOOTSTRAP_ROOT ?? 'data/maxance-bootstrap',
+);
+const MAXANCE_USERDATA_DIR = join(MAXANCE_BOOTSTRAP_ROOT, 'userdata');
+const MAXANCE_SCREENSHOT_ROOT = join(MAXANCE_BOOTSTRAP_ROOT, 'captures');
 
 const live =
   process.env.MAXANCE_LIVE === '1' &&
@@ -41,22 +61,59 @@ const live =
 describe.skipIf(!live)('Maxance LIVE — full login + SSO bootstrap', () => {
   it(
     'signs in, lands on Proximéo home, captures 3+ screenshots',
-    { timeout: 180_000 },
+    // 16min budget: the manual-MFA mode gives Ridaa up to ~15 minutes to call
+    // Achraf, get the code, and type it into the open Chromium window.
+    { timeout: 16 * 60_000 },
     async () => {
-      const dataDir = await mkdtemp(join(tmpdir(), 'f16-maxance-live-'));
-      process.env.STAGEHAND_DATA_DIR = dataDir;
+      // Ensure both dirs exist before Stagehand / loginMaxance reach for them.
+      await mkdir(MAXANCE_USERDATA_DIR, { recursive: true });
+      await mkdir(MAXANCE_SCREENSHOT_ROOT, { recursive: true });
+      process.env.STAGEHAND_DATA_DIR = MAXANCE_SCREENSHOT_ROOT;
+      console.log(`[maxance live] userDataDir=${MAXANCE_USERDATA_DIR}`);
+      console.log(`[maxance live] captures=${MAXANCE_SCREENSHOT_ROOT}`);
 
-      const session = await pool.create({ name: 'maxance-live-test', headless: false });
+      // Pin Chromium to the stable userDataDir so cookies (incl. the MFA
+      // 30-day "remember device" token) survive process restarts.
+      // `stealth: true` is mandatory here — Maxance uses Auth0, which
+      // silently invalidates the device-trust cookie whenever it detects
+      // Playwright automation. With stealth on, Auth0 treats the cookie as
+      // valid and skips the SMS challenge for ~30 days.
+      const session = await pool.create({
+        name: 'maxance-live-test',
+        headless: false,
+        userDataDir: MAXANCE_USERDATA_DIR,
+        stealth: true,
+      });
 
       try {
         const borrowed = pool.borrow(session.sessionId);
         try {
+          // Track the resolver-call count so a rejected code doesn't simply
+          // re-submit the same bad value 3 times in a row (the production
+          // resolver re-prompts the human; ours has nothing fresh to offer).
+          let resolverCallCount = 0;
           const result = await loginMaxance(borrowed.stagehand, session.sessionId, {
-            dataRoot: dataDir,
+            dataRoot: MAXANCE_SCREENSHOT_ROOT,
+            // First-of-the-month bootstrap path. The agent halts on the MFA
+            // screen and waits for Ridaa to manually type the code + tick
+            // "30 days" + click Continuer in the visible Chromium window.
+            // After the next ~30 days, the cookie keeps us logged in and this
+            // branch is skipped entirely.
+            manualSmsHandling: true,
+            // Generous wall-clock budget — the human needs time to call Achraf.
+            twoFactorTimeoutMs: 15 * 60_000,
             humanActionResolver: async (req) => {
+              resolverCallCount += 1;
               const preset = process.env.MAXANCE_TEST_2FA_CODE;
-              if (preset && preset.trim().length > 0) {
+              if (preset && preset.trim().length > 0 && resolverCallCount === 1) {
                 return preset.trim();
+              }
+              if (resolverCallCount > 1) {
+                console.log(
+                  `\n[2FA] Maxance rejected the previous code. Fail fast — ` +
+                    `the test resolver has no fresh code to provide.\n`,
+                );
+                throw new Error('maxance_test_2fa_rejected_no_retry');
               }
               // Hang. Ridaa fills MAXANCE_TEST_2FA_CODE before re-running, or
               // restarts the test. Print a sentinel so the operator sees it.
@@ -72,17 +129,34 @@ describe.skipIf(!live)('Maxance LIVE — full login + SSO bootstrap', () => {
           });
 
           expect(result.finalUrl).toMatch(/maxance/i);
-          expect(result.screenshots.length).toBeGreaterThanOrEqual(3);
+          // Two paths to success:
+          //   - cold path (no cookie / no trust): identifiant + password + MFA
+          //     produces 6-8 screenshots
+          //   - warm path (persisted trust cookie): straight to proximeo_home
+          //     produces just `initial_load` + `proximeo_home_confirmed` = 2
+          // Both are valid M8.T2 outcomes — assert at least 2 captures.
+          expect(result.screenshots.length).toBeGreaterThanOrEqual(2);
 
           // Verify screenshots actually landed on disk.
-          const files = await readdir(join(dataDir, 'screenshots'));
+          const files = await readdir(join(MAXANCE_SCREENSHOT_ROOT, 'screenshots'));
           expect(files.length).toBeGreaterThanOrEqual(result.screenshots.length);
+        } catch (err) {
+          // Captures are always preserved (we never delete the bootstrap
+          // dir), so inspection just means "look at the captures path".
+          console.log(
+            `[maxance live] FAILED — captures kept at ${MAXANCE_SCREENSHOT_ROOT} for inspection`,
+          );
+          throw err;
         } finally {
           pool.release(session.sessionId);
         }
       } finally {
+        // ALWAYS close the Stagehand handle (frees the Chromium child proc).
+        // We DO NOT delete MAXANCE_USERDATA_DIR — the whole point is to keep
+        // the Maxance MFA "remember 30 days" cookie alive across runs. The
+        // captures dir is preserved too; screenshots overwrite by name so no
+        // garbage piles up.
         await pool.close(session.sessionId).catch(() => undefined);
-        await rm(dataDir, { recursive: true, force: true }).catch(() => undefined);
       }
     },
   );

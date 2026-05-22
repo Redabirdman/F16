@@ -104,9 +104,9 @@ const noResolver: HumanActionResolver = async () => {
 };
 
 describe('loginMaxance — happy path', () => {
-  it('login_form → dashboard → proximeo_home returns success', async () => {
+  it('login_form → password_form → dashboard → proximeo_home returns success', async () => {
     const sh = new StubStagehand();
-    sh.extractResponses = ['login_form', 'dashboard', 'proximeo_home'];
+    sh.extractResponses = ['login_form', 'password_form', 'dashboard', 'proximeo_home'];
 
     const out = await loginMaxance(asStagehand(sh), 'sess-1', {
       humanActionResolver: noResolver,
@@ -118,10 +118,12 @@ describe('loginMaxance — happy path', () => {
     expect(out.finalUrl).toMatch(/maxance/);
     expect(out.screenshots.length).toBeGreaterThanOrEqual(3);
     // Credentials should have been passed via `variables`, not interpolated.
-    const userAct = sh.actCalls.find((c) => c.instruction.includes('username'));
+    // Match on the placeholder token so we land on the fill-act (not the
+    // sibling "Click Continuer" act whose text mentions the word "password").
+    const userAct = sh.actCalls.find((c) => c.instruction.includes('%username%'));
     expect(userAct?.variables?.username).toBe('test-broker.FAKE123');
     expect(userAct?.instruction).not.toContain('test-broker.FAKE123');
-    const passAct = sh.actCalls.find((c) => c.instruction.includes('password'));
+    const passAct = sh.actCalls.find((c) => c.instruction.includes('%password%'));
     expect(passAct?.variables?.password).toBe('p@ssw0rd-test-only');
     expect(passAct?.instruction).not.toContain('p@ssw0rd-test-only');
   });
@@ -160,11 +162,12 @@ describe('loginMaxance — happy path', () => {
 });
 
 describe('loginMaxance — 2FA branch', () => {
-  it('login_form → sms_prompt → dashboard → proximeo_home with resolver', async () => {
+  it('login_form → password_form → sms_prompt → dashboard → proximeo_home with resolver', async () => {
     const sh = new StubStagehand();
     sh.extractResponses = [
       'login_form', // initial classification
-      'sms_prompt', // post-submit
+      'password_form', // post-identifiant-submit (step 2 of auth)
+      'sms_prompt', // post-password-submit
       'dashboard', // post-2FA
       'proximeo_home', // post-SSO confirm
     ];
@@ -191,7 +194,7 @@ describe('loginMaxance — 2FA branch', () => {
 
   it('2FA resolver timeout throws maxance_2fa_timeout', async () => {
     const sh = new StubStagehand();
-    sh.extractResponses = ['login_form', 'sms_prompt'];
+    sh.extractResponses = ['login_form', 'password_form', 'sms_prompt'];
     const resolver: HumanActionResolver = () => new Promise(() => undefined); // never resolves
 
     await expect(
@@ -205,7 +208,7 @@ describe('loginMaxance — 2FA branch', () => {
 
   it('2FA resolver returns empty code → throws maxance_2fa_empty_code', async () => {
     const sh = new StubStagehand();
-    sh.extractResponses = ['login_form', 'sms_prompt'];
+    sh.extractResponses = ['login_form', 'password_form', 'sms_prompt'];
     const resolver: HumanActionResolver = async () => '   ';
 
     await expect(
@@ -234,7 +237,7 @@ describe('loginMaxance — 2FA branch', () => {
 describe('loginMaxance — failure modes', () => {
   it('bad credentials: login_form persists after submit', async () => {
     const sh = new StubStagehand();
-    sh.extractResponses = ['login_form', 'login_form'];
+    sh.extractResponses = ['login_form', 'password_form', 'login_form'];
 
     await expect(
       loginMaxance(asStagehand(sh), 'sess-bad', {
@@ -246,7 +249,9 @@ describe('loginMaxance — failure modes', () => {
 
   it('unknown initial page throws + escalates with type tag', async () => {
     const sh = new StubStagehand();
-    sh.extractResponses = ['unknown'];
+    // detectPage retries up to 3 times on 'unknown' before giving up — supply
+    // enough responses to exhaust the retry budget.
+    sh.extractResponses = ['unknown', 'unknown', 'unknown'];
 
     await expect(
       loginMaxance(asStagehand(sh), 'sess-unknown', {
@@ -287,7 +292,7 @@ describe('loginMaxance — failure modes', () => {
 describe('loginMaxance — credentials safety', () => {
   it('never leaks credentials in screenshots metadata or filenames', async () => {
     const sh = new StubStagehand();
-    sh.extractResponses = ['login_form', 'dashboard', 'proximeo_home'];
+    sh.extractResponses = ['login_form', 'password_form', 'dashboard', 'proximeo_home'];
 
     await loginMaxance(asStagehand(sh), 'sess-safety', {
       humanActionResolver: noResolver,
@@ -305,11 +310,12 @@ describe('loginMaxance — credentials safety', () => {
 
   it('redacts credentials from thrown error messages', async () => {
     const sh = new StubStagehand();
-    sh.extractResponses = ['login_form', 'login_form'];
+    sh.extractResponses = ['login_form', 'password_form', 'login_form'];
     // Make an act call throw with a message containing the password — proves
     // the redactor strips it before re-throwing.
     sh.actImpl = (instruction: string) => {
-      if (instruction.includes('login submit')) {
+      // Trigger on the password-step click (after the "Mot de passe" fill).
+      if (instruction.includes('sign in after the Mot de passe')) {
         throw new Error(`network error logging in for p@ssw0rd-test-only`);
       }
     };
