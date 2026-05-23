@@ -28,9 +28,6 @@
  * a per-quote caller can't accidentally drift them.
  */
 import type { Stagehand } from '@browserbasehq/stagehand';
-import { z } from 'zod';
-import { writeFile, mkdir } from 'node:fs/promises';
-import { join } from 'node:path';
 import { logger } from '../logger.js';
 import type {
   MaxanceQuoteOptions,
@@ -38,253 +35,30 @@ import type {
   MaxanceQuoteResult,
   MaxanceQuoteScreenshot,
 } from './types.js';
+import {
+  CYLINDREE_TROTTINETTE,
+  MARQUE_TROTTINETTE,
+  PROFESSION_EMPLOYE_SECTEUR_PRIVE,
+  PROXIMEO_SSO_URL,
+  PricePreviewInstruction,
+  PricePreviewSchema,
+  TYPE_ACQUISITION_REMPLACEMENT,
+  captureStep,
+  clickByTextOrThrow,
+  detectTab,
+  fillByLabel,
+  formatDateFr,
+  formuleLabel,
+  fractionnementLabel,
+  setSelectByLabel,
+  settleMs,
+  sleep,
+  stationnementOption,
+  trottinetteVersionBand,
+  withTimeout,
+} from './quote-form.js';
 
 const DEFAULT_QUOTE_TIMEOUT_MS = 5 * 60 * 1000;
-
-/**
- * Standalone Proximéo SSO entry URL. Reached via the "Accès Proximéo"
- * sidebar link on the extranet broker dashboard. Achraf's walkthrough
- * starts here — the integrated dashboard's vehicle-card grid is a newer
- * shortcut whose backing API 403s under Playwright, so we always route
- * through the standalone Proximéo page instead.
- *
- * Kept duplicated from login.ts (same constant lives there) because:
- *   (a) duplicating one URL string is cheaper than introducing a shared
- *       constants module purely for this,
- *   (b) login.ts uses it as a fallback only; quote.ts uses it as the
- *       canonical entry — the two callers don't actually share semantics.
- */
-const PROXIMEO_SSO_URL = 'https://www.maxance.com/Proximeo/ConnexionCourtierSSO.do';
-
-/**
- * Tabs we explicitly recognise inside the Proximéo quote wizard. Mirrors
- * the same single-key extract schema we use in login.ts so the LLM has a
- * very narrow output surface.
- */
-const QUOTE_TAB_VALUES = [
-  'vehicle_picker',
-  'vehicule_tab',
-  'conducteur_tab',
-  'garanties_tab',
-  'price_preview',
-  'bridge_modal',
-  'devis_tab',
-  'unknown',
-] as const;
-type QuoteTab = (typeof QUOTE_TAB_VALUES)[number];
-
-const QuoteTabDetectionSchema = z.object({
-  tab: z.enum(QUOTE_TAB_VALUES),
-});
-
-const QuoteTabDetectionInstruction =
-  'Identify which Proximéo quote-flow screen is currently displayed. Use exactly one of these labels:' +
-  ' "vehicle_picker" (the broker is choosing a product/vehicle type. This covers BOTH the standalone' +
-  ' Proximéo home — a top-menu page with "Tarif - Nouveau Client" / "Tarif Nouveau Client" / a row of' +
-  ' product tiles Auto, Moto, Cyclomoteur, Camping car, VSP, 2 Roues, NVEI, Vélo, Speedbike, Habitation,' +
-  ' Santé, etc. — AND the integrated extranet dashboard with the "Faire un devis pour un nouveau client"' +
-  ' heading above the same product grid),' +
-  ' "vehicule_tab" (the first tab of the quote form, with fields Marque / Cylindrée / Version / dates / Type d\'acquisition / Stationnement / CP),' +
-  ' "conducteur_tab" (the second tab, with Date de naissance / Situation familiale / Profession / Antécédents),' +
-  ' "garanties_tab" (the third tab — coverage formula choice with Tiers Illimité / Vol+Incendie / Dommages tous accidents and a commission slider),' +
-  ' "price_preview" (a price has been computed and is visible on screen — a monthly or annual EUR amount is shown alongside the chosen formula),' +
-  ' "bridge_modal" (a modal asking the broker to confirm the trottinette is bridled at 25 km/h),' +
-  ' "devis_tab" (the fourth tab — subscriber info form with Civilité / Nom / Prénom / address fields),' +
-  ' "unknown" (anything else, including a blank page, an error banner alone, or an unrelated Maxance page). ' +
-  'If both a tab and a modal are visible, prefer "bridge_modal".' +
-  ' If a 403 banner is visible but the product grid is also clearly visible, prefer the matching label' +
-  ' (vehicle_picker). If the 403 banner is the only visible content, return "unknown".';
-
-/**
- * Zod schema for the price extract. Both fields nullable — Maxance only shows
- * the cadence the broker selected (Mensuel or Annuel), not both at once.
- */
-const PricePreviewSchema = z.object({
-  monthly: z.number().nullable(),
-  annual: z.number().nullable(),
-});
-
-const PricePreviewInstruction =
-  'Extract the headline price shown on the Garanties tab. Return TWO numeric fields:' +
-  ' "monthly" — the monthly premium in EUR if a per-month price is visible, otherwise null.' +
-  ' "annual" — the annual premium in EUR if a per-year price is visible, otherwise null.' +
-  ' Use the numeric value only (no currency symbol, no thousands separator). If only one' +
-  ' cadence is shown on the page, set the other field to null.';
-
-/* ────────────────────────────────────────────────────────────────────────── */
-/*  Helpers (shape stolen from login.ts so callers see a familiar surface)    */
-/* ────────────────────────────────────────────────────────────────────────── */
-
-function settleMs(defaultMs: number): number {
-  const raw = process.env.MAXANCE_QUOTE_STEP_DELAY_MS;
-  if (raw !== undefined) {
-    const n = Number(raw);
-    if (Number.isFinite(n) && n >= 0) return n;
-  }
-  return defaultMs;
-}
-
-function sleep(ms: number): Promise<void> {
-  if (ms <= 0) return Promise.resolve();
-  return new Promise<void>((r) => setTimeout(r, ms));
-}
-
-/**
- * Take a screenshot of the active page. Same best-effort pattern as login.ts:
- * a capture failure is logged but does not abort the step.
- */
-async function captureStep(
-  stagehand: Stagehand,
-  sessionId: string,
-  step: string,
-  dataRoot: string,
-  callback?: (shot: MaxanceQuoteScreenshot) => void,
-): Promise<MaxanceQuoteScreenshot | undefined> {
-  try {
-    const page = stagehand.context.activePage();
-    if (!page) return undefined;
-    const dir = join(dataRoot, 'screenshots');
-    await mkdir(dir, { recursive: true });
-    const filename = `${sessionId}-${Date.now()}-maxance-quote-${step}.png`;
-    const png = await page.screenshot({ type: 'png', fullPage: false });
-    await writeFile(join(dir, filename), png);
-    const shot: MaxanceQuoteScreenshot = {
-      step,
-      url: `/v1/static/screenshots/${filename}`,
-    };
-    callback?.(shot);
-    return shot;
-  } catch (err) {
-    logger.warn({ err, sessionId, step }, 'maxance-quote: screenshot capture failed');
-    return undefined;
-  }
-}
-
-/**
- * Detect which quote-flow tab we're on. Retries on `unknown` because the
- * Proximéo wizard renders each tab in a second JS pass — a `domcontentloaded`
- * wait isn't enough on slower runs.
- */
-async function detectTab(stagehand: Stagehand, attempts = 3, waitMs = 1500): Promise<QuoteTab> {
-  let last: QuoteTab = 'unknown';
-  for (let i = 0; i < attempts; i++) {
-    const out = await stagehand.extract(QuoteTabDetectionInstruction, QuoteTabDetectionSchema);
-    last = out.tab;
-    if (last !== 'unknown') return last;
-    await sleep(settleMs(waitMs));
-  }
-  return last;
-}
-
-/**
- * Click an element by visible text via Playwright directly (no LLM). Used for
- * the Proximéo top-menu navigation where labels are stable JSP strings.
- *
- * Stagehand's `stagehand.context.activePage()` returns a `StagehandPage`
- * that's structurally compatible with Playwright's Page surface — including
- * `getByText` and `locator`. We cast through `unknown` rather than importing
- * Playwright types directly because Stagehand re-exports its own facade.
- *
- * Rationale for bypassing Stagehand.act here: Stagehand v3 has an active
- * `$PARAMETER_NAME` wrapping bug with Anthropic models that breaks roughly
- * every other act call. The form-fill steps tolerate that retry, but the
- * navigation chain is short and brittle — one missed click and the whole
- * flow's pre-conditions are wrong. Direct Playwright is rock-solid here.
- */
-async function clickByTextOrThrow(
-  page: unknown,
-  visibleText: string,
-  label: string,
-  timeoutMs: number,
-): Promise<void> {
-  const p = page as {
-    getByText: (
-      text: string,
-      opts?: { exact?: boolean },
-    ) => {
-      first: () => { click: (opts?: { timeout?: number }) => Promise<void> };
-    };
-    locator?: (selector: string) => {
-      first: () => { click: (opts?: { timeout?: number }) => Promise<void> };
-    };
-  };
-  try {
-    await p
-      .getByText(visibleText, { exact: false })
-      .first()
-      .click({ timeout: Math.min(timeoutMs, 30_000) });
-    return;
-  } catch (err) {
-    throw new Error(
-      `maxance_quote_click_failed:${label}:${err instanceof Error ? err.message : String(err)}`,
-    );
-  }
-}
-
-/**
- * Bound a long-running step against the overall flow timeout. Used so a hung
- * `act` call doesn't blow past the caller's wall-clock budget.
- */
-function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const t = setTimeout(() => reject(new Error(label)), ms);
-    p.then(
-      (v) => {
-        clearTimeout(t);
-        resolve(v);
-      },
-      (e: unknown) => {
-        clearTimeout(t);
-        reject(e instanceof Error ? e : new Error(String(e)));
-      },
-    );
-  });
-}
-
-/**
- * Format a `Date` as Maxance's `dd/mm/yyyy` input mask. Stagehand variable
- * substitution sends the value verbatim — we want the displayed string to
- * match the broker's mental model from the PDF.
- */
-function formatDateFr(d: Date): string {
-  const dd = String(d.getDate()).padStart(2, '0');
-  const mm = String(d.getMonth() + 1).padStart(2, '0');
-  const yyyy = String(d.getFullYear());
-  return `${dd}/${mm}/${yyyy}`;
-}
-
-/**
- * Translate the param-shaped stationnement enum into the verbatim French
- * label Maxance shows in its dropdown. Keeping this mapping local so
- * params.ts stays language-agnostic.
- */
-function stationnementLabel(s: MaxanceQuoteParams['stationnement']): string {
-  switch (s) {
-    case 'garage_box':
-      return 'Garage / box fermé';
-    case 'parking_prive_clos':
-      return 'Parking privé clos';
-    case 'parking_prive_non_clos':
-      return 'Parking privé non clos';
-    case 'rue':
-      return 'Rue / voie publique';
-  }
-}
-
-function formuleLabel(f: NonNullable<MaxanceQuoteParams['formule']>): string {
-  switch (f) {
-    case 'tiers_illimite':
-      return 'Tiers Illimité';
-    case 'vol_incendie':
-      return 'Vol + Incendie';
-    case 'dommages_tous_accidents':
-      return 'Dommages tous accidents';
-  }
-}
-
-function fractionnementLabel(f: NonNullable<MaxanceQuoteParams['fractionnement']>): string {
-  return f === 'annuel' ? 'Annuel' : 'Mensuel';
-}
 
 /* ────────────────────────────────────────────────────────────────────────── */
 /*  Step planner                                                               */
@@ -396,19 +170,21 @@ export async function startQuote(
       //
       // Labels match the live UI verified on 2026-05-22:
       //   "Tarif - Nouveau Client"  (top menu)
-      //   "2 roues et quads"        (dropdown)
-      //   "Trottinette"             (sub-list)
+      //   "2 roues et quads"        (dropdown) → lands directly on Véhicule
+      //
+      // Note: there is NO separate "Trottinette" click step in the live UI.
+      // Trottinette is set later via the Marque dropdown on the Véhicule tab.
+      // Earlier iterations of this flow tried to click a "Trottinette"
+      // sub-category link that doesn't exist — the click silently no-op'd
+      // and the LLM detector returned 'vehicle_picker' again. Live trace
+      // proved the actual flow is just two clicks (Tarif → 2 roues et quads).
       await clickByTextOrThrow(page, 'Tarif - Nouveau Client', 'tarif', totalTimeoutMs);
       await sleep(settleMs(1500));
       await pushShot('tarif_nouveau_client_open');
 
       await clickByTextOrThrow(page, '2 roues et quads', 'deux_roues', totalTimeoutMs);
-      await sleep(settleMs(2000));
-      await pushShot('deux_roues_open');
-
-      await clickByTextOrThrow(page, 'Trottinette', 'trottinette', totalTimeoutMs);
       await sleep(settleMs(2500));
-      await pushShot('trottinette_launched');
+      await pushShot('vehicule_tab_open');
       tab = await detectTab(stagehand);
 
       // After the menu chain we MUST land on the Véhicule tab. Anything
@@ -427,94 +203,64 @@ export async function startQuote(
     }
 
     // Step 3 — Véhicule tab. Auto-fill the deterministic defaults Achraf
-    // flagged + the per-quote params (purchase price drives Version band).
+    // flagged + the per-quote params. All dropdowns + text inputs use
+    // direct Playwright locators (50ms each) instead of stagehand.act
+    // (~3s each, plus the $PARAMETER_NAME wrapping bug). The labels and
+    // option values are stable for the next 12+ months per Ridaa.
     if (tab === 'vehicule_tab') {
       const acquisitionDate = formatDateFr(params.purchaseDate);
-      // Marque is the only free-text on this form; "TROTTINETTE" verbatim is
-      // the canonical label Maxance auto-suggests. Cylindrée 25 is hardcoded
-      // (trottinettes must be bridled at 25 km/h — Achraf's directive).
-      await withTimeout(
-        stagehand.act(
-          'Set the "Marque" field to "TROTTINETTE" (select from the dropdown if it auto-suggests)',
-        ),
+      const stationnement = stationnementOption(params.stationnement);
+
+      // Marque + Cylindrée + Version drive the price-band lookup.
+      // Verified values: TROTTINETTE / 25 / 8181-8192.
+      await setSelectByLabel(page, 'Marque', MARQUE_TROTTINETTE, 'marque', totalTimeoutMs);
+      await setSelectByLabel(page, 'Cylindrée', CYLINDREE_TROTTINETTE, 'cylindree', totalTimeoutMs);
+      await sleep(settleMs(1000)); // Version dropdown populates server-side after Cylindrée.
+      await setSelectByLabel(
+        page,
+        'Version',
+        trottinetteVersionBand(params.purchasePriceEur),
+        'version',
         totalTimeoutMs,
-        'maxance_quote_timeout_marque',
       );
-      await withTimeout(
-        stagehand.act(
-          'Set the "Cylindrée" field to "25" (the trottinette must be bridled to 25 km/h)',
-        ),
-        totalTimeoutMs,
-        'maxance_quote_timeout_cylindree',
-      );
-      // Version is the price band. Pass the raw price as a hint; the LLM will
-      // pick the matching band from the dropdown (e.g. "200 € - 400 €").
-      await withTimeout(
-        stagehand.act(
-          'Select the "Version" entry whose price band contains %priceEur% €. Bands look like "≤ 200 €", "200 € - 400 €", "400 € - 700 €", etc.',
-          { variables: { priceEur: String(Math.round(params.purchasePriceEur)) } },
-        ),
-        totalTimeoutMs,
-        'maxance_quote_timeout_version',
-      );
+
       // Première mise en circulation + Date d'acquisition both take the
       // purchase date (Achraf: identical values, sourced from the invoice).
-      await withTimeout(
-        stagehand.act(
-          'Fill the "Première mise en circulation" date field with %dateFr% (DD/MM/YYYY format)',
-          { variables: { dateFr: acquisitionDate } },
-        ),
+      await fillByLabel(
+        page,
+        'Première mise en circulation',
+        acquisitionDate,
+        'pmec',
         totalTimeoutMs,
-        'maxance_quote_timeout_pmec',
       );
-      await withTimeout(
-        stagehand.act(
-          'Fill the "Date d\'acquisition" date field with %dateFr% (DD/MM/YYYY format)',
-          { variables: { dateFr: acquisitionDate } },
-        ),
+      await fillByLabel(page, "Date d'acquisition", acquisitionDate, 'dacq', totalTimeoutMs);
+
+      // Type d'acquisition + Stationnement: deterministic values.
+      // Protection vol = Non, Mode d'acquisition = comptant are already the
+      // form defaults — we skip them to save two LLM/Playwright round trips.
+      await setSelectByLabel(
+        page,
+        "Type d'acquisition du véhicule à assurer",
+        TYPE_ACQUISITION_REMPLACEMENT,
+        'typeacq',
         totalTimeoutMs,
-        'maxance_quote_timeout_dacq',
       );
-      // Type d'acquisition, Protection vol, Mode d'acquisition: hardcoded
-      // per Achraf.
-      await withTimeout(
-        stagehand.act(
-          'Set the "Type d\'acquisition" dropdown to "Achat d\'un véhicule de remplacement"',
-        ),
+      await setSelectByLabel(
+        page,
+        'Stationnement',
+        stationnement.value,
+        'stationnement',
         totalTimeoutMs,
-        'maxance_quote_timeout_typeacq',
       );
-      await withTimeout(
-        stagehand.act('Set the "Protection vol" radio / dropdown to "Non"'),
-        totalTimeoutMs,
-        'maxance_quote_timeout_vol',
-      );
-      await withTimeout(
-        stagehand.act('Set the "Mode d\'acquisition" dropdown to "Comptant"'),
-        totalTimeoutMs,
-        'maxance_quote_timeout_modeacq',
-      );
-      // Stationnement: client-supplied (not a default). CP + ville filled
-      // from params. City is best-effort — Maxance often auto-fills from CP,
-      // so we only act on it if the caller passed one.
-      await withTimeout(
-        stagehand.act('Set the "Stationnement" dropdown to %label%', {
-          variables: { label: stationnementLabel(params.stationnement) },
-        }),
-        totalTimeoutMs,
-        'maxance_quote_timeout_stationnement',
-      );
-      await withTimeout(
-        stagehand.act('Fill the postal-code field ("CP" or "Code postal") with %cp%', {
-          variables: { cp: params.postalCode },
-        }),
-        totalTimeoutMs,
-        'maxance_quote_timeout_cp',
-      );
+
+      // CP — Maxance auto-resolves Ville from the postal code on blur, so
+      // setting Ville explicitly is usually unnecessary. Provided as a
+      // best-effort override if the caller passed one.
+      await fillByLabel(page, 'Code postal', params.postalCode, 'cp', totalTimeoutMs);
       if (params.city) {
         await withTimeout(
           stagehand.act(
-            'If a "Ville" field is shown and is not already populated, set it to %city%',
+            'If a "Ville" dropdown is shown and is not already populated with the right city, set it to %city%',
             { variables: { city: params.city } },
           ),
           totalTimeoutMs,
@@ -523,62 +269,51 @@ export async function startQuote(
       }
       await pushShot('vehicule_filled');
 
-      // Suivant → Conducteur.
-      await withTimeout(
-        stagehand.act('Click the "Suivant" button to advance to the Conducteur tab'),
-        totalTimeoutMs,
-        'maxance_quote_timeout_suivant_conducteur',
-      );
-      await sleep(settleMs(2000));
+      // Suivant → Conducteur. The button has a stable visible label.
+      await clickByTextOrThrow(page, 'Suivant >>', 'suivant_conducteur', totalTimeoutMs);
+      await sleep(settleMs(2500));
       await pushShot('post_vehicule_suivant');
       tab = await detectTab(stagehand);
     }
 
-    // Step 4 — Conducteur tab. Per Achraf: trottinette = no permis, so DOB
-    // is the only client-supplied field; everything else is the broker-side
-    // default for our portfolio.
+    // Step 4 — Conducteur tab. Per Achraf: trottinette = no permis (the
+    // "Aucun permis" checkbox is pre-checked, so we just skip Permis), and
+    // DOB is the only client-supplied field. Situation familiale defaults
+    // to "Célibataire" so we don't set it; Profession + the three Antécédents
+    // radios need explicit setting.
     if (tab === 'conducteur_tab') {
-      await withTimeout(
-        stagehand.act('Fill the "Date de naissance" field with %dob% (DD/MM/YYYY format)', {
-          variables: { dob: formatDateFr(params.clientDateOfBirth) },
-        }),
+      await fillByLabel(
+        page,
+        'Date de naissance',
+        formatDateFr(params.clientDateOfBirth),
+        'dob',
         totalTimeoutMs,
-        'maxance_quote_timeout_dob',
       );
-      await withTimeout(
-        stagehand.act('Set the "Situation familiale" dropdown to "Célibataire"'),
+      await setSelectByLabel(
+        page,
+        'Profession',
+        PROFESSION_EMPLOYE_SECTEUR_PRIVE,
+        'profession',
         totalTimeoutMs,
-        'maxance_quote_timeout_situation',
       );
-      await withTimeout(
-        stagehand.act('Set the "Profession" dropdown to "Employé secteur privé"'),
-        totalTimeoutMs,
-        'maxance_quote_timeout_profession',
-      );
-      // Achraf: ALL Antécédents / Risque aggravé questions → Non.
+
+      // Three Risk-Aggravé / Antécédents radio groups — all "Non". Each is
+      // a separate radio set. The labels are long sentences ("Depuis le
+      // dd/mm/yyyy, avez-vous…") so we'd need brittle text matching to
+      // address them individually. Stagehand.act handles this fuzzy case
+      // well — one LLM call sets all three to Non. Souscripteur + Titulaire
+      // carte grise = Oui are form defaults (no action needed).
       await withTimeout(
         stagehand.act(
-          'For every "Antécédents" question and every "Risque aggravé" question on this page, set the answer to "Non". Leave nothing blank.',
+          'For every "Antécédents" / "Risque aggravé" question on this page (resiliation, condamnation pour delit de fuite, annulation ou suspension de permis), select the "Non" radio button. Leave nothing blank. Do NOT change "Souscripteur" or "Titulaire carte grise" — they should stay at the default "Oui".',
         ),
         totalTimeoutMs,
         'maxance_quote_timeout_antecedents',
       );
-      // Souscripteur=Oui, Titulaire carte grise=Oui.
-      await withTimeout(
-        stagehand.act(
-          'Set the "Souscripteur" question to "Oui" and the "Titulaire carte grise" question to "Oui"',
-        ),
-        totalTimeoutMs,
-        'maxance_quote_timeout_souscripteur',
-      );
       await pushShot('conducteur_filled');
 
-      await withTimeout(
-        stagehand.act('Click the "Suivant" button to advance to the Garanties tab'),
-        totalTimeoutMs,
-        'maxance_quote_timeout_suivant_garanties',
-      );
-      await sleep(settleMs(2500));
+      await clickByTextOrThrow(page, 'Suivant >>', 'suivant_garanties', totalTimeoutMs);
+      await sleep(settleMs(3000));
       await pushShot('post_conducteur_suivant');
       tab = await detectTab(stagehand);
     }

@@ -74,8 +74,34 @@ export interface SessionCreateOptions {
    *
    * Requires Chrome installed on the host. Stagehand surfaces an error if the
    * binary is absent.
+   *
+   * Ignored when `cdpUrl` is set — we connect to an already-running browser.
    */
   channel?: 'chrome' | 'chrome-beta' | 'msedge';
+  /**
+   * Connect to an already-running Chrome via the Chrome DevTools Protocol
+   * instead of launching a new browser. The Chrome must have been started
+   * with `--remote-debugging-port=<port>` and `--user-data-dir=<dir>`. Use
+   * the launcher script at `stagehand/scripts/start-maxance-chrome.ps1` to
+   * bring up a Maxance-only Chrome with port 9222 + dedicated profile.
+   *
+   * Rationale: Cloudflare's bot detection fingerprints the JS engine + GPU
+   * stack and rejects Playwright-launched Chromium (even real Chrome via
+   * `channel: 'chrome'`) once the IP is on its watchlist. Attaching to a
+   * Chrome the user already started — same binary, same residential IP,
+   * same accumulated trust profile — slips past the heuristics cleanly.
+   *
+   * When set:
+   *   - `userDataDir`, `channel`, `headless`, `stealth`, `viewport` are
+   *     ignored (the running Chrome owns those settings)
+   *   - we never spawn a Chromium child process
+   *   - Stagehand attaches via `chromium.connectOverCDP(...)` under the hood
+   *
+   * Default null. Production V1 will run this against a dedicated mini-PC
+   * over Tailscale; dev runs it against the laptop's local Chrome at
+   * `http://127.0.0.1:9222`.
+   */
+  cdpUrl?: string;
 }
 
 /**
@@ -167,9 +193,10 @@ export class BrowserPool {
   async create(opts: SessionCreateOptions = {}): Promise<SessionInfo> {
     const sessionId = randomUUID();
     const name = opts.name ?? `session-${sessionId.slice(0, 8)}`;
-    // If the caller supplies a stable userDataDir (e.g. the Maxance bootstrap
-    // path), use it verbatim. Otherwise fall back to a per-session UUID dir.
-    // Note we still mkdir it so first-run is idempotent.
+    // If we're attaching to an already-running Chrome via CDP, we don't
+    // own the profile — the user's launcher script does. We still mkdir
+    // a `dataDir` because screenshot capture writes under it, but Chrome
+    // never sees it.
     const dataDir = opts.userDataDir ?? join(this.dataRoot, 'sessions', sessionId);
     await mkdir(dataDir, { recursive: true });
 
@@ -190,8 +217,12 @@ export class BrowserPool {
     // `ignoreDefaultArgs: ['--enable-automation']` is the canonical way to tell
     // Playwright "don't put the 'Chrome is being controlled by automated test
     // software' banner up". Without it, Auth0 spots us even with the init-script.
+    //
+    // ALL of these are ignored when `cdpUrl` is set — the running Chrome owns
+    // its own launch flags, and Playwright's CDP attach can't change them.
     const stealth = opts.stealth ?? false;
     const launchArgs = stealth ? STEALTH_LAUNCH_ARGS : undefined;
+    const cdpUrl = opts.cdpUrl;
 
     const stagehand = new Stagehand({
       env: 'LOCAL',
@@ -209,23 +240,29 @@ export class BrowserPool {
         // keeps Stagehand's LLM calls robust against env pollution.
         baseURL: process.env.STAGEHAND_ANTHROPIC_BASE_URL ?? 'https://api.anthropic.com/v1',
       },
-      localBrowserLaunchOptions: {
-        headless,
-        userDataDir: dataDir,
-        ...(opts.viewport ? { viewport: opts.viewport } : {}),
-        ...(opts.channel ? { channel: opts.channel } : {}),
-        ...(stealth
-          ? {
-              args: launchArgs,
-              // Intentionally NOT overriding userAgent — Auth0 hashes the UA
-              // into the device-trust cookie at issue time. Switching UAs
-              // between bootstrap and re-use would invalidate trust on every
-              // launch. Stick with Playwright's default UA (which matches the
-              // bundled Chromium version) and let it stay stable.
-              ignoreDefaultArgs: ['--enable-automation'],
-            }
-          : {}),
-      },
+      localBrowserLaunchOptions: cdpUrl
+        ? {
+            // CDP attach mode: Stagehand will call chromium.connectOverCDP
+            // under the hood. None of the local-launch options apply.
+            cdpUrl,
+          }
+        : {
+            headless,
+            userDataDir: dataDir,
+            ...(opts.viewport ? { viewport: opts.viewport } : {}),
+            ...(opts.channel ? { channel: opts.channel } : {}),
+            ...(stealth
+              ? {
+                  args: launchArgs,
+                  // Intentionally NOT overriding userAgent — Auth0 hashes the UA
+                  // into the device-trust cookie at issue time. Switching UAs
+                  // between bootstrap and re-use would invalidate trust on every
+                  // launch. Stick with Playwright's default UA (which matches the
+                  // bundled Chromium version) and let it stay stable.
+                  ignoreDefaultArgs: ['--enable-automation'],
+                }
+              : {}),
+          },
       verbose: 0,
     });
 
@@ -234,7 +271,12 @@ export class BrowserPool {
     // Inject the JS-side stealth shim into every frame BEFORE any page loads.
     // `addInitScript` on the Playwright BrowserContext is the right hook —
     // it survives page navigations and runs in iframes too.
-    if (stealth) {
+    //
+    // Skipped in CDP mode: the running Chrome already booted with its own
+    // flags + DOM; an initScript registered post-attach would only affect
+    // future navigations and that's not worth the complexity. Real Chrome
+    // attached via CDP is the strongest stealth we have anyway.
+    if (stealth && !cdpUrl) {
       try {
         // Stagehand v3 exposes the Playwright BrowserContext as
         // `stagehand.context` (typed as `StagehandContext`). The underlying
@@ -259,7 +301,17 @@ export class BrowserPool {
       }
     }
 
-    logger.info({ sessionId, name, dataDir, headless, stealth }, 'stagehand: session created');
+    logger.info(
+      {
+        sessionId,
+        name,
+        dataDir,
+        headless: cdpUrl ? '(cdp-attached)' : headless,
+        stealth: cdpUrl ? '(cdp-attached)' : stealth,
+        cdpUrl: cdpUrl ?? undefined,
+      },
+      'stagehand: session created',
+    );
 
     const s: PooledSession = {
       sessionId,

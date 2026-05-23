@@ -37,6 +37,10 @@ class StubPage {
     Buffer.from([0x89, 0x50, 0x4e, 0x47]);
   gotos: string[] = [];
   textClicks: string[] = [];
+  /** Records every {label,value} pair the flow sets on a <select>. */
+  selectSets: Array<{ label: string; value: string }> = [];
+  /** Records every {label,value} pair the flow fills into a text <input>. */
+  fillSets: Array<{ label: string; value: string }> = [];
 
   getByText = (
     text: string,
@@ -48,6 +52,28 @@ class StubPage {
       this.textClicks.push(text);
     };
     return { first: () => ({ click: recordClick }) };
+  };
+
+  /**
+   * Stub of Playwright's `page.getByLabel(text)` — returns an object whose
+   * `selectOption()` and `fill()` methods record the (label, value) pair
+   * the flow attempted. Tests can then assert on `selectSets` / `fillSets`
+   * to verify the deterministic helpers ran with the right inputs.
+   */
+  getByLabel = (
+    text: string,
+    _opts?: { exact?: boolean },
+  ): {
+    selectOption: (value: string, opts?: { timeout?: number }) => Promise<void>;
+    fill: (value: string, opts?: { timeout?: number }) => Promise<void>;
+  } => {
+    const recordSelect = async (value: string, _opts?: { timeout?: number }): Promise<void> => {
+      this.selectSets.push({ label: text, value });
+    };
+    const recordFill = async (value: string, _opts?: { timeout?: number }): Promise<void> => {
+      this.fillSets.push({ label: text, value });
+    };
+    return { selectOption: recordSelect, fill: recordFill };
   };
 }
 
@@ -139,32 +165,36 @@ describe('startQuote — happy path (full picker → price)', () => {
     expect(out.finalUrl).toMatch(/maxance/);
     expect(out.screenshots.length).toBeGreaterThanOrEqual(5);
 
-    // The whole entry+menu chain runs via direct Playwright getByText clicks
-    // — no LLM round-trips (sidesteps Stagehand v3's $PARAMETER_NAME bug on
-    // Anthropic) and ~50× faster than the act-based equivalent.
+    // Entry + menu chain runs via direct Playwright getByText clicks.
+    // Note: there is NO separate "Trottinette" click — Trottinette is set
+    // via the Marque dropdown on the Véhicule tab (live-verified 2026-05-22).
     expect(sh.page.textClicks).toEqual(
-      expect.arrayContaining([
-        'Accès Proximéo',
-        'Tarif - Nouveau Client',
-        '2 roues et quads',
-        'Trottinette',
-      ]),
+      expect.arrayContaining(['Accès Proximéo', 'Tarif - Nouveau Client', '2 roues et quads']),
     );
+    // Two Suivant >> clicks fire: Véhicule → Conducteur, Conducteur → Garanties.
+    expect(sh.page.textClicks.filter((t) => t === 'Suivant >>')).toHaveLength(2);
 
-    // Spot-check that purchase price + dates were passed via `variables`,
-    // not interpolated into the instruction text.
-    const priceAct = sh.actCalls.find((c) => c.instruction.includes('%priceEur%'));
-    expect(priceAct?.variables?.priceEur).toBe('350');
-    const pmecAct = sh.actCalls.find((c) => c.instruction.includes('Première mise en circulation'));
-    expect(pmecAct?.variables?.dateFr).toBe('15/01/2026');
+    // All dropdown values were set via the deterministic setSelectByLabel
+    // helper (live-verified element values). Trottinette as Marque value
+    // replaces the old standalone Trottinette click step.
+    const selects = new Map(sh.page.selectSets.map((s) => [s.label, s.value]));
+    expect(selects.get('Marque')).toBe('TROTTINETTE');
+    expect(selects.get('Cylindrée')).toBe('25');
+    expect(selects.get('Version')).toBe('8181'); // 350€ → [0-500[ band
+    expect(selects.get("Type d'acquisition du véhicule à assurer")).toBe('R');
+    expect(selects.get('Stationnement')).toBe('G'); // garage_box → "Garage ou box fermé"
+    expect(selects.get('Profession')).toBe('125'); // Employé secteur privé
 
-    // Defaults Achraf flagged: Cylindrée=25, Protection vol=Non, etc. must
-    // have fired even though they're not in the params.
-    expect(sh.actCalls.find((c) => c.instruction.includes('Cylindrée'))).toBeDefined();
-    expect(sh.actCalls.find((c) => c.instruction.includes('Protection vol'))).toBeDefined();
-    expect(sh.actCalls.find((c) => c.instruction.includes('Comptant'))).toBeDefined();
+    // Text inputs (dates, CP, DOB) all use fillByLabel.
+    const fills = new Map(sh.page.fillSets.map((f) => [f.label, f.value]));
+    expect(fills.get('Première mise en circulation')).toBe('15/01/2026');
+    expect(fills.get("Date d'acquisition")).toBe('15/01/2026');
+    expect(fills.get('Code postal')).toBe('75001');
+    expect(fills.get('Date de naissance')).toBe('12/06/1990');
+
+    // The genuinely fuzzy step (bulk-setting the three Antécédents radios
+    // to Non in one shot) stays on Stagehand.act.
     expect(sh.actCalls.find((c) => c.instruction.includes('Antécédents'))).toBeDefined();
-    expect(sh.actCalls.find((c) => c.instruction.includes('Souscripteur'))).toBeDefined();
   });
 });
 

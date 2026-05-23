@@ -85,17 +85,21 @@ describe.skipIf(!live)('Maxance LIVE — quote flow (dryRun)', () => {
       await mkdir(MAXANCE_SCREENSHOT_ROOT, { recursive: true });
       process.env.STAGEHAND_DATA_DIR = MAXANCE_SCREENSHOT_ROOT;
 
+      // Two modes (see comment in login.live.test.ts for the full rationale):
+      //   1. CDP attach via MAXANCE_CDP_URL — preferred, the user pre-launches
+      //      Chrome with scripts/start-maxance-chrome.ps1 and we attach.
+      //   2. Self-launched real Chrome — fallback, may hit Cloudflare loops.
+      const cdpUrl = process.env.MAXANCE_CDP_URL;
       const session = await pool.create({
         name: 'maxance-quote-live-test',
-        headless: false,
-        userDataDir: MAXANCE_USERDATA_DIR,
-        stealth: true,
-        // Launch real Chrome (not Playwright's bundled Chromium). Cloudflare
-        // Turnstile fingerprints the JS engine + GPU stack and rejects
-        // Chromium even after a manual checkbox click. Real Chrome shares
-        // the same fingerprint as the user's daily browser → should pass.
-        // userDataDir stays isolated — we don't touch the user's profile.
-        channel: 'chrome',
+        ...(cdpUrl
+          ? { cdpUrl }
+          : {
+              headless: false,
+              userDataDir: MAXANCE_USERDATA_DIR,
+              stealth: true,
+              channel: 'chrome',
+            }),
       });
 
       try {

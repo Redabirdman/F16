@@ -78,13 +78,26 @@ describe.skipIf(!live)('Maxance LIVE — full login + SSO bootstrap', () => {
       // silently invalidates the device-trust cookie whenever it detects
       // Playwright automation. With stealth on, Auth0 treats the cookie as
       // valid and skips the SMS challenge for ~30 days.
+      // Two modes:
+      //   1. CDP attach — preferred. Set MAXANCE_CDP_URL to the running
+      //      Chrome's DevTools endpoint (e.g. http://127.0.0.1:9222). The
+      //      Chrome must have been launched via `scripts/start-maxance-chrome.ps1`
+      //      (or its equivalent on the production box). Sidesteps Cloudflare
+      //      because Stagehand attaches to a real Chrome the user already
+      //      started — same fingerprint as their daily browsing.
+      //   2. Self-launched real Chrome — fallback when CDP env not set.
+      //      Cloudflare may still challenge here; manual click in the window.
+      const cdpUrl = process.env.MAXANCE_CDP_URL;
       const session = await pool.create({
         name: 'maxance-live-test',
-        headless: false,
-        userDataDir: MAXANCE_USERDATA_DIR,
-        stealth: true,
-        // Real Chrome — see comment in quote.live.test.ts for rationale.
-        channel: 'chrome',
+        ...(cdpUrl
+          ? { cdpUrl }
+          : {
+              headless: false,
+              userDataDir: MAXANCE_USERDATA_DIR,
+              stealth: true,
+              channel: 'chrome',
+            }),
       });
 
       try {
