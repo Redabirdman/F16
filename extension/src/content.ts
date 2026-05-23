@@ -11,6 +11,9 @@
  */
 import { ErrorResponseSchema, type Command, type Response } from './wire.js';
 import type { ContentInbound, FlowOutcome } from './content-protocol.js';
+import { runLoginEnsure } from './flows/login.js';
+import { runQuotePreview } from './flows/quote-preview.js';
+import { runQuoteConfirm } from './flows/quote-confirm.js';
 
 console.info('[f16-ext] content script loaded on', location.href);
 
@@ -39,15 +42,11 @@ async function handleFlow(command: Command): Promise<Response> {
           detail: 'ping commands must be handled by the SW',
         });
       case 'login.ensure':
+        return await runLoginEnsure(command);
       case 'quote.preview':
+        return await runQuotePreview(command);
       case 'quote.confirm':
-        // Phase 2b commit C wires the real handlers here.
-        return ErrorResponseSchema.parse({
-          id: command.id,
-          kind: 'error',
-          errorCode: 'maxance_extension_flow_not_implemented',
-          detail: `phase 2b commit C will implement: ${command.kind}`,
-        });
+        return await runQuoteConfirm(command);
     }
   } catch (err) {
     return ErrorResponseSchema.parse({
