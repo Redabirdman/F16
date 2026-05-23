@@ -4,6 +4,12 @@
   "version": "0.0.1",
   "type": "module",
   "description": "F16 Maxance driver — Chrome MV3 extension that drives Ridaa's daily Chrome via vanilla DOM ops. V1 production driver per project_hosting_pivot.md.",
+  "exports": {
+    "./wire": {
+      "types": "./src/wire.ts",
+      "import": "./src/wire.ts"
+    }
+  },
   "engines": {
     "node": ">=22.0.0",
     "pnpm": ">=10.33.0"

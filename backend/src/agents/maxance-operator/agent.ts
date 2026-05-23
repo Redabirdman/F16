@@ -46,13 +46,12 @@ import { BaseAgent } from '../base.js';
 import type { AgentMessageEnvelope, MessageHandlerResult } from '../../messaging/dispatcher.js';
 import { sendMessage } from '../../messaging/dispatcher.js';
 import { logger } from '../../logger.js';
+import type { StagehandQuoteParams, StagehandSubscriberInfo } from './stagehand-client.js';
 import {
-  getDefaultStagehandClient,
-  StagehandClient,
-  StagehandClientError,
-  type StagehandQuoteParams,
-  type StagehandSubscriberInfo,
-} from './stagehand-client.js';
+  type MaxanceDriverClient,
+  getDefaultMaxanceDriverClient,
+  readErrorCode,
+} from './driver-client.js';
 
 /** Recognised MAXANCE_DRIVER values. Anything else → driver disabled. */
 type MaxanceDriver = 'chrome_extension' | 'stagehand_legacy_DO_NOT_USE_IN_PROD';
@@ -82,17 +81,30 @@ const SESSION_NAME = 'maxance-default';
 
 export class MaxanceOperatorAgent extends BaseAgent {
   /**
-   * Stagehand client — defaults to the env-driven singleton. Tests inject
+   * Driver client — interface is shared by StagehandClient (legacy) and
+   * ExtensionClient (V1 prod). The concrete instance is picked at the
+   * first handler invocation based on MAXANCE_DRIVER env. Tests inject
    * a mock via the constructor.
    */
-  private readonly client: StagehandClient;
+  private client: MaxanceDriverClient | null;
 
   constructor(
     cfg: ConstructorParameters<typeof BaseAgent>[0],
-    deps: { client?: StagehandClient } = {},
+    deps: { client?: MaxanceDriverClient } = {},
   ) {
     super(cfg);
-    this.client = deps.client ?? getDefaultStagehandClient();
+    this.client = deps.client ?? null;
+  }
+
+  /**
+   * Lazily resolve the driver client based on `driver`. Caches the
+   * resolved client so the WS server doesn't restart on every handler
+   * call. Tests bypass this by injecting `deps.client` in the constructor.
+   */
+  private async getClient(driver: MaxanceDriver): Promise<MaxanceDriverClient> {
+    if (this.client) return this.client;
+    this.client = await getDefaultMaxanceDriverClient(driver);
+    return this.client;
   }
 
   protected async onMessage(envelope: AgentMessageEnvelope): Promise<MessageHandlerResult> {
@@ -159,27 +171,31 @@ export class MaxanceOperatorAgent extends BaseAgent {
       );
       return { ok: false, error: 'maxance_driver_disabled' };
     }
-    if (driver === 'chrome_extension') {
-      // V1 target — phase 2 will wire this to the WS-backed extension client.
+    // M8.T8 phase 2c: resolve the driver client. ExtensionClient is the
+    // V1 prod path (WS server bound to 127.0.0.1:9223; Chrome extension
+    // connects outbound). StagehandClient is the legacy path.
+    let client: MaxanceDriverClient;
+    try {
+      client = await this.getClient(driver);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
       await this.emitFailed(
         payload.quoteId,
         payload.customerId,
         payload.leadId,
-        'maxance_driver_chrome_extension_not_implemented',
-        'M8.T8 phase 2 not yet built — chrome-extension driver is the V1 target',
+        'maxance_driver_init_failed',
+        msg,
       );
-      return { ok: false, error: 'maxance_driver_chrome_extension_not_implemented' };
+      return { ok: false, error: 'maxance_driver_init_failed' };
     }
-    // driver === 'stagehand_legacy_DO_NOT_USE_IN_PROD' — fall through to the
-    // legacy Stagehand-HTTP path. Cloudflare WILL block this in prod.
 
     // Re-validate the session is alive. If the cookie expired since the
     // PREVIEW_READY we need to bail — the Stagehand session has lost its
     // Garanties-tab state and a fresh login lands us on the dashboard.
     try {
-      await this.client.ensureLoggedIn(SESSION_NAME);
+      await client.ensureLoggedIn(SESSION_NAME);
     } catch (err) {
-      const code = err instanceof StagehandClientError ? err.errorCode : 'login_unknown';
+      const code = readErrorCode(err) ?? 'login_unknown';
       await this.emitFailed(
         payload.quoteId,
         payload.customerId,
@@ -192,9 +208,9 @@ export class MaxanceOperatorAgent extends BaseAgent {
     const dryRun = process.env.MAXANCE_CONFIRM_FORCE_DRYRUN === '1';
     let confirm;
     try {
-      confirm = await this.client.confirmQuote(SESSION_NAME, payload.subscriber, { dryRun });
+      confirm = await client.confirmQuote(SESSION_NAME, payload.subscriber, { dryRun });
     } catch (err) {
-      const code = err instanceof StagehandClientError ? err.errorCode : 'confirm_unknown';
+      const code = readErrorCode(err) ?? 'confirm_unknown';
       const msg = err instanceof Error ? err.message : String(err);
       logger.error(
         { quoteId: payload.quoteId, code, err: msg },
@@ -286,19 +302,23 @@ export class MaxanceOperatorAgent extends BaseAgent {
       );
       return { ok: false, error: 'maxance_driver_disabled' };
     }
-    if (driver === 'chrome_extension') {
-      // V1 target — phase 2 will wire this to the WS-backed extension client.
+    // M8.T8 phase 2c: resolve the driver client. ExtensionClient is the
+    // V1 prod path (WS server bound to 127.0.0.1:9223; Chrome extension
+    // connects outbound). StagehandClient is the legacy path.
+    let client: MaxanceDriverClient;
+    try {
+      client = await this.getClient(driver);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
       await this.emitFailed(
         payload.quoteId,
         payload.customerId,
         payload.leadId,
-        'maxance_driver_chrome_extension_not_implemented',
-        'M8.T8 phase 2 not yet built — chrome-extension driver is the V1 target',
+        'maxance_driver_init_failed',
+        msg,
       );
-      return { ok: false, error: 'maxance_driver_chrome_extension_not_implemented' };
+      return { ok: false, error: 'maxance_driver_init_failed' };
     }
-    // driver === 'stagehand_legacy_DO_NOT_USE_IN_PROD' — fall through to the
-    // legacy Stagehand-HTTP path. Cloudflare WILL block this in prod.
 
     // Product/variant guard — M8 ships ONLY trottinette. Other products
     // (car, full moto, NVEI variants) will land as their own agents or
@@ -342,7 +362,7 @@ export class MaxanceOperatorAgent extends BaseAgent {
     // Step 1: ensure login. Cheap on the warm path (~150ms); up to 15s
     // cold (SMS bootstrap once per ~30 days).
     try {
-      const loginResult = await this.client.ensureLoggedIn(SESSION_NAME);
+      const loginResult = await client.ensureLoggedIn(SESSION_NAME);
       logger.info(
         {
           quoteId: payload.quoteId,
@@ -354,7 +374,7 @@ export class MaxanceOperatorAgent extends BaseAgent {
         'maxance-operator: session ready',
       );
     } catch (err) {
-      const code = err instanceof StagehandClientError ? err.errorCode : 'login_unknown';
+      const code = readErrorCode(err) ?? 'login_unknown';
       const msg = err instanceof Error ? err.message : String(err);
       logger.error({ quoteId: payload.quoteId, code, err: msg }, 'maxance-operator: login failed');
       await this.emitFailed(
@@ -369,9 +389,9 @@ export class MaxanceOperatorAgent extends BaseAgent {
     // Step 2: drive the quote. dryRun=true — M8.T6 will add the Valider path.
     let preview;
     try {
-      preview = await this.client.runQuote(SESSION_NAME, params, { dryRun: true });
+      preview = await client.runQuote(SESSION_NAME, params, { dryRun: true });
     } catch (err) {
-      const code = err instanceof StagehandClientError ? err.errorCode : 'quote_unknown';
+      const code = readErrorCode(err) ?? 'quote_unknown';
       const msg = err instanceof Error ? err.message : String(err);
       logger.error(
         { quoteId: payload.quoteId, code, err: msg },
