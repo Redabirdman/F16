@@ -40,6 +40,14 @@ vi.mock('../../src/agents/maxance-operator/index.js', () => ({
 vi.mock('../../src/agents/reporter-agent/index.js', () => ({
   registerReporterAgentClass: vi.fn(),
 }));
+vi.mock('../../src/knowledge/index.js', () => ({
+  bootstrapKnowledgeSources: vi.fn(),
+  startKnowledgeCurator: vi.fn(() => ({
+    worker: { close: vi.fn().mockResolvedValue(undefined) },
+    scheduler: setInterval(() => undefined, 1_000_000),
+    stop: vi.fn().mockResolvedValue(undefined),
+  })),
+}));
 
 const { startWorkers } = await import('../../src/supervisor/index.js');
 const leadScorerMod = await import('../../src/agents/lead-scorer/index.js');
@@ -48,6 +56,7 @@ const hubspotMod = await import('../../src/integrations/hubspot/index.js');
 const registryMod = await import('../../src/agents/registry.js');
 const maxanceMod = await import('../../src/agents/maxance-operator/index.js');
 const reporterMod = await import('../../src/agents/reporter-agent/index.js');
+const knowledgeMod = await import('../../src/knowledge/index.js');
 
 const fakeDb = {} as unknown as Database;
 
@@ -72,6 +81,8 @@ beforeEach(() => {
   vi.mocked(registryMod.spawn).mockClear();
   vi.mocked(maxanceMod.registerMaxanceOperatorClass).mockClear();
   vi.mocked(reporterMod.registerReporterAgentClass).mockClear();
+  vi.mocked(knowledgeMod.bootstrapKnowledgeSources).mockClear();
+  vi.mocked(knowledgeMod.startKnowledgeCurator).mockClear();
 });
 
 afterEach(() => {
@@ -83,11 +94,20 @@ afterEach(() => {
 });
 
 describe('startWorkers — env-gated startup', () => {
-  it('always starts lead-scorer + sales-spawn-orchestrator', async () => {
+  it('always starts lead-scorer + sales-spawn-orchestrator + knowledge-curator', async () => {
     const set = await startWorkers({ db: fakeDb });
     expect(leadScorerMod.startLeadScorerWorker).toHaveBeenCalledTimes(1);
     expect(orchestrationMod.startSalesSpawnOrchestrator).toHaveBeenCalledTimes(1);
+    expect(knowledgeMod.bootstrapKnowledgeSources).toHaveBeenCalledTimes(1);
+    expect(knowledgeMod.startKnowledgeCurator).toHaveBeenCalledTimes(1);
     expect(set.workers).toHaveLength(2);
+    expect(set.knowledgeCurator).not.toBeNull();
+  });
+
+  it('skips knowledge-curator when flag is false', async () => {
+    const set = await startWorkers({ db: fakeDb, flags: { knowledgeCurator: false } });
+    expect(knowledgeMod.startKnowledgeCurator).not.toHaveBeenCalled();
+    expect(set.knowledgeCurator).toBeNull();
   });
 
   it('skips hubspot-sync when HUBSPOT_API_KEY is unset', async () => {

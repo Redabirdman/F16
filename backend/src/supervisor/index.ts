@@ -32,10 +32,17 @@ import { spawn } from '../agents/registry.js';
 import { registerMaxanceOperatorClass } from '../agents/maxance-operator/index.js';
 import { registerReporterAgentClass } from '../agents/reporter-agent/index.js';
 import type { BaseAgent } from '../agents/base.js';
+import {
+  bootstrapKnowledgeSources,
+  startKnowledgeCurator,
+  type KnowledgeCuratorHandle,
+} from '../knowledge/index.js';
 
 export interface WorkerSet {
   workers: Worker[];
   agents: BaseAgent[];
+  /** Knowledge Curator singleton handle, if started. */
+  knowledgeCurator: KnowledgeCuratorHandle | null;
   /** Stop every worker + agent. Idempotent. */
   stop(): Promise<void>;
 }
@@ -53,6 +60,7 @@ export interface StartWorkersOptions {
     salesSpawn?: boolean;
     reporter?: boolean;
     maxanceOperator?: boolean;
+    knowledgeCurator?: boolean;
   };
 }
 
@@ -68,7 +76,10 @@ export async function startWorkers(opts: StartWorkersOptions): Promise<WorkerSet
       opts.flags?.reporter ??
       Boolean(process.env.HUMAN_ACTION_GROUP_CHAT_ID && process.env.WAHA_BASE_URL),
     maxanceOperator: opts.flags?.maxanceOperator ?? Boolean(process.env.MAXANCE_DRIVER),
+    knowledgeCurator: opts.flags?.knowledgeCurator ?? true,
   };
+
+  let knowledgeCurator: KnowledgeCuratorHandle | null = null;
 
   // 1. lead-scorer (always — LLM-driven scoring on LEAD.NEW).
   if (flags.leadScorer) {
@@ -156,9 +167,31 @@ export async function startWorkers(opts: StartWorkersOptions): Promise<WorkerSet
     logger.info('supervisor: maxance-operator SKIPPED (no MAXANCE_DRIVER set)');
   }
 
+  // 6. knowledge-curator (option B). Consumes KNOWLEDGE.REINDEX_REQUESTED
+  //    + emits scheduled reindex requests for every registered source.
+  //    bootstrapKnowledgeSources() registers the V1 corpus (Assuryal
+  //    markdown KB + the conversion-machine React source for landing-page
+  //    copy). The Sales Agent's knowledge.search tool searches the
+  //    embedded chunks via pgvector.
+  if (flags.knowledgeCurator) {
+    try {
+      bootstrapKnowledgeSources();
+      knowledgeCurator = startKnowledgeCurator({ db: opts.db });
+      logger.info('supervisor: knowledge-curator started');
+    } catch (err) {
+      logger.error(
+        { err: err instanceof Error ? err.message : String(err) },
+        'supervisor: knowledge-curator failed to start',
+      );
+    }
+  } else {
+    logger.info('supervisor: knowledge-curator SKIPPED by flag');
+  }
+
   return {
     workers,
     agents,
+    knowledgeCurator,
     stop: async () => {
       // Close BullMQ workers first (they drain in-flight jobs); then
       // stop the BaseAgent singletons. Order matters: workers may emit
@@ -166,8 +199,15 @@ export async function startWorkers(opts: StartWorkersOptions): Promise<WorkerSet
       // new work from arriving at the about-to-stop agents.
       await Promise.allSettled(workers.map((w) => w.close()));
       await Promise.allSettled(agents.map((a) => a.stop()));
+      if (knowledgeCurator) {
+        await knowledgeCurator.stop().catch(() => undefined);
+      }
       logger.info(
-        { workers: workers.length, agents: agents.length },
+        {
+          workers: workers.length,
+          agents: agents.length,
+          knowledgeCurator: knowledgeCurator !== null,
+        },
         'supervisor: all workers stopped',
       );
     },
