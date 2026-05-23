@@ -113,6 +113,16 @@ export interface ListPendingOptions {
 }
 
 /**
+ * Single-row lookup by primary key. Returns null on miss (no-throw — the
+ * caller decides whether a missing row is recoverable, e.g. the reporter
+ * agent treats it as "row was deleted between dispatch and consume").
+ */
+export async function getActionById(db: Database, id: string): Promise<HumanAction | null> {
+  const [row] = await db.select().from(humanActions).where(eq(humanActions.id, id)).limit(1);
+  return row ?? null;
+}
+
+/**
  * Inbox query — pending items ordered severity-first then oldest-first
  * (critical-and-stale bubbles to the top).
  */
