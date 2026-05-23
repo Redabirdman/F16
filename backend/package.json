@@ -30,7 +30,8 @@
     "seed:dev": "tsx scripts/seed-dev.ts",
     "seed:dev:confirm": "tsx scripts/seed-dev.ts --yes",
     "ingest:knowledge": "tsx scripts/ingest-knowledge.ts",
-    "test:e2e:db": "vitest run tests/e2e"
+    "test:e2e:db": "vitest run tests/e2e",
+    "extension:ws": "tsx scripts/extension-ws-only.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "0.96.0",
