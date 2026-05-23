@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 
 from f16_pipecat import __version__
 from f16_pipecat.logging import configure_logging, logger
+from f16_pipecat.voice import router as voice_router
 
 # Configure structured JSON logging once at import time. Matches the
 # backend's pino setup (timestamp, level, message, contextual fields).
@@ -42,6 +43,10 @@ class HealthResponse(BaseModel):
 
 
 app = FastAPI(title="F16 Pipecat Bridge", version=__version__)
+# Mount the voice bridge router (option F scaffold — /voice/sessions/new,
+# /voice/turn, /voice/sessions/{id}/end). M10 will replace the V0 stubs
+# with the real Pipecat + Deepgram + Azure + backend wiring.
+app.include_router(voice_router)
 
 
 @app.get("/health", response_model=HealthResponse)
