@@ -124,9 +124,25 @@ export async function start(port: number = Number(process.env.PORT ?? 3001)): Pr
   const server = serve({ fetch: liveApp.fetch, port }) as Server;
   logger.info({ port }, 'f16-backend listening');
 
+  // Boot every backend worker / agent (env-gated). Closes the deployment
+  // loop for hubspot-sync, reporter-agent, maxance-operator, the sales
+  // spawn orchestrator, and lead-scorer. Without this call, the routes
+  // accept requests but nothing downstream actually processes them.
+  const { startWorkers } = await import('./supervisor/index.js');
+  const workerSet = await startWorkers({ db: db() });
+
   const shutdown = (signal: NodeJS.Signals): void => {
     logger.info({ signal }, 'shutting down');
-    server.close(() => process.exit(0));
+    // Stop workers first (drains in-flight jobs), then close the HTTP server.
+    void workerSet
+      .stop()
+      .catch((err: unknown) =>
+        logger.warn(
+          { err: err instanceof Error ? err.message : String(err) },
+          'supervisor: stop threw',
+        ),
+      )
+      .finally(() => server.close(() => process.exit(0)));
     // Hard-exit fallback if connections hang past the grace window.
     setTimeout(() => process.exit(1), 10_000).unref();
   };
