@@ -1,20 +1,72 @@
 /**
- * Content script — runs in every Maxance tab (matches in manifest.json).
+ * Content script entry — registered in manifest.json for *.maxance.com.
  *
- * Phase 2 scaffold: this file exists so the manifest's content_scripts
- * declaration has a target, and so the SW can later `chrome.scripting.executeScript`
- * its DOM-driver functions into the page when commands arrive. The actual DOM
- * flows (login, quote-preview, quote-confirm) land in phase 2b.
+ * Receives FlowInvocation messages from the background SW, dispatches to
+ * the matching flow handler, returns a wire `Response` envelope back via
+ * chrome.runtime.sendMessage.
  *
- * For now: a no-op that just logs presence + exposes a `window.__f16_marker`
- * sentinel so end-to-end tests can verify the script reached the page.
+ * The actual flow logic (login.ensure / quote.preview / quote.confirm)
+ * lives in `./flows/*.ts` — landing in M8.T8 phase 2b commit C. This file
+ * is the routing skeleton.
  */
-(() => {
-  console.info('[f16-ext] content script loaded on', location.href);
-  // Lightweight marker for end-to-end checks. NOT a public API — production
-  // commands route via chrome.runtime.sendMessage from the SW, not via this.
-  (window as unknown as { __f16_marker?: { version: string; ts: number } }).__f16_marker = {
-    version: chrome.runtime.getManifest().version ?? '0.0.0',
-    ts: Date.now(),
-  };
-})();
+import { ErrorResponseSchema, type Command, type Response } from './wire.js';
+import type { ContentInbound, FlowOutcome } from './content-protocol.js';
+
+console.info('[f16-ext] content script loaded on', location.href);
+
+// Lightweight marker for end-to-end checks. NOT a public API — production
+// commands route via chrome.runtime.onMessage from the SW, not via this.
+(window as unknown as { __f16_marker?: { version: string; ts: number } }).__f16_marker = {
+  version: chrome.runtime.getManifest().version ?? '0.0.0',
+  ts: Date.now(),
+};
+
+/**
+ * Dispatch a Command to the matching flow handler and produce a wire
+ * Response. Wraps every flow in a uniform error handler so the SW always
+ * receives a well-formed Response (no thrown promises crossing the
+ * runtime.sendMessage boundary).
+ */
+async function handleFlow(command: Command): Promise<Response> {
+  try {
+    switch (command.kind) {
+      case 'ping':
+        // SW handles ping itself — content script shouldn't see this.
+        return ErrorResponseSchema.parse({
+          id: command.id,
+          kind: 'error',
+          errorCode: 'maxance_extension_ping_routed_to_content',
+          detail: 'ping commands must be handled by the SW',
+        });
+      case 'login.ensure':
+      case 'quote.preview':
+      case 'quote.confirm':
+        // Phase 2b commit C wires the real handlers here.
+        return ErrorResponseSchema.parse({
+          id: command.id,
+          kind: 'error',
+          errorCode: 'maxance_extension_flow_not_implemented',
+          detail: `phase 2b commit C will implement: ${command.kind}`,
+        });
+    }
+  } catch (err) {
+    return ErrorResponseSchema.parse({
+      id: command.id,
+      kind: 'error',
+      errorCode: 'maxance_extension_unexpected_error',
+      detail: err instanceof Error ? err.message.slice(0, 240) : String(err).slice(0, 240),
+    });
+  }
+}
+
+chrome.runtime.onMessage.addListener(
+  (message: ContentInbound, _sender, sendResponse: (resp: FlowOutcome) => void) => {
+    if (message.kind !== 'flow') return false;
+    // Run async work, send response when done. Returning true keeps the
+    // message channel open until sendResponse fires.
+    void handleFlow(message.command).then((response) => {
+      sendResponse({ kind: 'flow.result', response });
+    });
+    return true;
+  },
+);

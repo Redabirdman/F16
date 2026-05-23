@@ -1,26 +1,25 @@
 /**
- * MV3 service worker — F16 Maxance driver (phase 2 scaffold).
+ * MV3 service worker — F16 Maxance driver.
  *
- * Responsibilities (V1 scope):
- *   1. Maintain a persistent outbound WebSocket to ws://127.0.0.1:9223
- *      (backend's extension-client.ts, landing in phase 2c). Reconnect with
- *      exponential backoff if it drops; MV3 service workers can be torn down
- *      and respawned by Chrome at any time, so the reconnect MUST be idempotent.
- *   2. On connect, send a `hello` event with extension version + the active
- *      Maxance tab URL (if any).
- *   3. Route inbound `Command` frames to the appropriate flow handler.
- *      Phase 2b lands the actual handlers (`login.ensure`, `quote.preview`,
- *      `quote.confirm`); this scaffold answers `ping` and replies with a
- *      stub error for everything else so backend integration is testable
- *      end-to-end without the flows being implemented yet.
+ * Responsibilities:
+ *   1. Persistent outbound WebSocket to ws://127.0.0.1:9223 (the backend's
+ *      extension-client.ts, landing in M8.T8 phase 2c). Reconnect-forever
+ *      with exponential backoff. Idempotent across SW resurrection.
+ *   2. On connect, send a `hello` event with extension version + active
+ *      Maxance tab URL.
+ *   3. Route inbound Commands:
+ *        - `ping` → answer with `pong` directly here (no tab work needed).
+ *        - everything else → forward to the active Maxance tab's content
+ *          script via chrome.tabs.sendMessage; await its FlowOutcome;
+ *          forward the wrapped Response to the backend WS.
+ *   4. Handle side-channel messages from the content script:
+ *        - `capture_screenshot` → chrome.tabs.captureVisibleTab, reply.
+ *        - `progress.forward` → emit a wire ProgressEvent to the backend.
  *
- * What is NOT in this scaffold:
- *   - Real flow implementations (login / quote-preview / quote-confirm)
- *     — those need the content script's DOM-driver layer first.
- *   - Tab targeting heuristics (which Maxance tab to drive when there are
- *     multiple) — phase 2b.
- *   - Auth on the WebSocket — phase 2c adds an HMAC handshake matching the
- *     STAGEHAND_HMAC_SECRET pattern.
+ * Driver gate (matches the backend's MAXANCE_DRIVER env): if no Maxance
+ * tab is open, the SW returns a tagged
+ * `maxance_extension_no_active_tab` error so the backend's existing
+ * QUOTE.FAILED routing surfaces it correctly.
  */
 import {
   parseFrame,
@@ -30,7 +29,14 @@ import {
   PongResponseSchema,
   ErrorResponseSchema,
   HelloEventSchema,
+  ProgressEventSchema,
 } from './wire.js';
+import type {
+  ContentInbound,
+  FlowOutcome,
+  ScreenshotResponse,
+  SwInbound,
+} from './content-protocol.js';
 
 /** Backend WS endpoint. Hard-coded for V1 — production = same machine. */
 const BACKEND_WS_URL = 'ws://127.0.0.1:9223';
@@ -45,66 +51,167 @@ function extensionVersion(): string {
 }
 
 /**
- * Find the currently-active Maxance tab, if any. Used to populate the `hello`
- * event so the backend knows which tab the extension will drive when there
- * are multiple Maxance tabs open.
+ * Find the Maxance tab to drive. Strategy:
+ *   1. If there's exactly one Maxance tab → use it.
+ *   2. If there are several → prefer the active one in any window.
+ *   3. If none → return null and let the caller surface no_active_tab.
  */
-async function activeMaxanceUrl(): Promise<string | null> {
+async function findMaxanceTab(): Promise<chrome.tabs.Tab | null> {
   const tabs = await chrome.tabs.query({
     url: ['https://www.maxance.com/*', 'https://extranet.maxance.com/*'],
   });
-  const active = tabs.find((t) => t.active);
-  return active?.url ?? tabs[0]?.url ?? null;
+  if (tabs.length === 0) return null;
+  return tabs.find((t) => t.active) ?? tabs[0] ?? null;
 }
 
-/**
- * Send a parsed wire frame. No-ops silently if the socket is not OPEN —
- * the backend MUST tolerate dropped status frames.
- */
-function send(sock: WebSocket, frame: Response | Event): void {
-  if (sock.readyState !== WebSocket.OPEN) return;
+/** Send a wire frame on the open WS. No-ops silently if not OPEN. */
+function sendOnWs(sock: WebSocket | null, frame: Response | Event): void {
+  if (!sock || sock.readyState !== WebSocket.OPEN) return;
   try {
     sock.send(JSON.stringify(frame));
   } catch (err) {
-    console.warn('[f16-ext] send failed', err);
+    console.warn('[f16-ext] ws send failed', err);
   }
 }
 
+/** Module-level reference to the live socket — used by progress.forward. */
+let liveSocket: WebSocket | null = null;
+
 /**
- * Route an inbound command and send the response back. Scaffold version:
- *   - `ping` → reply with pong (proves the round-trip + Zod validation works)
- *   - everything else → reply with a tagged
- *     maxance_extension_handler_not_implemented error so the backend's
- *     QUOTE.FAILED routing can be wired today and start swapping in real
- *     handlers later.
+ * Forward a Command to the active Maxance tab's content script and await
+ * its FlowOutcome. Times out if the content script doesn't respond within
+ * the command's timeoutMs (default 60s — flows themselves can be long, so
+ * we add a generous outer budget).
  */
-function handleCommand(sock: WebSocket, cmd: Command): void {
+async function forwardToContent(command: Command): Promise<Response> {
+  const tab = await findMaxanceTab();
+  if (!tab || tab.id === undefined) {
+    return ErrorResponseSchema.parse({
+      id: command.id,
+      kind: 'error',
+      errorCode: 'maxance_extension_no_active_tab',
+      detail: 'no maxance.com tab open in this Chrome — operator must navigate first',
+    });
+  }
+  // `ping` is handled directly by the SW (never reaches forwardToContent),
+  // but TypeScript narrows the union here — only the three flow commands
+  // carry a `timeoutMs` field. Read it via a small helper.
+  const cmdTimeout = 'timeoutMs' in command ? command.timeoutMs : undefined;
+  const outerTimeoutMs = (cmdTimeout ?? 60_000) + 30_000; // small margin over the flow's own budget
+  const envelope: ContentInbound = { kind: 'flow', command };
+  try {
+    const result = await raceWithTimeout(
+      chrome.tabs.sendMessage<ContentInbound, FlowOutcome>(tab.id, envelope),
+      outerTimeoutMs,
+    );
+    return result.response;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg === 'sw_forward_timeout') {
+      return ErrorResponseSchema.parse({
+        id: command.id,
+        kind: 'error',
+        errorCode: 'maxance_extension_flow_timeout',
+        detail: `content script did not respond within ${outerTimeoutMs}ms`,
+      });
+    }
+    return ErrorResponseSchema.parse({
+      id: command.id,
+      kind: 'error',
+      errorCode: 'maxance_extension_forward_failed',
+      detail: msg.slice(0, 240),
+    });
+  }
+}
+
+function raceWithTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error('sw_forward_timeout')), ms);
+    p.then(
+      (v) => {
+        clearTimeout(t);
+        resolve(v);
+      },
+      (e: unknown) => {
+        clearTimeout(t);
+        reject(e instanceof Error ? e : new Error(String(e)));
+      },
+    );
+  });
+}
+
+/**
+ * Route an inbound Command. ping is answered locally; everything else
+ * forwards to the active Maxance tab's content script.
+ */
+async function handleCommand(sock: WebSocket, cmd: Command): Promise<void> {
+  let response: Response;
   if (cmd.kind === 'ping') {
-    const pong = PongResponseSchema.parse({
+    response = PongResponseSchema.parse({
       id: cmd.id,
       kind: 'pong',
       ...(cmd.nonce !== undefined ? { nonce: cmd.nonce } : {}),
     });
-    send(sock, pong);
-    return;
+  } else {
+    response = await forwardToContent(cmd);
   }
-  const err = ErrorResponseSchema.parse({
-    id: cmd.id,
-    kind: 'error',
-    errorCode: 'maxance_extension_handler_not_implemented',
-    detail: `phase 2b will implement: ${cmd.kind}`,
-  });
-  send(sock, err);
+  sendOnWs(sock, response);
 }
 
 /**
- * Hold one socket open. Resolves when the socket closes for ANY reason — the
- * caller treats that as "time to back off and reconnect". Resolves
- * immediately on a synchronous constructor error too.
- *
- * Concurrency: relies on no more than one outstanding socket at a time.
- * The reconnect loop awaits this before opening another.
+ * Capture the visible viewport of the active Maxance tab. Returns a PNG
+ * data URL. Used by the content script's `captureScreenshot` helper —
+ * content scripts can't call chrome.tabs.captureVisibleTab themselves.
  */
+async function captureActiveTabScreenshot(): Promise<ScreenshotResponse> {
+  const tab = await findMaxanceTab();
+  if (!tab || tab.windowId === undefined) {
+    return { kind: 'capture.err', error: 'no_maxance_tab' };
+  }
+  try {
+    const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
+    return { kind: 'capture.ok', dataUrl };
+  } catch (err) {
+    return { kind: 'capture.err', error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/**
+ * Side-channel listener. The content script sends:
+ *   - `capture_screenshot` — synchronous-from-callsite request; respond
+ *     with the dataUrl.
+ *   - `progress.forward` — fire-and-forget; emit a wire ProgressEvent to
+ *     the backend WS.
+ *
+ * Returning `true` keeps the message channel open until sendResponse is
+ * called (mandatory for async work — see MDN runtime.onMessage docs).
+ */
+chrome.runtime.onMessage.addListener(
+  (
+    message: SwInbound,
+    _sender,
+    sendResponse: (resp: ScreenshotResponse | { ok: true }) => void,
+  ) => {
+    if (message.kind === 'capture_screenshot') {
+      void captureActiveTabScreenshot().then((resp) => sendResponse(resp));
+      return true;
+    }
+    if (message.kind === 'progress.forward') {
+      const event = ProgressEventSchema.parse({
+        kind: 'progress',
+        commandId: message.commandId,
+        step: message.step,
+        ...(message.detail !== undefined ? { detail: message.detail } : {}),
+      });
+      sendOnWs(liveSocket, event);
+      sendResponse({ ok: true });
+      return false;
+    }
+    return false;
+  },
+);
+
+/** Hold one socket open. Resolves when the socket closes for ANY reason. */
 function holdSocket(): Promise<{ ok: boolean; reason: string }> {
   return new Promise((resolve) => {
     let sock: WebSocket;
@@ -114,18 +221,19 @@ function holdSocket(): Promise<{ ok: boolean; reason: string }> {
       resolve({ ok: false, reason: `ws_ctor_failed: ${(err as Error).message}` });
       return;
     }
+    liveSocket = sock;
 
     let opened = false;
     sock.addEventListener('open', () => {
       opened = true;
-      void activeMaxanceUrl().then((url) => {
+      void findMaxanceTab().then((tab) => {
         const hello = HelloEventSchema.parse({
           kind: 'hello',
           extensionVersion: extensionVersion(),
-          activeMaxanceUrl: url,
-          capabilities: ['ping'],
+          activeMaxanceUrl: tab?.url ?? null,
+          capabilities: ['ping', 'forward_flow'],
         });
-        send(sock, hello);
+        sendOnWs(sock, hello);
       });
     });
 
@@ -139,31 +247,24 @@ function holdSocket(): Promise<{ ok: boolean; reason: string }> {
         return;
       }
       if (parsed.side === 'command') {
-        handleCommand(sock, parsed.value);
+        void handleCommand(sock, parsed.value);
       }
-      // Responses + events from the backend are not part of V1 — backend
-      // never sends those to the extension. Ignore.
     });
 
     sock.addEventListener('close', () => {
+      if (liveSocket === sock) liveSocket = null;
       resolve({ ok: opened, reason: 'ws_closed' });
     });
-
     sock.addEventListener('error', (ev) => {
       console.warn('[f16-ext] ws error', ev);
+      if (liveSocket === sock) liveSocket = null;
       resolve({ ok: false, reason: 'ws_error' });
     });
   });
 }
 
-/**
- * Reconnect-forever loop. The SW may be torn down by Chrome between events —
- * re-running this loop on every `chrome.runtime.onStartup` /
- * `chrome.runtime.onInstalled` is the standard MV3 idiom. A module-level
- * lock prevents two loops from running if both listeners fire.
- */
+/** Reconnect-forever loop with a module-level lock to prevent re-entry. */
 let loopRunning = false;
-
 async function reconnectLoop(): Promise<void> {
   if (loopRunning) return;
   loopRunning = true;
@@ -171,10 +272,7 @@ async function reconnectLoop(): Promise<void> {
   try {
     while (true) {
       const result = await holdSocket();
-      if (result.ok) {
-        // We had a successful open + clean close — reset backoff.
-        attempt = 0;
-      }
+      if (result.ok) attempt = 0;
       const delay = BACKOFF_MS[Math.min(attempt, BACKOFF_MS.length - 1)] ?? 30_000;
       attempt += 1;
       console.warn(`[f16-ext] reconnect in ${delay}ms (reason=${result.reason})`);
@@ -189,12 +287,6 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-// Boot. MV3 fires onInstalled once on install/update; onStartup fires every
-// browser launch. The bare void call below catches SW resurrection.
-chrome.runtime.onInstalled.addListener(() => {
-  void reconnectLoop();
-});
-chrome.runtime.onStartup.addListener(() => {
-  void reconnectLoop();
-});
+chrome.runtime.onInstalled.addListener(() => void reconnectLoop());
+chrome.runtime.onStartup.addListener(() => void reconnectLoop());
 void reconnectLoop();
