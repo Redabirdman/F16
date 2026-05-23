@@ -64,6 +64,11 @@ const SALES_AGENT_TOOL_NAMES = [
   'customer.remember_fact',
   'knowledge.search',
   'human.escalate',
+  // M8.T8 Option A: trottinette quote kickoff. Tool builds the
+  // QUOTE.REQUESTED payload + writes the canonical quotes row + emits
+  // to the maxance-operator queue. Sales Agent calls this once it has
+  // gathered the full trottinette qualification field set.
+  'quote.request',
 ] as const;
 
 /**

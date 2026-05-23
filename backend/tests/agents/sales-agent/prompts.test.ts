@@ -66,10 +66,18 @@ describe('buildSalesAgentSystemPrompt()', () => {
     expect(a.map((f) => f.cache)).toEqual(b.map((f) => f.cache));
   });
 
-  it('keeps the four cached fragments under ~6 kB for a typical context', () => {
+  it('keeps the four cached fragments under ~8 kB for a typical context', () => {
+    // Cap was 6 kB through M6. M8.T8 Option A bumped to 8 kB because the
+    // playbook now lists the FIVE required trottinette qualification fields
+    // (purchasePriceEur, purchaseDate, postalCode, clientDateOfBirth,
+    // stationnement) with concrete French phrasings for each — added ~1 kB,
+    // intentional growth (the playbook was previously incomplete and the
+    // LLM couldn't have called quote.request correctly). Token cost: ~+250
+    // input tokens per first-turn-after-deploy, amortised by prompt caching
+    // afterward.
     const frags = buildSalesAgentSystemPrompt(minimalCtx);
     const totalBytes = frags.reduce((sum, f) => sum + Buffer.byteLength(f.text, 'utf8'), 0);
-    expect(totalBytes).toBeLessThan(6000);
+    expect(totalBytes).toBeLessThan(8000);
   });
 });
 
