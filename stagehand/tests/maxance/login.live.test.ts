@@ -83,6 +83,8 @@ describe.skipIf(!live)('Maxance LIVE — full login + SSO bootstrap', () => {
         headless: false,
         userDataDir: MAXANCE_USERDATA_DIR,
         stealth: true,
+        // Real Chrome — see comment in quote.live.test.ts for rationale.
+        channel: 'chrome',
       });
 
       try {

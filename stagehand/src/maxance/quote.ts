@@ -42,6 +42,21 @@ import type {
 const DEFAULT_QUOTE_TIMEOUT_MS = 5 * 60 * 1000;
 
 /**
+ * Standalone Proximéo SSO entry URL. Reached via the "Accès Proximéo"
+ * sidebar link on the extranet broker dashboard. Achraf's walkthrough
+ * starts here — the integrated dashboard's vehicle-card grid is a newer
+ * shortcut whose backing API 403s under Playwright, so we always route
+ * through the standalone Proximéo page instead.
+ *
+ * Kept duplicated from login.ts (same constant lives there) because:
+ *   (a) duplicating one URL string is cheaper than introducing a shared
+ *       constants module purely for this,
+ *   (b) login.ts uses it as a fallback only; quote.ts uses it as the
+ *       canonical entry — the two callers don't actually share semantics.
+ */
+const PROXIMEO_SSO_URL = 'https://www.maxance.com/Proximeo/ConnexionCourtierSSO.do';
+
+/**
  * Tabs we explicitly recognise inside the Proximéo quote wizard. Mirrors
  * the same single-key extract schema we use in login.ts so the LLM has a
  * very narrow output surface.
@@ -64,15 +79,21 @@ const QuoteTabDetectionSchema = z.object({
 
 const QuoteTabDetectionInstruction =
   'Identify which Proximéo quote-flow screen is currently displayed. Use exactly one of these labels:' +
-  ' "vehicle_picker" (the broker is choosing a product/vehicle type — vehicle cards Auto, Camping car, VSP, Deux Roues, Nouvelles mobilités, etc. are visible OR a Trottinette / NVEI subtype selector),' +
+  ' "vehicle_picker" (the broker is choosing a product/vehicle type. This covers BOTH the standalone' +
+  ' Proximéo home — a top-menu page with "Tarif - Nouveau Client" / "Tarif Nouveau Client" / a row of' +
+  ' product tiles Auto, Moto, Cyclomoteur, Camping car, VSP, 2 Roues, NVEI, Vélo, Speedbike, Habitation,' +
+  ' Santé, etc. — AND the integrated extranet dashboard with the "Faire un devis pour un nouveau client"' +
+  ' heading above the same product grid),' +
   ' "vehicule_tab" (the first tab of the quote form, with fields Marque / Cylindrée / Version / dates / Type d\'acquisition / Stationnement / CP),' +
   ' "conducteur_tab" (the second tab, with Date de naissance / Situation familiale / Profession / Antécédents),' +
   ' "garanties_tab" (the third tab — coverage formula choice with Tiers Illimité / Vol+Incendie / Dommages tous accidents and a commission slider),' +
   ' "price_preview" (a price has been computed and is visible on screen — a monthly or annual EUR amount is shown alongside the chosen formula),' +
   ' "bridge_modal" (a modal asking the broker to confirm the trottinette is bridled at 25 km/h),' +
   ' "devis_tab" (the fourth tab — subscriber info form with Civilité / Nom / Prénom / address fields),' +
-  ' "unknown" (anything else, including a blank page, an error banner, or an unrelated Maxance page). ' +
-  'If both a tab and a modal are visible, prefer "bridge_modal".';
+  ' "unknown" (anything else, including a blank page, an error banner alone, or an unrelated Maxance page). ' +
+  'If both a tab and a modal are visible, prefer "bridge_modal".' +
+  ' If a 403 banner is visible but the product grid is also clearly visible, prefer the matching label' +
+  ' (vehicle_picker). If the 403 banner is the only visible content, return "unknown".';
 
 /**
  * Zod schema for the price extract. Both fields nullable — Maxance only shows
@@ -153,6 +174,51 @@ async function detectTab(stagehand: Stagehand, attempts = 3, waitMs = 1500): Pro
     await sleep(settleMs(waitMs));
   }
   return last;
+}
+
+/**
+ * Click an element by visible text via Playwright directly (no LLM). Used for
+ * the Proximéo top-menu navigation where labels are stable JSP strings.
+ *
+ * Stagehand's `stagehand.context.activePage()` returns a `StagehandPage`
+ * that's structurally compatible with Playwright's Page surface — including
+ * `getByText` and `locator`. We cast through `unknown` rather than importing
+ * Playwright types directly because Stagehand re-exports its own facade.
+ *
+ * Rationale for bypassing Stagehand.act here: Stagehand v3 has an active
+ * `$PARAMETER_NAME` wrapping bug with Anthropic models that breaks roughly
+ * every other act call. The form-fill steps tolerate that retry, but the
+ * navigation chain is short and brittle — one missed click and the whole
+ * flow's pre-conditions are wrong. Direct Playwright is rock-solid here.
+ */
+async function clickByTextOrThrow(
+  page: unknown,
+  visibleText: string,
+  label: string,
+  timeoutMs: number,
+): Promise<void> {
+  const p = page as {
+    getByText: (
+      text: string,
+      opts?: { exact?: boolean },
+    ) => {
+      first: () => { click: (opts?: { timeout?: number }) => Promise<void> };
+    };
+    locator?: (selector: string) => {
+      first: () => { click: (opts?: { timeout?: number }) => Promise<void> };
+    };
+  };
+  try {
+    await p
+      .getByText(visibleText, { exact: false })
+      .first()
+      .click({ timeout: Math.min(timeoutMs, 30_000) });
+    return;
+  } catch (err) {
+    throw new Error(
+      `maxance_quote_click_failed:${label}:${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
 }
 
 /**
@@ -262,44 +328,102 @@ export async function startQuote(
     const page = stagehand.context.activePage();
     if (!page) throw new Error('maxance_quote_no_active_page');
 
-    // Step 1 — pre-flight: confirm we're on a quote-launchable page. We accept
-    // either the broker home (which holds the vehicle-card grid in the new
-    // UI) or any of the wizard tabs (resume case). If we're somewhere else
-    // the caller didn't run loginMaxance first — fail fast.
+    // Step 1 — entry. Maxance's UI is stable for the next 12+ months
+    // (Ridaa confirmed 2026-05-22), so we use deterministic Playwright
+    // text-selectors throughout the navigation chain. The LLM-driven
+    // detectTab only fires AFTER we've reached a form page where the
+    // exact tab is genuinely ambiguous.
+    //
+    // Decision flow:
+    //   - Detect once. If we're mid-wizard (vehicule/conducteur/garanties/
+    //     price_preview/bridge_modal), resume from there.
+    //   - Otherwise: blind-navigate via Accès Proximéo → Tarif → 2 roues →
+    //     Trottinette using Playwright text-clicks. Any missing element
+    //     throws with a descriptive `maxance_quote_click_failed:<step>`.
     let tab = await detectTab(stagehand);
-    if (
-      tab !== 'vehicle_picker' &&
-      tab !== 'vehicule_tab' &&
-      tab !== 'conducteur_tab' &&
-      tab !== 'garanties_tab' &&
-      tab !== 'price_preview'
-    ) {
-      throw new Error(`maxance_quote_unexpected_entry_page:${tab}`);
-    }
-    await pushShot('entry');
+    await pushShot('pre_navigate');
 
-    // Step 2 — navigate to the Trottinette form if we landed on the picker.
-    // Achraf's PDF: Deux Roues → Trottinette. The integrated home shows the
-    // top-level cards directly; the click sequence is two acts.
+    const inWizard =
+      tab === 'vehicule_tab' ||
+      tab === 'conducteur_tab' ||
+      tab === 'garanties_tab' ||
+      tab === 'price_preview' ||
+      tab === 'bridge_modal';
+
+    if (!inWizard) {
+      // Sidebar click → Proximéo welcome page. We bypass Stagehand.act here
+      // too (the bug doesn't care which call hits it; the sidebar click is
+      // as deterministic as the menu clicks below).
+      try {
+        await clickByTextOrThrow(page, 'Accès Proximéo', 'acces_proximeo', totalTimeoutMs);
+      } catch (err) {
+        logger.warn(
+          { err, sessionId },
+          'maxance-quote: Accès Proximéo click failed, falling back to direct SSO URL',
+        );
+        // Cast via `unknown` because the Stagehand-shaped Page returns
+        // Promise<Response|null> for goto, while our minimal stub returns void.
+        // We don't care about the return value here.
+        const pageGoto = page as unknown as {
+          goto: (u: string, o: unknown) => Promise<unknown>;
+        };
+        await pageGoto.goto(PROXIMEO_SSO_URL, { waitUntil: 'domcontentloaded' });
+      }
+      await sleep(settleMs(2500));
+      await pushShot('post_proximeo_entry');
+
+      // After Accès Proximéo we always land on the standalone Proximéo
+      // welcome page (widgets layout, no product cards visible). We don't
+      // re-detect — we just drive the menu chain blind. If any click misses
+      // we throw with a descriptive label.
+      tab = 'vehicle_picker';
+    }
+
+    // Step 2 — navigate to the Trottinette form. Verified live 2026-05-22:
+    //   standalone Proximéo welcome → "Tarif - Nouveau Client" top menu item
+    //   → "2 roues et quads" dropdown → "Trottinette" sub-category → form.
+    //
+    // The integrated extranet dashboard's vehicle-card grid was a newer
+    // shortcut whose backing API silently 403s under Playwright — we never
+    // enter through it. The standalone Proximéo welcome page is a classic
+    // JSP UI with the top menu; that's where this click chain runs.
     if (tab === 'vehicle_picker') {
-      await withTimeout(
-        stagehand.act('Click the "Deux Roues" (2 wheels) product card to open its sub-categories'),
-        totalTimeoutMs,
-        'maxance_quote_timeout_click_deux_roues',
-      );
+      // The Proximéo menu is a plain JSP UI with stable text labels. We
+      // bypass Stagehand.act for this sequence and click via Playwright
+      // directly because Stagehand v3 hits an intermittent `$PARAMETER_NAME`
+      // wrapping bug with Anthropic models that the act-retry can't recover
+      // from. Direct getByText is also faster (no LLM round-trip per click).
+      //
+      // Labels match the live UI verified on 2026-05-22:
+      //   "Tarif - Nouveau Client"  (top menu)
+      //   "2 roues et quads"        (dropdown)
+      //   "Trottinette"             (sub-list)
+      await clickByTextOrThrow(page, 'Tarif - Nouveau Client', 'tarif', totalTimeoutMs);
       await sleep(settleMs(1500));
+      await pushShot('tarif_nouveau_client_open');
+
+      await clickByTextOrThrow(page, '2 roues et quads', 'deux_roues', totalTimeoutMs);
+      await sleep(settleMs(2000));
       await pushShot('deux_roues_open');
 
-      await withTimeout(
-        stagehand.act(
-          'Click the "Trottinette" sub-category (also labelled "EDPM" or "NVEI" on some skins) to launch the trottinette quote form',
-        ),
-        totalTimeoutMs,
-        'maxance_quote_timeout_click_trottinette',
-      );
-      await sleep(settleMs(2000));
+      await clickByTextOrThrow(page, 'Trottinette', 'trottinette', totalTimeoutMs);
+      await sleep(settleMs(2500));
       await pushShot('trottinette_launched');
       tab = await detectTab(stagehand);
+
+      // After the menu chain we MUST land on the Véhicule tab. Anything
+      // else (vehicle_picker again, dashboard, unknown) means a click in the
+      // chain silently missed or Maxance returned an error page. Fail loudly
+      // with a descriptive label so the operator knows where the flow broke.
+      if (
+        tab !== 'vehicule_tab' &&
+        tab !== 'conducteur_tab' && // resume edge — already past vehicule
+        tab !== 'bridge_modal' &&
+        tab !== 'garanties_tab' &&
+        tab !== 'price_preview'
+      ) {
+        throw new Error(`maxance_quote_unexpected_entry_page:${tab}`);
+      }
     }
 
     // Step 3 — Véhicule tab. Auto-fill the deterministic defaults Achraf

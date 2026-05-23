@@ -171,6 +171,94 @@ async function captureStep(
 }
 
 /**
+ * Cloudflare IUAM challenge interstitial detection. While the IUAM page is up,
+ * the document.title is "Just a moment..." (i18n: same string in all locales).
+ *
+ * Resolution paths:
+ *   1. Cloudflare auto-passes (5-30s) for clients holding a valid cf_clearance
+ *      cookie. Happy path.
+ *   2. Cloudflare shows a Turnstile checkbox that requires a human click. The
+ *      visible Chromium window lets the operator click it; we just keep
+ *      polling the title.
+ *
+ * Default budget is 5 min — covers both paths comfortably. Cheap polling:
+ * just reads page.title() — no LLM call, no DOM extract.
+ *
+ * Override via `MAXANCE_CLOUDFLARE_WAIT_MS` env for tests / impatient runs.
+ */
+async function waitForCloudflareIuam(
+  page: { title: () => Promise<string> },
+  sessionId: string,
+  maxWaitMs = Number(process.env.MAXANCE_CLOUDFLARE_WAIT_MS ?? 10 * 60_000),
+  pollIntervalMs = 500,
+): Promise<void> {
+  const start = Date.now();
+  let sawChallenge = false;
+  let nextReminderAt = 0;
+  while (Date.now() - start < maxWaitMs) {
+    let title = '';
+    try {
+      title = await page.title();
+    } catch {
+      // Title fetch transient errors during navigation are expected.
+      title = '';
+    }
+    if (!title.includes('Just a moment')) {
+      if (sawChallenge) {
+        logger.info(
+          { sessionId, elapsedMs: Date.now() - start },
+          'maxance: Cloudflare IUAM cleared',
+        );
+        // eslint-disable-next-line no-console
+        console.log(
+          `\n✓ Cloudflare challenge cleared after ${Math.round(
+            (Date.now() - start) / 1000,
+          )}s — continuing.\n`,
+        );
+      }
+      return;
+    }
+    if (!sawChallenge) {
+      sawChallenge = true;
+      logger.warn(
+        { sessionId, maxWaitMs },
+        'maxance: Cloudflare IUAM challenge detected — needs human click in visible browser',
+      );
+      // Print a LOUD console message that's easy to spot in the test output.
+      // The Chromium window may be behind other windows — switch to it via
+      // the OS taskbar/dock and look for "Verify you are human".
+      // eslint-disable-next-line no-console
+      console.log(
+        '\n' +
+          '═══════════════════════════════════════════════════════════════\n' +
+          '🛡️  CLOUDFLARE CHALLENGE — manual action needed\n' +
+          '═══════════════════════════════════════════════════════════════\n' +
+          '   Switch to the visible Chromium window (Maxance tab).\n' +
+          '   Click the "Verify you are human" checkbox.\n' +
+          '   The test will continue automatically once you pass.\n' +
+          '   Window may be hidden behind your current view — check the taskbar.\n' +
+          '═══════════════════════════════════════════════════════════════\n',
+      );
+      nextReminderAt = Date.now() + 60_000;
+    } else if (Date.now() >= nextReminderAt) {
+      // Repeated reminder every 60s so the operator notices if they walked away.
+      // eslint-disable-next-line no-console
+      console.log(
+        `[cloudflare] still waiting for human click — ${Math.round(
+          (Date.now() - start) / 1000,
+        )}s elapsed, ${Math.round((maxWaitMs - (Date.now() - start)) / 1000)}s remaining`,
+      );
+      nextReminderAt = Date.now() + 60_000;
+    }
+    await sleep(pollIntervalMs);
+  }
+  logger.warn(
+    { sessionId, maxWaitMs },
+    'maxance: Cloudflare IUAM did not pass within budget — proceeding anyway, detectPage will likely return unknown',
+  );
+}
+
+/**
  * Run one page-type detection. Wraps `stagehand.extract` with our narrow
  * schema and returns the label. Retries up to `attempts` times on `unknown`,
  * waiting `waitMs` between tries — defends against slow client-side renders
@@ -395,6 +483,12 @@ export async function loginMaxance(
     // form render finishes before we screenshot/detect.
     await page.goto(baseUrl, { waitUntil: 'domcontentloaded' });
     await sleep(settleMs(1500));
+
+    // Cloudflare IUAM ("Just a moment...") sometimes interstitials the very
+    // first navigation. Auto-pass is usually 5-15s for clients with valid
+    // cf_clearance — we wait up to ~30s before giving up. Pure title check;
+    // no LLM call so this is cheap to poll tightly.
+    await waitForCloudflareIuam(page, sessionId);
     await pushShot('initial_load');
 
     // Step 2: classify what's on screen (with retry + cookie-banner dismiss).

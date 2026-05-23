@@ -77,8 +77,9 @@ const quoteParams: MaxanceQuoteParams = {
 describe.skipIf(!live)('Maxance LIVE — quote flow (dryRun)', () => {
   it(
     'logs in warm, drives Véhicule + Conducteur + Garanties, extracts a price',
-    // 6min ceiling — login warm path ~15s, quote flow ~2-3min in real life.
-    { timeout: 6 * 60_000 },
+    // 15min ceiling — covers the Cloudflare Turnstile manual-click wait (up to
+    // 10min) plus the actual login + quote-flow time (~3min on a warm cookie).
+    { timeout: 15 * 60_000 },
     async () => {
       await mkdir(MAXANCE_USERDATA_DIR, { recursive: true });
       await mkdir(MAXANCE_SCREENSHOT_ROOT, { recursive: true });
@@ -89,6 +90,12 @@ describe.skipIf(!live)('Maxance LIVE — quote flow (dryRun)', () => {
         headless: false,
         userDataDir: MAXANCE_USERDATA_DIR,
         stealth: true,
+        // Launch real Chrome (not Playwright's bundled Chromium). Cloudflare
+        // Turnstile fingerprints the JS engine + GPU stack and rejects
+        // Chromium even after a manual checkbox click. Real Chrome shares
+        // the same fingerprint as the user's daily browser → should pass.
+        // userDataDir stays isolated — we don't touch the user's profile.
+        channel: 'chrome',
       });
 
       try {

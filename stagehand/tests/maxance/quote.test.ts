@@ -20,7 +20,13 @@ import { join } from 'node:path';
 import { startQuote } from '../../src/maxance/quote.js';
 import type { MaxanceQuoteParams } from '../../src/maxance/types.js';
 
-/** Minimal Page stand-in — same shape as the login.test.ts stub. */
+/**
+ * Minimal Page stand-in — same shape as the login.test.ts stub, plus a
+ * `getByText` shim because quote.ts now bypasses Stagehand.act and clicks
+ * the Proximéo menu items directly via Playwright. The stub records every
+ * `getByText().first().click()` chain so tests can assert which labels
+ * the flow clicked.
+ */
 class StubPage {
   goto = async (_url: string, _opts: unknown): Promise<void> => {
     this.gotos.push(_url);
@@ -30,6 +36,19 @@ class StubPage {
   screenshot = async (_opts: { type: 'png'; fullPage: boolean }): Promise<Buffer> =>
     Buffer.from([0x89, 0x50, 0x4e, 0x47]);
   gotos: string[] = [];
+  textClicks: string[] = [];
+
+  getByText = (
+    text: string,
+    _opts?: { exact?: boolean },
+  ): {
+    first: () => { click: (opts?: { timeout?: number }) => Promise<void> };
+  } => {
+    const recordClick = async (_opts?: { timeout?: number }): Promise<void> => {
+      this.textClicks.push(text);
+    };
+    return { first: () => ({ click: recordClick }) };
+  };
 }
 
 /**
@@ -96,8 +115,11 @@ const baseParams: MaxanceQuoteParams = {
 describe('startQuote — happy path (full picker → price)', () => {
   it('navigates picker → vehicule → conducteur → bridge → garanties → price', async () => {
     const sh = new StubStagehand();
+    // New entry flow: after Accès Proximéo click, we DON'T re-detect — we
+    // drive the menu chain blindly via Playwright getByText. detectTab fires
+    // only AFTER Trottinette has been clicked (entry to vehicule_tab).
     sh.tabResponses = [
-      'vehicle_picker', // entry detection
+      'vehicle_picker', // entry detection (integrated dashboard)
       'vehicule_tab', // after Trottinette click
       'conducteur_tab', // after vehicule Suivant
       'bridge_modal', // after conducteur Suivant
@@ -116,6 +138,18 @@ describe('startQuote — happy path (full picker → price)', () => {
     expect(out.pricePreviewEur.annual).toBeUndefined();
     expect(out.finalUrl).toMatch(/maxance/);
     expect(out.screenshots.length).toBeGreaterThanOrEqual(5);
+
+    // The whole entry+menu chain runs via direct Playwright getByText clicks
+    // — no LLM round-trips (sidesteps Stagehand v3's $PARAMETER_NAME bug on
+    // Anthropic) and ~50× faster than the act-based equivalent.
+    expect(sh.page.textClicks).toEqual(
+      expect.arrayContaining([
+        'Accès Proximéo',
+        'Tarif - Nouveau Client',
+        '2 roues et quads',
+        'Trottinette',
+      ]),
+    );
 
     // Spot-check that purchase price + dates were passed via `variables`,
     // not interpolated into the instruction text.
@@ -152,9 +186,10 @@ describe('startQuote — resume from mid-flow', () => {
 
     expect(out.pricePreviewEur.annual).toBe(142.5);
     expect(out.pricePreviewEur.monthly).toBeUndefined();
-    // No Deux Roues / Trottinette clicks since the picker was skipped.
-    expect(sh.actCalls.find((c) => c.instruction.includes('Deux Roues'))).toBeUndefined();
-    expect(sh.actCalls.find((c) => c.instruction.includes('Trottinette'))).toBeUndefined();
+    // No menu clicks since the picker was skipped (resume entry was already
+    // on the vehicule_tab, so the inWizard branch took over).
+    expect(sh.page.textClicks).not.toContain('Tarif - Nouveau Client');
+    expect(sh.page.textClicks).not.toContain('Trottinette');
   });
 
   it('skips the bridge modal when it does not appear', async () => {
@@ -201,9 +236,21 @@ describe('startQuote — guardrails', () => {
     ).rejects.toThrow(/maxance_quote_full_submission_not_implemented/);
   });
 
-  it('rejects an unexpected entry page (not logged in / wrong tab)', async () => {
+  it('throws when the post-Trottinette tab is unrecognised (broken Maxance UI)', async () => {
     const sh = new StubStagehand();
-    sh.tabResponses = ['unknown', 'unknown', 'unknown'];
+    // Entry detects as unknown → not inWizard → blind menu chain runs (stub
+    // accepts every getByText) → detectTab after Trottinette → unknown × 3
+    // (retry budget exhausted) → throws unexpected_entry_page:unknown.
+    sh.tabResponses = [
+      // detectTab retries 3× on `unknown` before giving up — supply enough
+      // responses for both the entry detect and the post-Trottinette detect.
+      'unknown',
+      'unknown',
+      'unknown', // entry detect exhausts retries → returns 'unknown'
+      'unknown',
+      'unknown',
+      'unknown', // post-Trottinette detect exhausts retries → throws
+    ];
 
     await expect(
       startQuote(asStagehand(sh), 'sess-bad-entry', baseParams, {
@@ -276,8 +323,8 @@ describe('startQuote — screenshot capture', () => {
   it('writes screenshots to disk and returns served URLs', async () => {
     const sh = new StubStagehand();
     sh.tabResponses = [
-      'vehicle_picker',
-      'vehicule_tab',
+      'vehicle_picker', // entry
+      'vehicule_tab', // after Trottinette click
       'conducteur_tab',
       'garanties_tab',
       'price_preview',

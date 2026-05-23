@@ -64,6 +64,18 @@ export interface SessionCreateOptions {
    * Off by default — only the Maxance bootstrap currently needs it.
    */
   stealth?: boolean;
+  /**
+   * Optional Playwright launch channel. When set to `'chrome'`, Playwright
+   * launches the user's installed Google Chrome binary instead of the bundled
+   * Chromium. Real Chrome ships with a different User-Agent + JS engine
+   * quirks + GPU stack than headless Chromium, which Cloudflare Turnstile
+   * uses as one of its fingerprint inputs. We KEEP our isolated userDataDir
+   * (no profile sharing) so the user's real Chrome data is untouched.
+   *
+   * Requires Chrome installed on the host. Stagehand surfaces an error if the
+   * binary is absent.
+   */
+  channel?: 'chrome' | 'chrome-beta' | 'msedge';
 }
 
 /**
@@ -201,6 +213,7 @@ export class BrowserPool {
         headless,
         userDataDir: dataDir,
         ...(opts.viewport ? { viewport: opts.viewport } : {}),
+        ...(opts.channel ? { channel: opts.channel } : {}),
         ...(stealth
           ? {
               args: launchArgs,
