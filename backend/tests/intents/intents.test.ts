@@ -35,6 +35,7 @@ const KNOWN_INTENTS: ReadonlyArray<[string, z.ZodTypeAny]> = [
   ['CUSTOMER.FOLLOWUP_DUE', intents.CustomerFollowupDuePayload],
   ['CUSTOMER.CHANNEL_SWITCH_REQUESTED', intents.CustomerChannelSwitchRequestedPayload],
   ['QUOTE.REQUESTED', intents.QuoteRequestedPayload],
+  ['QUOTE.CONFIRM_REQUESTED', intents.QuoteConfirmRequestedPayload],
   ['QUOTE.READY', intents.QuoteReadyPayload],
   ['QUOTE.PREVIEW_READY', intents.QuotePreviewReadyPayload],
   ['QUOTE.FAILED', intents.QuoteFailedPayload],

@@ -57,6 +57,7 @@ const INTENT_TO_QUEUE: Record<string, string> = {
   'CUSTOMER.CHANNEL_SWITCH_REQUESTED': 'customer',
   // quote
   'QUOTE.REQUESTED': 'quote',
+  'QUOTE.CONFIRM_REQUESTED': 'quote',
   'QUOTE.READY': 'quote',
   'QUOTE.PREVIEW_READY': 'quote',
   'QUOTE.FAILED': 'quote',

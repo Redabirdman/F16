@@ -1,4 +1,15 @@
 /**
+ * ⚠️ DEPRECATED 2026-05-23 — DO NOT enable MAXANCE_LIVE against the real
+ * Maxance portal. Cloudflare Turnstile blocks every Playwright-launched
+ * Chrome (stealth flags + real Chrome channel + persisted profile all
+ * tried, all failed). For live verification use the Claude Chrome
+ * extension (mcp__Claude_in_Chrome__* MCP toolkit) driving Ridaa's daily
+ * Chrome. See project_hosting_pivot.md and project_maxance_access.md
+ * memory notes. This test file is kept only because the step-planner code
+ * it exercises (loginMaxance) remains the canonical reference for
+ * Maxance UI selectors — the test itself MUST stay skipped in CI and
+ * locally.
+ *
  * LIVE Maxance login test (M8.T2).
  *
  * Opt-in only. Gated on:

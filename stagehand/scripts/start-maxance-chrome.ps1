@@ -1,4 +1,22 @@
-# Maxance browser launcher (one-time + on-reboot use).
+# =============================================================================
+# DEPRECATED 2026-05-23 — DO NOT USE AGAINST MAXANCE.
+# =============================================================================
+#
+# This script was an attempt to run Playwright against a real Chrome via CDP
+# attach. Empirically, Cloudflare Turnstile still challenges this in a loop —
+# even with stealth flags + real Chrome channel + persisted profile + manual
+# checkbox click. Kept in tree as a reference for the CDP attach pattern, but
+# the canonical Maxance driver is the **Claude Chrome extension**
+# (mcp__Claude_in_Chrome__* MCP toolkit) running in Ridaa's daily Chrome.
+#
+# See ~/.claude/projects/.../memory/project_hosting_pivot.md "Browser
+# automation architecture (REVISED 2026-05-23)" for the full decision log.
+#
+# If you're a future agent / dev looking at this: don't run this script
+# against Maxance. Use the Claude in Chrome extension instead.
+# =============================================================================
+#
+# Maxance browser launcher (one-time + on-reboot use). [legacy header below]
 #
 # Two profile modes:
 #   * default  — DEDICATED profile under stagehand/data/maxance-chrome-profile/.

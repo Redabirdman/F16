@@ -219,3 +219,102 @@ export interface MaxanceQuoteOptions {
    */
   timeoutMs?: number;
 }
+
+/* ────────────────────────────────────────────────────────────────────────── */
+/*  M8.T6 — Valider devis + email send                                         */
+/* ────────────────────────────────────────────────────────────────────────── */
+
+/**
+ * Civilité — Maxance's salutation dropdown on the Devis tab. Verbatim French
+ * values; Madame/Monsieur are the only ones we ship for trottinettes.
+ */
+export type MaxanceCivilite = 'monsieur' | 'madame';
+
+/**
+ * Subscriber-info payload for the Devis tab. Per Achraf's walkthrough
+ * (`ETAPE MAXANCE AI.pdf`, step 5), these are the fields the broker fills
+ * once the price has been previewed. All are required by Maxance — the
+ * Devis tab refuses to advance without them.
+ *
+ * PII boundary: the backend Operator decrypts customer.phone, customer.email,
+ * customer.fullName at call time and passes them here; this struct lives
+ * only in-memory inside the Stagehand process and is not logged.
+ */
+export interface MaxanceSubscriberInfo {
+  civilite: MaxanceCivilite;
+  /** Family name (NOM). Uppercase preferred but Maxance accepts mixed-case. */
+  lastName: string;
+  /** First name (PRÉNOM). */
+  firstName: string;
+  /** Civic address, single line. e.g. "12 RUE DE LA PAIX". */
+  addressLine: string;
+  /** Apartment / floor / building info — optional. */
+  addressComplement?: string;
+  postalCode: string;
+  city: string;
+  /** Customer's mobile, French format. e.g. "+33612345678" or "0612345678". */
+  phoneMobile: string;
+  /** Customer's email — Maxance will email the quote PDF to this address. */
+  email: string;
+  /**
+   * Profession dropdown — defaults to Achraf's "Employé secteur privé" if
+   * unset. Most trottinette customers fit that bucket; the broker can
+   * override at run time when they have explicit info.
+   */
+  profession?: 'employe_prive' | 'employe_public' | 'etudiant' | 'retraite' | 'sans_profession';
+}
+
+/**
+ * Input to `confirmQuote` — the operator-side wrapper that takes the
+ * preview-ready Stagehand session through Valider devis → Devis tab fill →
+ * Edition à imprimer → email send → devisNumber capture.
+ *
+ * Pre-condition: the caller has just received a successful
+ * `MaxanceQuoteResult` from `startQuote` on the SAME session. The session
+ * is sitting on the Garanties tab with the price visible.
+ */
+export interface MaxanceConfirmQuoteParams {
+  subscriber: MaxanceSubscriberInfo;
+}
+
+/**
+ * Result of a successful `confirmQuote`. Maxance does the actual email
+ * dispatch internally (the broker doesn't get a PDF download URL — Maxance
+ * mails it directly from its server), so we surface `pdfSentTo` instead of
+ * a pdfUrl. The devisNumber is the broker-facing reference printed on the
+ * Edition à imprimer screen — it's the lookup key for "Reprendre devis"
+ * later when the customer accepts.
+ */
+export interface MaxanceConfirmQuoteResult {
+  sessionId: string;
+  durationMs: number;
+  screenshots: MaxanceQuoteScreenshot[];
+  /** Devis number Maxance prints on the Edition à imprimer page. */
+  devisNumber: string;
+  /** Email address Maxance sent the PDF to (echoes back so the caller can audit). */
+  pdfSentTo: string;
+  /** URL at the moment of result return. */
+  finalUrl: string;
+}
+
+export interface MaxanceConfirmQuoteOptions {
+  /** Where to write screenshots. Defaults to STAGEHAND_DATA_DIR. */
+  dataRoot?: string;
+  /** Optional callback fired after each screenshot capture. */
+  screenshotCallback?: (shot: MaxanceQuoteScreenshot) => void;
+  /**
+   * When true (default during M8.T6 dev), the flow STOPS just before the
+   * final Envoyer click — captures the prepared email-send dialog state
+   * but doesn't actually dispatch. Set false for production runs after
+   * Achraf has signed off on the live email path.
+   *
+   * Note: this differs from `MaxanceQuoteOptions.dryRun` which halts at
+   * the price preview. M8.T6's dryRun halts ONE step earlier than Achraf's
+   * locked guardrail (Valider souscription) — sending a quote PDF is
+   * still a real action with customer-facing consequences, so we ship it
+   * dry-by-default until verified.
+   */
+  dryRun: boolean;
+  /** Wall-clock budget. Default 3 min — fewer LLM calls than the quote flow. */
+  timeoutMs?: number;
+}

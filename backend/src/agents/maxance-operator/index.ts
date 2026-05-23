@@ -15,7 +15,9 @@ export {
   getDefaultStagehandClient,
   __setStagehandClientForTests,
   type QuotePreviewResult,
+  type ConfirmQuoteResult,
   type LoginResult,
   type StagehandQuoteParams,
+  type StagehandSubscriberInfo,
   type StagehandClientConfig,
 } from './stagehand-client.js';

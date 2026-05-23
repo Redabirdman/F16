@@ -40,6 +40,7 @@ import {
   StagehandClient,
   StagehandClientError,
   type StagehandQuoteParams,
+  type StagehandSubscriberInfo,
 } from './stagehand-client.js';
 
 /**
@@ -65,14 +66,130 @@ export class MaxanceOperatorAgent extends BaseAgent {
   }
 
   protected async onMessage(envelope: AgentMessageEnvelope): Promise<MessageHandlerResult> {
-    if (envelope.intent !== 'QUOTE.REQUESTED') {
-      logger.debug(
-        { intent: envelope.intent, instanceId: this.instanceId },
-        'maxance-operator: ignoring unhandled intent',
-      );
-      return { ok: true, result: { skipped: 'unhandled-intent', intent: envelope.intent } };
+    switch (envelope.intent) {
+      case 'QUOTE.REQUESTED':
+        return this.handleQuoteRequested(envelope);
+      case 'QUOTE.CONFIRM_REQUESTED':
+        return this.handleQuoteConfirmRequested(envelope);
+      default:
+        logger.debug(
+          { intent: envelope.intent, instanceId: this.instanceId },
+          'maxance-operator: ignoring unhandled intent',
+        );
+        return { ok: true, result: { skipped: 'unhandled-intent', intent: envelope.intent } };
     }
-    return this.handleQuoteRequested(envelope);
+  }
+
+  /**
+   * QUOTE.CONFIRM_REQUESTED handler (M8.T6).
+   *
+   * Pre-condition: a prior QUOTE.REQUESTED on the same session left Stagehand
+   * sitting on the Garanties tab with a price preview. The Sales Agent has
+   * since gathered the customer's full subscriber info (Civilité, Nom, etc.)
+   * and emitted this envelope.
+   *
+   * Pipeline:
+   *   1. Sanity-check session is still alive (ensureLoggedIn — cheap on warm).
+   *   2. POST /v1/maxance/quote/confirm with the subscriber payload.
+   *   3. On success → emit QUOTE.READY with the devisNumber + pdfSentTo.
+   *   4. On failure → emit QUOTE.FAILED (same envelope shape as M8.T4 path)
+   *      with the tagged errorCode + escalation to human.
+   *
+   * dryRun: defaults to FALSE here — the customer just said yes, they're
+   * expecting an email. Production-ready by default once Achraf signs off
+   * on the live email path. To force dry-run for testing, set the env
+   * `MAXANCE_CONFIRM_FORCE_DRYRUN=1` on the backend process.
+   */
+  private async handleQuoteConfirmRequested(
+    envelope: AgentMessageEnvelope,
+  ): Promise<MessageHandlerResult> {
+    const payload = envelope.payload as {
+      quoteId: string;
+      customerId: string;
+      leadId: string;
+      subscriber: StagehandSubscriberInfo;
+    };
+
+    // Re-validate the session is alive. If the cookie expired since the
+    // PREVIEW_READY we need to bail — the Stagehand session has lost its
+    // Garanties-tab state and a fresh login lands us on the dashboard.
+    try {
+      await this.client.ensureLoggedIn(SESSION_NAME);
+    } catch (err) {
+      const code = err instanceof StagehandClientError ? err.errorCode : 'login_unknown';
+      await this.emitFailed(
+        payload.quoteId,
+        payload.customerId,
+        payload.leadId,
+        `confirm_login_failed:${code}`,
+      );
+      return { ok: false, error: `confirm_login_failed:${code}` };
+    }
+
+    const dryRun = process.env.MAXANCE_CONFIRM_FORCE_DRYRUN === '1';
+    let confirm;
+    try {
+      confirm = await this.client.confirmQuote(SESSION_NAME, payload.subscriber, { dryRun });
+    } catch (err) {
+      const code = err instanceof StagehandClientError ? err.errorCode : 'confirm_unknown';
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error(
+        { quoteId: payload.quoteId, code, err: msg },
+        'maxance-operator: confirm flow failed',
+      );
+      await this.emitFailed(payload.quoteId, payload.customerId, payload.leadId, code, msg);
+      return { ok: false, error: code };
+    }
+
+    // Emit QUOTE.READY. The Sales Agent picks this up and confirms to the
+    // customer that the devis was emailed. We pass through monthlyPremium=0
+    // and comptantDue=0 because the schema requires non-negative numbers
+    // and the actual price is part of the upstream PREVIEW_READY envelope
+    // the customer already saw — Maxance doesn't surface monthly/comptant
+    // again at this stage. Downstream consumers should reference the
+    // earlier PREVIEW_READY for the headline figures.
+    await sendMessage(
+      { db: this.db },
+      {
+        fromRole: this.role,
+        fromInstance: this.instanceId,
+        toRole: 'sales-agent',
+        toInstance: `lead-${payload.leadId}`,
+        intent: 'QUOTE.READY',
+        payload: {
+          quoteId: payload.quoteId,
+          customerId: payload.customerId,
+          monthlyPremium: 0,
+          comptantDue: 0,
+          devisNumber: confirm.devisNumber,
+          pdfSentTo: confirm.pdfSentTo,
+        },
+        correlationId: payload.quoteId,
+      },
+    );
+
+    logger.info(
+      {
+        quoteId: payload.quoteId,
+        devisNumber: confirm.devisNumber,
+        pdfSentTo: confirm.pdfSentTo,
+        durationMs: confirm.durationMs,
+        dryRun,
+      },
+      dryRun
+        ? 'maxance-operator: confirm dry-run (no email sent)'
+        : 'maxance-operator: quote saved + email sent',
+    );
+
+    return {
+      ok: true,
+      result: {
+        quoteId: payload.quoteId,
+        devisNumber: confirm.devisNumber,
+        pdfSentTo: confirm.pdfSentTo,
+        dryRun,
+      },
+    };
   }
 
   private async handleQuoteRequested(

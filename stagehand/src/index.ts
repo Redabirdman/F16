@@ -12,12 +12,17 @@ import { pool } from './browser-pool.js';
 import { executeIntent, type IntentName } from './intents.js';
 import { loginMaxance } from './maxance/login.js';
 import { startQuote } from './maxance/quote.js';
+import { confirmQuote } from './maxance/quote-confirm.js';
 import type {
   HumanActionRequest,
+  MaxanceCivilite,
+  MaxanceConfirmQuoteParams,
+  MaxanceConfirmQuoteResult,
   MaxanceLoginResult,
   MaxanceQuoteParams,
   MaxanceQuoteResult,
   MaxanceStationnement,
+  MaxanceSubscriberInfo,
 } from './maxance/types.js';
 
 /**
@@ -449,6 +454,128 @@ app.post('/v1/maxance/quote', async (c) => {
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     logger.warn({ sessionId: existing.sessionId, err: msg }, 'maxance-quote: HTTP flow failed');
+    return c.json({ error: msg }, 500);
+  } finally {
+    pool.release(existing.sessionId);
+  }
+});
+
+/**
+ * POST /v1/maxance/quote/confirm — drive Valider devis + email send (M8.T6).
+ *
+ * Pre-condition: a previous successful call to /v1/maxance/quote on the
+ * SAME session has left the browser on the Garanties tab with a price
+ * preview. This endpoint continues from there.
+ *
+ * Body (JSON):
+ *   {
+ *     sessionName: string,                       // BrowserPool name
+ *     subscriber: MaxanceSubscriberInfo,         // Devis tab fields
+ *     dryRun?: boolean,                          // default TRUE (stops before Envoyer)
+ *     timeoutMs?: number,
+ *   }
+ *
+ * Returns MaxanceConfirmQuoteResult on success (200). Devis number is the
+ * primary key for the M8.T7 souscription path ("Reprendre devis via search").
+ */
+app.post('/v1/maxance/quote/confirm', async (c) => {
+  const raw = await c.req.text();
+  if (!verifyHmac(c, raw)) {
+    return c.json({ error: 'invalid_signature' }, 401);
+  }
+  let body: {
+    sessionName?: string;
+    subscriber?: Partial<MaxanceSubscriberInfo>;
+    dryRun?: boolean;
+    timeoutMs?: number;
+  };
+  try {
+    body = JSON.parse(raw) as typeof body;
+  } catch {
+    return c.json({ error: 'invalid_json' }, 400);
+  }
+
+  const s = body.subscriber;
+  if (!s || typeof s !== 'object') {
+    return c.json({ error: 'missing_subscriber' }, 400);
+  }
+  // Validate the must-haves at the boundary so a malformed envelope dies
+  // with a descriptive 400 instead of a Stagehand-side 500.
+  const civilite = s.civilite as MaxanceCivilite | undefined;
+  if (civilite !== 'monsieur' && civilite !== 'madame') {
+    return c.json({ error: 'invalid_civilite' }, 400);
+  }
+  // Validate must-haves at the boundary AND capture them as strict locals
+  // so the type narrows for the literal we hand to confirmQuote below.
+  const requiredString = (key: keyof MaxanceSubscriberInfo, value: unknown): string | undefined => {
+    if (typeof value !== 'string' || value.length === 0) {
+      logger.debug({ key }, 'maxance-confirm: missing required subscriber field');
+      return undefined;
+    }
+    return value;
+  };
+  const lastName = requiredString('lastName', s.lastName);
+  if (lastName === undefined) return c.json({ error: 'missing_lastName' }, 400);
+  const firstName = requiredString('firstName', s.firstName);
+  if (firstName === undefined) return c.json({ error: 'missing_firstName' }, 400);
+  const addressLine = requiredString('addressLine', s.addressLine);
+  if (addressLine === undefined) return c.json({ error: 'missing_addressLine' }, 400);
+  const postalCode = requiredString('postalCode', s.postalCode);
+  if (postalCode === undefined) return c.json({ error: 'missing_postalCode' }, 400);
+  const city = requiredString('city', s.city);
+  if (city === undefined) return c.json({ error: 'missing_city' }, 400);
+  const phoneMobile = requiredString('phoneMobile', s.phoneMobile);
+  if (phoneMobile === undefined) return c.json({ error: 'missing_phoneMobile' }, 400);
+  const email = requiredString('email', s.email);
+  if (email === undefined) return c.json({ error: 'missing_email' }, 400);
+  // Cheap email sanity — not a full RFC check, just enough to refuse the
+  // obvious garbage. Maxance does its own server-side validation downstream.
+  if (!email.includes('@') || !email.includes('.')) {
+    return c.json({ error: 'invalid_email' }, 400);
+  }
+
+  const subscriber: MaxanceSubscriberInfo = {
+    civilite,
+    lastName,
+    firstName,
+    addressLine,
+    postalCode,
+    city,
+    phoneMobile,
+    email,
+    ...(s.addressComplement ? { addressComplement: s.addressComplement } : {}),
+    ...(s.profession ? { profession: s.profession } : {}),
+  };
+  const params: MaxanceConfirmQuoteParams = { subscriber };
+
+  const sessionName = body.sessionName ?? 'maxance-default';
+  const existing = pool.list().find((sn) => sn.name === sessionName);
+  if (!existing) {
+    return c.json({ error: 'session_not_found', sessionName }, 404);
+  }
+  let session;
+  try {
+    session = pool.borrow(existing.sessionId);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return c.json({ error: msg }, 409);
+  }
+
+  try {
+    const result: MaxanceConfirmQuoteResult = await confirmQuote(
+      session.stagehand,
+      existing.sessionId,
+      params,
+      {
+        dataRoot: dataRoot(),
+        dryRun: body.dryRun ?? true,
+        ...(body.timeoutMs ? { timeoutMs: body.timeoutMs } : {}),
+      },
+    );
+    return c.json(result, 200);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.warn({ sessionId: existing.sessionId, err: msg }, 'maxance-confirm: flow failed');
     return c.json({ error: msg }, 500);
   } finally {
     pool.release(existing.sessionId);

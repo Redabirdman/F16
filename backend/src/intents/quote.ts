@@ -19,10 +19,50 @@ export const QuoteReadyPayload = registerIntent(
   'QUOTE.READY',
   z.object({
     quoteId: z.string().uuid(),
+    customerId: z.string().uuid(),
     monthlyPremium: z.number().nonnegative(),
     comptantDue: z.number().nonnegative(),
     devisNumber: z.string(),
-    pdfUrl: z.string().url(),
+    /**
+     * Email address Maxance sent the quote PDF to (it dispatches the email
+     * directly — we don't get a downloadable URL). Echoed back so the Sales
+     * Agent can confirm to the customer "envoyé à xxx@yyy.com".
+     */
+    pdfSentTo: z.string().email(),
+  }),
+);
+
+/**
+ * QUOTE.CONFIRM_REQUESTED — the customer said YES to a previewed quote.
+ * The Sales Agent emits this when its LLM (or simple regex) detects an
+ * affirmative reply to the PREVIEW_READY message. The Maxance Operator
+ * (M8.T4) handles it: drives Valider devis → Devis tab fill → email send,
+ * then emits QUOTE.READY with the devisNumber + pdfSentTo.
+ *
+ * Carries the subscriber info Maxance needs on the Devis tab. The Sales
+ * Agent assembles this from the customer + lead row before emitting; if a
+ * required field is missing the agent asks the customer for it instead.
+ */
+export const QuoteConfirmRequestedPayload = registerIntent(
+  'QUOTE.CONFIRM_REQUESTED',
+  z.object({
+    quoteId: z.string().uuid(),
+    customerId: z.string().uuid(),
+    leadId: z.string().uuid(),
+    subscriber: z.object({
+      civilite: z.enum(['monsieur', 'madame']),
+      lastName: z.string().min(1),
+      firstName: z.string().min(1),
+      addressLine: z.string().min(1),
+      addressComplement: z.string().optional(),
+      postalCode: z.string().min(1),
+      city: z.string().min(1),
+      phoneMobile: z.string().min(1),
+      email: z.string().email(),
+      profession: z
+        .enum(['employe_prive', 'employe_public', 'etudiant', 'retraite', 'sans_profession'])
+        .optional(),
+    }),
   }),
 );
 

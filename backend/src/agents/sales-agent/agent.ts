@@ -85,6 +85,8 @@ export class SalesAgent extends BaseAgent {
           return await this.handleCustomerMessage(envelope);
         case 'QUOTE.PREVIEW_READY':
           return await this.handleQuotePreviewReady(envelope);
+        case 'QUOTE.READY':
+          return await this.handleQuoteReady(envelope);
         case 'QUOTE.FAILED':
           return await this.handleQuoteFailed(envelope);
         default:
@@ -614,6 +616,101 @@ export class SalesAgent extends BaseAgent {
   }
 
   /**
+   * Maxance Operator (M8.T6) completed the Valider devis + email send path.
+   * The customer's quote PDF has been dispatched by Maxance directly to
+   * their email. Send a short French confirmation message and log the
+   * outbound turn. No LLM call — the response is templated for the same
+   * reasons as PREVIEW_READY (Achraf reviews the wording once).
+   *
+   * Idempotency: same scheme as PREVIEW_READY — scan recent outbound turns
+   * for `#<quoteId>` markers to skip duplicate deliveries.
+   */
+  private async handleQuoteReady(envelope: AgentMessageEnvelope): Promise<MessageHandlerResult> {
+    const payload = envelope.payload as {
+      quoteId: string;
+      customerId: string;
+      monthlyPremium: number;
+      comptantDue: number;
+      devisNumber: string;
+      pdfSentTo: string;
+    };
+
+    const leadId = this.leadIdFromEnvelope(envelope);
+    if (!leadId) return { ok: false, error: 'no leadId available' };
+
+    const recentTurns = await listTurns(this.db, {
+      customerId: payload.customerId,
+      leadId,
+      limit: 5,
+    });
+    const channel: ChannelId = (recentTurns[0]?.channel as ChannelId | undefined) ?? 'whatsapp';
+
+    const { customer, lead, contactRef } = await this.resolveCustomerAndContact(leadId, channel);
+    if (!contactRef) {
+      logger.warn(
+        { leadId: lead.id, channel, instanceId: this.instanceId, quoteId: payload.quoteId },
+        'sales-agent: no contact address for quote-ready channel',
+      );
+      return { ok: true, result: { skipped: 'no-contact-address', channel } };
+    }
+
+    // Idempotency: skip if we've already messaged the customer the
+    // "devis envoyé" confirmation for this quoteId.
+    const marker = `#${payload.quoteId.slice(0, 8)} envoyé`;
+    const alreadySent = recentTurns.some(
+      (t) => t.direction === 'outbound' && (t.content ?? '').includes(marker),
+    );
+    if (alreadySent) {
+      return { ok: true, result: { skipped: 'already-sent', quoteId: payload.quoteId } };
+    }
+
+    const fullName = decryptPII(customer.fullName) ?? '';
+    const firstName = (fullName.split(' ')[0] ?? '').trim();
+    const draft = formatQuoteReadyMessage({
+      firstName,
+      pdfSentTo: payload.pdfSentTo,
+      devisNumber: payload.devisNumber,
+      quoteId: payload.quoteId,
+    });
+
+    const send = await sendViaChannel({
+      db: this.db,
+      customerId: customer.id,
+      leadId: lead.id,
+      to: contactRef,
+      body: [{ type: 'text', text: draft }],
+      agentRole: this.role,
+      agentInstance: this.instanceId,
+      correlationId: payload.quoteId,
+    });
+
+    logger.info(
+      {
+        leadId: lead.id,
+        customerId: customer.id,
+        instanceId: this.instanceId,
+        channel,
+        quoteId: payload.quoteId,
+        devisNumber: payload.devisNumber,
+        externalId: send.receipt.externalId,
+      },
+      'sales-agent: quote-ready confirmation sent to customer',
+    );
+
+    return {
+      ok: true,
+      result: {
+        intent: envelope.intent,
+        sent: true,
+        channel,
+        externalId: send.receipt.externalId,
+        quoteId: payload.quoteId,
+        devisNumber: payload.devisNumber,
+      },
+    };
+  }
+
+  /**
    * Maxance Operator (M8.T4) reported a quote-flow failure. Send a short,
    * apologetic French message to the customer ("on revient vers vous très
    * vite") and escalate to a HUMAN_ACTION so Ridaa/Achraf can look at
@@ -825,6 +922,31 @@ export function formatQuotePreviewMessage(opts: {
   lines.push('');
   lines.push(`(réf #${opts.quoteId.slice(0, 8)})`);
   return lines.join('\n');
+}
+
+/**
+ * Customer-facing confirmation after Maxance has emailed the quote PDF.
+ * Achraf's wording — locked once, templated forever.
+ *
+ * Pure function — covered by unit tests.
+ */
+export function formatQuoteReadyMessage(opts: {
+  firstName?: string;
+  pdfSentTo: string;
+  devisNumber: string;
+  quoteId: string;
+}): string {
+  const greeting = opts.firstName ? `Bonjour ${opts.firstName},` : 'Bonjour,';
+  return [
+    greeting,
+    '',
+    `C'est envoyé ! Votre devis trottinette vient d'arriver par mail à ${opts.pdfSentTo}.`,
+    `Référence du devis : ${opts.devisNumber}.`,
+    '',
+    'Vérifiez aussi vos spams si vous ne le voyez pas.',
+    '',
+    `(réf #${opts.quoteId.slice(0, 8)} envoyé)`,
+  ].join('\n');
 }
 
 /**

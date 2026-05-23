@@ -39,6 +39,30 @@ export interface LoginResult {
   finalUrl: string;
 }
 
+/** Discriminated subset of the Stagehand /v1/maxance/quote/confirm response. */
+export interface ConfirmQuoteResult {
+  sessionId: string;
+  durationMs: number;
+  screenshots: { step: string; url: string }[];
+  devisNumber: string;
+  pdfSentTo: string;
+  finalUrl: string;
+}
+
+/** Subscriber info for the Devis tab — mirrors stagehand's MaxanceSubscriberInfo. */
+export interface StagehandSubscriberInfo {
+  civilite: 'monsieur' | 'madame';
+  lastName: string;
+  firstName: string;
+  addressLine: string;
+  addressComplement?: string;
+  postalCode: string;
+  city: string;
+  phoneMobile: string;
+  email: string;
+  profession?: 'employe_prive' | 'employe_public' | 'etudiant' | 'retraite' | 'sans_profession';
+}
+
 /** Params for /v1/maxance/quote — mirrors stagehand's MaxanceQuoteParams. */
 export interface StagehandQuoteParams {
   vehicleKind: 'trottinette';
@@ -156,6 +180,36 @@ export class StagehandClient {
       {
         sessionName,
         params,
+        dryRun: opts.dryRun ?? true,
+        ...(opts.timeoutMs ? { timeoutMs: opts.timeoutMs } : {}),
+      },
+      opts.timeoutMs,
+    );
+  }
+
+  /**
+   * Continue a quote (M8.T6 path): clicks Valider devis on the Garanties
+   * tab, fills the Devis tab subscriber info, sends the quote PDF by email
+   * to the customer. Returns the devis number + the email address Maxance
+   * dispatched to.
+   *
+   * Pre-condition: caller must have just run `runQuote` on the same session
+   * — the browser is sitting on the Garanties tab with a price visible.
+   *
+   * dryRun=true (default) stops just before the final Envoyer click — the
+   * email dialog is filled out but no real email leaves Maxance. Production
+   * usage flips this to false after Achraf signs off on the live email path.
+   */
+  async confirmQuote(
+    sessionName: string,
+    subscriber: StagehandSubscriberInfo,
+    opts: { dryRun?: boolean; timeoutMs?: number } = {},
+  ): Promise<ConfirmQuoteResult> {
+    return this.post<ConfirmQuoteResult>(
+      '/v1/maxance/quote/confirm',
+      {
+        sessionName,
+        subscriber,
         dryRun: opts.dryRun ?? true,
         ...(opts.timeoutMs ? { timeoutMs: opts.timeoutMs } : {}),
       },

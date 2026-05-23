@@ -1,4 +1,12 @@
 /**
+ * ⚠️ DEPRECATED 2026-05-23 — DO NOT enable MAXANCE_QUOTE_LIVE against the
+ * real Maxance portal. Cloudflare Turnstile blocks every Playwright-launched
+ * Chrome regardless of stealth treatment. Use the Claude Chrome extension
+ * (mcp__Claude_in_Chrome__* MCP toolkit) on Ridaa's daily Chrome instead.
+ * See project_hosting_pivot.md memory note for the decision log. Kept only
+ * because the underlying step planner (quote.ts) remains the canonical
+ * reference for Maxance UI selectors + defaults.
+ *
  * LIVE Maxance quote-flow test (M8.T3).
  *
  * Opt-in only. Gated on:

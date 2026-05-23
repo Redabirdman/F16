@@ -10,6 +10,7 @@ import { describe, expect, it } from 'vitest';
 import {
   formatQuotePreviewMessage,
   formatQuoteFailedMessage,
+  formatQuoteReadyMessage,
 } from '../../../src/agents/sales-agent/agent.js';
 
 describe('formatQuotePreviewMessage', () => {
@@ -87,6 +88,34 @@ describe('formatQuotePreviewMessage', () => {
     });
     expect(out).toContain('1234,50 €');
     expect(out).toContain('9999,00 €');
+  });
+});
+
+describe('formatQuoteReadyMessage', () => {
+  it('confirms quote sent + includes devis number + email + ref tag', () => {
+    const out = formatQuoteReadyMessage({
+      firstName: 'Sami',
+      pdfSentTo: 'sami@example.com',
+      devisNumber: 'AB12345678',
+      quoteId: 'abc12345-6789-4abc-def0-123456789012',
+    });
+    expect(out).toContain('Bonjour Sami,');
+    expect(out).toContain("C'est envoyé !");
+    expect(out).toContain('sami@example.com');
+    expect(out).toContain('Référence du devis : AB12345678');
+    expect(out).toContain('Vérifiez aussi vos spams');
+    expect(out).toContain('(réf #abc12345 envoyé)'); // The "envoyé" marker is what
+    // handleQuoteReady scans for to
+    // detect already-sent.
+  });
+
+  it('falls back to generic greeting without firstName', () => {
+    const out = formatQuoteReadyMessage({
+      pdfSentTo: 'x@y.fr',
+      devisNumber: 'X1',
+      quoteId: 'aaaaaaaa-bbbb-4ccc-dddd-eeeeeeeeeeee',
+    });
+    expect(out.startsWith('Bonjour,')).toBe(true);
   });
 });
 
