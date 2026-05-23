@@ -1,0 +1,231 @@
+/**
+ * WhatsApp inbound parser for HUMAN_ACTION resolutions (option G follow-up).
+ *
+ * When Ridaa or Achraf reply in the configured WhatsApp group thread, this
+ * module decides:
+ *   1. Is this message in the human-action group? (group chat id match)
+ *   2. Is the sender authorised? (phone in allowlist)
+ *   3. Which action are they resolving? (UUID in body OR latest-pending fallback)
+ *   4. Which option did they pick? (numeric "1"/"2" OR text "approve"/"reject"
+ *      with French aliases)
+ *
+ * Pure functions — no DB, no WAHA, no env. The webhook handler wires this
+ * to chrome.runtime.* state and persistence. Returns either a resolution
+ * intent (action id + chosen option) or null if nothing matched.
+ *
+ * Design notes:
+ *   - We DO NOT require the action ID to be in the body — operators
+ *     replying "1" inline in the WhatsApp thread is the common case. We
+ *     fall back to "latest pending" when there's no UUID match. If
+ *     multiple actions are pending, requiring an ID is the safer policy
+ *     (we return action_ambiguous so the operator gets nudged to include
+ *     the ID).
+ *   - Authorisation list lives in HUMAN_ACTION_AUTHORISED_RESOLVERS env
+ *     (comma-separated E.164 phones). Anyone else in the group is
+ *     ignored — per project_human_action_channel.md, only Ridaa + Achraf
+ *     count as authoritative.
+ */
+import type { HumanAction, HumanActionOption } from '../../db/schema/agent-runtime.js';
+import { chatIdToE164 } from './webhook-types.js';
+
+/** UUID v4 regex — matches the action ID format we emit in the formatter. */
+const UUID_REGEX = /\b([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\b/i;
+
+/**
+ * French + English aliases mapped to canonical option `kind` values. Used
+ * when the body is text rather than a number. Match is lower-cased + word-
+ * boundary so "approuver le devis" still resolves to "approve".
+ */
+const KIND_ALIASES: ReadonlyArray<{ words: readonly RegExp[]; kind: HumanActionOption['kind'] }> = [
+  {
+    kind: 'approve',
+    words: [/\bapprove\b/, /\bapprouver?\b/, /\boui\b/, /\byes\b/, /\bok\b/, /\bok\.?\b/],
+  },
+  {
+    kind: 'reject',
+    words: [/\breject\b/, /\brefuser?\b/, /\bnon\b/, /\bno\b/],
+  },
+  {
+    kind: 'revise',
+    words: [/\brevise\b/, /\bréviser?\b/, /\brevoir\b/, /\bedit\b/],
+  },
+  {
+    kind: 'callback',
+    words: [/\bcallback\b/, /\brappel(er)?\b/, /\bcall\b/],
+  },
+];
+
+/** Result of a successful parse — the webhook applies this. */
+export interface ResolutionMatch {
+  actionId: string;
+  option: HumanActionOption;
+  /** "uuid" | "latest_pending" — useful for audit logs. */
+  matchedActionVia: 'uuid' | 'latest_pending';
+  /** "numeric" | "kind_alias" — same. */
+  matchedOptionVia: 'numeric' | 'kind_alias';
+  /** Author chat id we extracted, in E.164 (e.g. "+33612345678"). */
+  resolverPhone: string;
+}
+
+/** Result when the message looks like a resolution but doesn't fully match. */
+export interface ResolutionFailure {
+  reason:
+    | 'not_human_action_group'
+    | 'sender_not_authorised'
+    | 'no_pending_actions'
+    | 'action_not_found'
+    | 'action_ambiguous'
+    | 'option_not_recognised'
+    | 'empty_body';
+  /** Extra detail for log fields. */
+  detail?: string;
+}
+
+/** Either a successful match or a tagged failure. */
+export type ResolutionOutcome = ResolutionMatch | ResolutionFailure;
+
+/** Type guard: distinguish a successful match from a failure. */
+export function isMatch(o: ResolutionOutcome): o is ResolutionMatch {
+  return (o as ResolutionMatch).actionId !== undefined;
+}
+
+/**
+ * Parse the comma-separated `HUMAN_ACTION_AUTHORISED_RESOLVERS` env into a
+ * Set<E.164>. Tolerant of whitespace + missing leading + signs ("33612…" →
+ * "+33612…"). Empty string → empty Set (no one authorised — V0 / dev mode).
+ */
+export function parseAuthorisedResolvers(raw: string | undefined): Set<string> {
+  if (!raw) return new Set();
+  return new Set(
+    raw
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .map((s) => (s.startsWith('+') ? s : `+${s}`)),
+  );
+}
+
+/** Inputs for the parser. Pure — no I/O. */
+export interface ParseInput {
+  /** The WAHA message body — what the operator typed in the group. */
+  body: string;
+  /** The WAHA `from` field — for group messages this is the group chat id. */
+  from: string;
+  /** The WAHA `author` field — individual sender's chat id, or undefined for personal chats. */
+  author: string | undefined;
+  /** Configured human-action group chat id (e.g. "120363012345@g.us"). */
+  groupChatId: string;
+  /** Configured allowlist of resolver phones in E.164 (e.g. {"+33612345678"}). */
+  authorisedResolvers: Set<string>;
+  /**
+   * All currently-pending human_action rows (most-recent first). The parser
+   * picks one based on UUID-in-body or falls back to the head of this list
+   * when there's exactly one.
+   */
+  pendingActions: readonly HumanAction[];
+}
+
+/**
+ * Decide whether this WAHA message is a human-action resolution.
+ *
+ * Returns:
+ *   - ResolutionMatch — apply via resolveAction + emit HUMAN_ACTION.RESOLVED
+ *   - ResolutionFailure — log + optionally reply in the group ("je n'ai pas
+ *     compris ; réponds 1, 2, ou inclus l'ID de l'action").
+ *
+ * The webhook handler always returns 200 to WAHA either way — we don't want
+ * WAHA retrying a malformed operator reply.
+ */
+export function parseHumanActionResolution(input: ParseInput): ResolutionOutcome {
+  // 1. Group-membership gate.
+  if (input.from !== input.groupChatId) {
+    return { reason: 'not_human_action_group' };
+  }
+
+  // 2. Authorisation. `author` carries the individual sender's chat id in
+  //    group messages. Convert to E.164 via the shared helper.
+  if (!input.author) {
+    return { reason: 'sender_not_authorised', detail: 'no_author_field' };
+  }
+  const resolverPhone = chatIdToE164(input.author);
+  if (!resolverPhone || !input.authorisedResolvers.has(resolverPhone)) {
+    return {
+      reason: 'sender_not_authorised',
+      detail: resolverPhone ?? input.author,
+    };
+  }
+
+  // 3. Empty body — nothing to parse.
+  const body = input.body.trim();
+  if (body.length === 0) {
+    return { reason: 'empty_body' };
+  }
+
+  // 4. Find the target action. UUID-in-body wins; otherwise fall back to
+  //    "latest pending" but only if there's exactly one.
+  const uuidMatch = UUID_REGEX.exec(body);
+  let action: HumanAction | undefined;
+  let matchedActionVia: 'uuid' | 'latest_pending' = 'latest_pending';
+  if (uuidMatch) {
+    const captured = uuidMatch[1];
+    const targetId = (captured ?? '').toLowerCase();
+    action = input.pendingActions.find((a) => a.id.toLowerCase() === targetId);
+    if (!action) {
+      return { reason: 'action_not_found', detail: targetId };
+    }
+    matchedActionVia = 'uuid';
+  } else {
+    if (input.pendingActions.length === 0) {
+      return { reason: 'no_pending_actions' };
+    }
+    if (input.pendingActions.length > 1) {
+      return {
+        reason: 'action_ambiguous',
+        detail: `${input.pendingActions.length}_pending`,
+      };
+    }
+    const head = input.pendingActions[0];
+    if (!head) return { reason: 'no_pending_actions' };
+    action = head;
+  }
+
+  // 5. Match the option. Numeric first (1-indexed against the action's options).
+  const options = action.options as readonly HumanActionOption[];
+  const stripped = body.replace(UUID_REGEX, '').trim();
+  const numericMatch = /^\s*(\d+)\b/.exec(stripped);
+  if (numericMatch) {
+    const capturedNumeric = numericMatch[1] ?? '0';
+    const idx = Number.parseInt(capturedNumeric, 10) - 1;
+    if (idx >= 0 && idx < options.length) {
+      const chosen = options[idx];
+      if (!chosen) return { reason: 'option_not_recognised', detail: `numeric:${capturedNumeric}` };
+      return {
+        actionId: action.id,
+        option: chosen,
+        matchedActionVia,
+        matchedOptionVia: 'numeric',
+        resolverPhone,
+      };
+    }
+    return { reason: 'option_not_recognised', detail: `numeric:${numericMatch[1]}` };
+  }
+
+  // 6. Text alias — match against the option's kind via French/English aliases.
+  const lower = stripped.toLowerCase();
+  for (const alias of KIND_ALIASES) {
+    if (alias.words.some((rx) => rx.test(lower))) {
+      const chosen = options.find((o) => o.kind === alias.kind);
+      if (chosen) {
+        return {
+          actionId: action.id,
+          option: chosen,
+          matchedActionVia,
+          matchedOptionVia: 'kind_alias',
+          resolverPhone,
+        };
+      }
+    }
+  }
+
+  return { reason: 'option_not_recognised', detail: stripped.slice(0, 40) };
+}

@@ -29,11 +29,17 @@ import { sendMessage } from '../../messaging/dispatcher.js';
 import { insertCustomer, getCustomerByPhone } from '../../db/repositories/customers.js';
 import { insertTurn } from '../../db/repositories/conversation-turns.js';
 import { leads } from '../../db/schema/leads.js';
+import { listPending, resolveAction } from '../../db/repositories/human-actions.js';
 import {
   WahaWebhookEnvelopeSchema,
   WahaMessagePayloadSchema,
   chatIdToE164,
 } from './webhook-types.js';
+import {
+  parseHumanActionResolution,
+  parseAuthorisedResolvers,
+  isMatch,
+} from './human-action-router.js';
 
 export interface WhatsAppWebhookOptions {
   db: Database;
@@ -44,6 +50,22 @@ export interface WhatsAppWebhookOptions {
    * don't forward the header. Production deployments MUST set this.
    */
   hmacSecret?: string;
+  /**
+   * Optional — WAHA chat id of the human-action group (e.g.
+   * "120363012345@g.us"). When set, inbound messages from this chat are
+   * routed to the human-action resolution parser instead of the customer-
+   * message path. When unset, the webhook ignores all group messages
+   * (legacy behaviour). Default is to read HUMAN_ACTION_GROUP_CHAT_ID from
+   * env in start().
+   */
+  humanActionGroupChatId?: string;
+  /**
+   * Allowlist of authorised resolver phones in E.164 ("+33612345678"). Only
+   * messages from these senders count as authoritative human_action
+   * resolutions, per project_human_action_channel.md. Default is to read
+   * HUMAN_ACTION_AUTHORISED_RESOLVERS from env in start() (comma-separated).
+   */
+  humanActionAuthorisedResolvers?: Set<string>;
 }
 
 /**
@@ -95,14 +117,27 @@ export function buildWhatsAppWebhook(opts: WhatsAppWebhookOptions): Hono {
       return c.json({ error: 'invalid message payload' }, 400);
     }
 
-    // 5. Filter self-echoes (we sent it) and group chats (V1 scope).
-    //   - fromMe: WAHA emits a `message` event for our own outbound messages
-    //     too. We must not loop back into the dispatcher with our own copy.
-    //   - chatIdToE164 returns null for `@g.us` group ids — group support is
-    //     deliberately out of scope (M11+ would add it).
+    // 5. Filter self-echoes (we sent it). WAHA emits a `message` event for
+    //    our own outbound messages too — we must not loop back.
     if (msg.fromMe) {
       return c.json({ accepted: true, ignored: 'fromMe' }, 200);
     }
+
+    // 5b. HUMAN_ACTION group intercept (option G follow-up). When the
+    //     configured group chat sends a message, treat it as a possible
+    //     resolution of an open human_action rather than a customer message.
+    //     `from` for group messages is the group chat id; `author` is the
+    //     individual sender (we authorise on the latter).
+    const groupChatId = opts.humanActionGroupChatId;
+    if (groupChatId && msg.from === groupChatId) {
+      const outcome = await tryResolveHumanActionFromGroup(opts, msg);
+      // Always 200 — we don't want WAHA to retry an operator reply.
+      return c.json({ accepted: true, humanAction: outcome }, 200);
+    }
+
+    // 5c. Other group chats (not the human-action group) are ignored —
+    //     V1 customer messaging is personal-chat only. chatIdToE164 returns
+    //     null for any `@g.us` chat id.
     const e164 = chatIdToE164(msg.from);
     if (!e164) {
       return c.json({ accepted: true, ignored: 'non-personal-chat' }, 200);
@@ -226,6 +261,92 @@ async function findOrCreateCustomerByPhone(db: Database, e164: string): Promise<
   );
   return { id: created.id };
 }
+
+/**
+ * Try to resolve an open human_action from a message posted in the
+ * configured WA group (option G follow-up).
+ *
+ * Flow:
+ *   1. Load currently-pending human_actions (most-recent first).
+ *   2. Hand the message + pending list to the pure parser. It decides
+ *      whether the message is a valid resolution and which option was
+ *      picked, applying the auth allowlist.
+ *   3. On match: call resolveAction (idempotent), emit
+ *      HUMAN_ACTION.RESOLVED — the Reporter Agent picks that up and posts
+ *      the closure message in the same group.
+ *   4. On failure: log a structured warn with the reason. The webhook
+ *      always returns 200 either way.
+ *
+ * Returns a small object describing the outcome — surfaced in the HTTP
+ * response body so the WAHA admin can see why a reply didn't take.
+ */
+async function tryResolveHumanActionFromGroup(
+  opts: WhatsAppWebhookOptions,
+  msg: { body: string; from: string; author?: string | undefined },
+): Promise<
+  { resolved: false; reason: string } | { resolved: true; actionId: string; choice: string }
+> {
+  const groupChatId = opts.humanActionGroupChatId;
+  if (!groupChatId) {
+    return { resolved: false, reason: 'not_human_action_group' };
+  }
+  const authorised = opts.humanActionAuthorisedResolvers ?? new Set<string>();
+  const pending = await listPending(opts.db, { limit: 20 });
+  const outcome = parseHumanActionResolution({
+    body: msg.body,
+    from: msg.from,
+    author: msg.author,
+    groupChatId,
+    authorisedResolvers: authorised,
+    pendingActions: pending,
+  });
+
+  if (!isMatch(outcome)) {
+    logger.warn(
+      { reason: outcome.reason, detail: outcome.detail },
+      'waha webhook: human-action message did not resolve',
+    );
+    return { resolved: false, reason: outcome.reason };
+  }
+
+  await resolveAction(opts.db, outcome.actionId, {
+    chosenOption: outcome.option,
+    by: outcome.resolverPhone,
+    source: 'whatsapp',
+  });
+
+  await sendMessage(
+    { db: opts.db },
+    {
+      fromRole: 'channel.whatsapp',
+      toRole: 'human-router',
+      toInstance: 'singleton',
+      intent: 'HUMAN_ACTION.RESOLVED',
+      payload: {
+        humanActionId: outcome.actionId,
+        choice: outcome.option.id,
+        source: 'whatsapp',
+      },
+      correlationId: outcome.actionId,
+    },
+  );
+
+  logger.info(
+    {
+      humanActionId: outcome.actionId,
+      choice: outcome.option.id,
+      resolverPhone: outcome.resolverPhone,
+      matchedActionVia: outcome.matchedActionVia,
+      matchedOptionVia: outcome.matchedOptionVia,
+    },
+    'waha webhook: human-action resolved via WhatsApp',
+  );
+
+  return { resolved: true, actionId: outcome.actionId, choice: outcome.option.id };
+}
+
+/** Re-export so start() and tests can build a Set from the env value. */
+export { parseAuthorisedResolvers };
 
 /**
  * Constant-time HMAC-SHA256 verification.

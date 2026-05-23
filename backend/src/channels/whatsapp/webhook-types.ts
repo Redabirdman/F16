@@ -27,6 +27,11 @@ export const WahaMessagePayloadSchema = z.object({
   // Either "<digits>@c.us" (personal) or "<group-id>@g.us" (group). We
   // accept the raw string here and filter on shape downstream.
   from: z.string(),
+  // For group messages WAHA emits the GROUP chat id in `from` and the
+  // individual sender's chat id in `author` (e.g. "33612345678@c.us"). For
+  // personal chats `author` is absent. Optional in this schema so the
+  // existing customer-message path keeps validating.
+  author: z.string().optional(),
   fromMe: z.boolean(),
   body: z.string().optional().default(''),
   hasMedia: z.boolean().optional().default(false),

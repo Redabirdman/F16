@@ -6,7 +6,7 @@ import type { Server } from 'node:http';
 import type { HealthResponse } from './types.js';
 import { logger } from './logger.js';
 import type { Database } from './db/index.js';
-import { buildWhatsAppWebhook } from './channels/whatsapp/webhook.js';
+import { buildWhatsAppWebhook, parseAuthorisedResolvers } from './channels/whatsapp/webhook.js';
 import { buildLeadIntakeRouter } from './leads/intake-http.js';
 
 /**
@@ -61,10 +61,20 @@ export function buildApp(opts: BuildAppOptions = {}): Hono {
     // Mount channel webhooks only when we have a DB to write to. Without
     // one, the `/webhooks/waha` route would just 500 on every request — a
     // missing route is a clearer failure mode.
+    // option G follow-up: human-action group + resolver allowlist from env.
+    // When unset, the webhook ignores all group messages (legacy); when set,
+    // group messages from the configured chat route to the human-action
+    // resolution parser.
+    const humanActionGroupChatId = process.env.HUMAN_ACTION_GROUP_CHAT_ID;
+    const humanActionAuthorisedResolvers = parseAuthorisedResolvers(
+      process.env.HUMAN_ACTION_AUTHORISED_RESOLVERS,
+    );
     const wahaApp = buildWhatsAppWebhook({
       db: opts.db,
       // exactOptionalPropertyTypes: only set the key when defined.
       ...(opts.wahaHmacSecret ? { hmacSecret: opts.wahaHmacSecret } : {}),
+      ...(humanActionGroupChatId ? { humanActionGroupChatId } : {}),
+      ...(humanActionAuthorisedResolvers.size > 0 ? { humanActionAuthorisedResolvers } : {}),
     });
     app.route('/', wahaApp);
 
