@@ -28,13 +28,18 @@ export function registerSalesAgentClass(): void {
       role: 'sales-agent',
       instanceId: cfg.instanceId,
       model: 'sonnet',
-      // The Sales Agent consumes from BOTH queues:
-      //   - 'lead'     — receives LEAD.SCORED (first-turn welcome)
-      //   - 'customer' — receives CUSTOMER.MESSAGE_RECEIVED (ongoing chat)
-      // BaseAgent spins up one BullMQ worker per queue; both feed the same
+      // The Sales Agent consumes from THREE queues:
+      //   - 'lead'     — LEAD.SCORED (first-turn welcome)
+      //   - 'customer' — CUSTOMER.MESSAGE_RECEIVED (ongoing chat)
+      //   - 'quote'    — QUOTE.PREVIEW_READY / QUOTE.FAILED from the
+      //                  Maxance Operator (M8.T4). Sales Agent owns the
+      //                  customer-facing delivery of the price preview
+      //                  and the apology-on-failure path; Operator only
+      //                  drives the browser + emits structured envelopes.
+      // BaseAgent spins up one BullMQ worker per queue; all feed the same
       // onMessage handler. `queues[0]` ('lead') is reported as the primary
       // queue in agents_state for the admin's at-a-glance summary.
-      queues: [QUEUE_NAMES.LEAD, QUEUE_NAMES.CUSTOMER],
+      queues: [QUEUE_NAMES.LEAD, QUEUE_NAMES.CUSTOMER, QUEUE_NAMES.QUOTE],
       db: cfg.db,
       ...(cfg.meta ? { meta: cfg.meta } : {}),
     });

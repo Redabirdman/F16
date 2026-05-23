@@ -83,6 +83,10 @@ export class SalesAgent extends BaseAgent {
           return await this.handleLeadScored(envelope);
         case 'CUSTOMER.MESSAGE_RECEIVED':
           return await this.handleCustomerMessage(envelope);
+        case 'QUOTE.PREVIEW_READY':
+          return await this.handleQuotePreviewReady(envelope);
+        case 'QUOTE.FAILED':
+          return await this.handleQuoteFailed(envelope);
         default:
           logger.debug(
             { intent: envelope.intent, instanceId: this.instanceId },
@@ -503,6 +507,238 @@ export class SalesAgent extends BaseAgent {
   }
 
   /**
+   * Maxance Operator (M8.T4) produced a price preview. Format a deterministic
+   * French message with the price + formule, send it via the customer's most
+   * recent channel, and log the outbound turn. No LLM call — the price
+   * needs to be exact, and Achraf will sleep better at night knowing the
+   * customer-facing number is templated, not synthesised.
+   *
+   * Idempotency: keyed on `correlationId = quoteId`. If we've already sent
+   * an outbound turn for this quoteId we skip — the Maxance Operator should
+   * not normally re-emit, but a worker restart mid-flight could redeliver.
+   */
+  private async handleQuotePreviewReady(
+    envelope: AgentMessageEnvelope,
+  ): Promise<MessageHandlerResult> {
+    const payload = envelope.payload as {
+      quoteId: string;
+      customerId: string;
+      pricePreviewEur: { monthly?: number; annual?: number };
+      formule?: 'tiers_illimite' | 'vol_incendie' | 'dommages_tous_accidents';
+      finalUrl: string;
+      screenshots: { step: string; url: string }[];
+      durationMs: number;
+    };
+
+    const leadId = this.leadIdFromEnvelope(envelope);
+    if (!leadId) return { ok: false, error: 'no leadId available' };
+
+    // Pick the channel the customer last used (or the most recent outbound
+    // channel if they haven't replied yet). Default to WhatsApp — the
+    // Assuryal funnel is WhatsApp-first.
+    const recentTurns = await listTurns(this.db, {
+      customerId: payload.customerId,
+      leadId,
+      limit: 5,
+    });
+    const channel: ChannelId = (recentTurns[0]?.channel as ChannelId | undefined) ?? 'whatsapp';
+
+    const { customer, lead, contactRef } = await this.resolveCustomerAndContact(leadId, channel);
+    if (!contactRef) {
+      logger.warn(
+        { leadId: lead.id, channel, instanceId: this.instanceId, quoteId: payload.quoteId },
+        'sales-agent: no contact address for preview channel',
+      );
+      return { ok: true, result: { skipped: 'no-contact-address', channel } };
+    }
+
+    // Idempotency: if we already sent a turn correlated with this quoteId, skip.
+    // We piggy-back on conversation-turns' content scan — quoteId appears in
+    // the body as a non-visible marker we add below.
+    const alreadySent = recentTurns.some(
+      (t) => t.direction === 'outbound' && (t.content ?? '').includes(`#${payload.quoteId}`),
+    );
+    if (alreadySent) {
+      return { ok: true, result: { skipped: 'already-sent', quoteId: payload.quoteId } };
+    }
+
+    const fullName = decryptPII(customer.fullName) ?? '';
+    const firstName = (fullName.split(' ')[0] ?? '').trim();
+    const draft = formatQuotePreviewMessage({
+      firstName,
+      ...(payload.pricePreviewEur.monthly !== undefined
+        ? { monthly: payload.pricePreviewEur.monthly }
+        : {}),
+      ...(payload.pricePreviewEur.annual !== undefined
+        ? { annual: payload.pricePreviewEur.annual }
+        : {}),
+      formule: payload.formule ?? 'tiers_illimite',
+      quoteId: payload.quoteId,
+    });
+
+    const send = await sendViaChannel({
+      db: this.db,
+      customerId: customer.id,
+      leadId: lead.id,
+      to: contactRef,
+      body: [{ type: 'text', text: draft }],
+      agentRole: this.role,
+      agentInstance: this.instanceId,
+      correlationId: payload.quoteId,
+    });
+
+    logger.info(
+      {
+        leadId: lead.id,
+        customerId: customer.id,
+        instanceId: this.instanceId,
+        channel,
+        quoteId: payload.quoteId,
+        externalId: send.receipt.externalId,
+        monthly: payload.pricePreviewEur.monthly,
+        annual: payload.pricePreviewEur.annual,
+      },
+      'sales-agent: quote preview sent to customer',
+    );
+
+    return {
+      ok: true,
+      result: {
+        intent: envelope.intent,
+        sent: true,
+        channel,
+        externalId: send.receipt.externalId,
+        quoteId: payload.quoteId,
+      },
+    };
+  }
+
+  /**
+   * Maxance Operator (M8.T4) reported a quote-flow failure. Send a short,
+   * apologetic French message to the customer ("on revient vers vous très
+   * vite") and escalate to a HUMAN_ACTION so Ridaa/Achraf can look at
+   * what went wrong (the operator-side error code is in the payload for
+   * the admin UI; never echoed to the customer).
+   *
+   * The customer message is deliberately vague — they don't need the
+   * Cloudflare/Stagehand internals. The HUMAN_ACTION carries the actual
+   * errorCode and detail for diagnosis.
+   */
+  private async handleQuoteFailed(envelope: AgentMessageEnvelope): Promise<MessageHandlerResult> {
+    const payload = envelope.payload as {
+      quoteId: string;
+      customerId: string;
+      errorCode: string;
+      detail?: string;
+      screenshots: { step: string; url: string }[];
+    };
+
+    const leadId = this.leadIdFromEnvelope(envelope);
+    if (!leadId) return { ok: false, error: 'no leadId available' };
+
+    // Pick the customer's most-recent channel, same heuristic as PREVIEW_READY.
+    const recentTurns = await listTurns(this.db, {
+      customerId: payload.customerId,
+      leadId,
+      limit: 5,
+    });
+    const channel: ChannelId = (recentTurns[0]?.channel as ChannelId | undefined) ?? 'whatsapp';
+
+    const { customer, lead, contactRef } = await this.resolveCustomerAndContact(leadId, channel);
+    const fullName = decryptPII(customer.fullName) ?? '';
+    const firstName = (fullName.split(' ')[0] ?? '').trim();
+    const draft = formatQuoteFailedMessage({ firstName, quoteId: payload.quoteId });
+
+    // Always escalate — even if we can't reach the customer on the channel,
+    // Ridaa/Achraf must know the quote failed.
+    const action = await humanActions.createAction(this.db, {
+      createdByAgent: `${this.role}#${this.instanceId}`,
+      correlationId: payload.quoteId,
+      intent: 'QUOTE_FAILED',
+      severity: 2,
+      summary:
+        `Quote ${payload.quoteId} failed (${payload.errorCode}). ` +
+        `Lead ${leadId}. ${payload.detail ? `Détail : ${payload.detail}. ` : ''}` +
+        `Capture(s) : ${payload.screenshots.length}.`,
+      options: [
+        { id: 'retry', label: 'Relancer le devis', kind: 'approve' },
+        { id: 'manual', label: 'Faire le devis à la main', kind: 'approve' },
+        { id: 'abandon', label: 'Abandonner ce lead', kind: 'reject' },
+      ],
+    });
+
+    if (!contactRef) {
+      logger.warn(
+        { leadId: lead.id, channel, instanceId: this.instanceId, quoteId: payload.quoteId },
+        'sales-agent: no contact address for quote-failed message; escalation logged',
+      );
+      return {
+        ok: true,
+        result: { skipped: 'no-contact-address', humanActionId: action.id, channel },
+      };
+    }
+
+    const send = await sendViaChannel({
+      db: this.db,
+      customerId: customer.id,
+      leadId: lead.id,
+      to: contactRef,
+      body: [{ type: 'text', text: draft }],
+      agentRole: this.role,
+      agentInstance: this.instanceId,
+      correlationId: payload.quoteId,
+    });
+
+    logger.warn(
+      {
+        leadId: lead.id,
+        customerId: customer.id,
+        instanceId: this.instanceId,
+        channel,
+        quoteId: payload.quoteId,
+        errorCode: payload.errorCode,
+        externalId: send.receipt.externalId,
+        humanActionId: action.id,
+      },
+      'sales-agent: quote-failed notice sent + human escalation logged',
+    );
+
+    return {
+      ok: true,
+      result: {
+        intent: envelope.intent,
+        sent: true,
+        channel,
+        externalId: send.receipt.externalId,
+        humanActionId: action.id,
+        quoteId: payload.quoteId,
+      },
+    };
+  }
+
+  /**
+   * Resolve the leadId for the current envelope.
+   *
+   * Two sources, in priority order:
+   *   1. The Sales Agent instance's `meta.leadId` (set by the spawn
+   *      orchestrator when this instance was created for a specific lead).
+   *   2. The envelope's `correlationId` — for the QUOTE.PREVIEW_READY path
+   *      the Maxance Operator sets correlationId = quoteId, NOT leadId,
+   *      so this fallback only matters for old / replay envelopes.
+   *
+   * Returns null when neither is available — callers fail fast with
+   * `no leadId available`.
+   */
+  private leadIdFromEnvelope(envelope: AgentMessageEnvelope): string | null {
+    const fromMeta = this.meta['leadId'];
+    if (typeof fromMeta === 'string' && fromMeta.length > 0) return fromMeta;
+    if (envelope.correlationId && envelope.correlationId.length > 0) {
+      return envelope.correlationId;
+    }
+    return null;
+  }
+
+  /**
    * Resolve `(lead, customer, ContactRef)` for the given lead+channel.
    * - Throws on missing lead / missing customer-id-on-lead / missing customer.
    * - Returns `contactRef: null` when the customer has no address for the
@@ -547,6 +783,77 @@ export class SalesAgent extends BaseAgent {
     };
     return { customer, lead, contactRef };
   }
+}
+
+/**
+ * Format the customer-facing French price-preview message for a trottinette
+ * quote. Templated, no LLM call — the headline figures must be EXACT and
+ * stable (Achraf reviews the wording once, then it's locked).
+ *
+ * The trailing `#<quoteId>` is an idempotency / lookup marker — invisible
+ * enough to not annoy the customer ("réf #abc..." reads like a normal
+ * support reference) and we use it in handleQuotePreviewReady to detect
+ * "we already sent this".
+ *
+ * Pure function — covered by unit tests.
+ */
+export function formatQuotePreviewMessage(opts: {
+  firstName?: string;
+  monthly?: number;
+  annual?: number;
+  formule: 'tiers_illimite' | 'vol_incendie' | 'dommages_tous_accidents';
+  quoteId: string;
+}): string {
+  const greeting = opts.firstName ? `Bonjour ${opts.firstName},` : 'Bonjour,';
+  const formuleLabel =
+    opts.formule === 'tiers_illimite'
+      ? 'Tiers Illimité'
+      : opts.formule === 'vol_incendie'
+        ? 'Tiers Illimité + Vol & Incendie'
+        : 'Tous Risques';
+
+  const lines: string[] = [greeting, '', 'Voici votre devis trottinette :'];
+  if (opts.monthly !== undefined) {
+    lines.push(`• Mensuel : ${formatEur(opts.monthly)}`);
+  }
+  if (opts.annual !== undefined) {
+    lines.push(`• Annuel : ${formatEur(opts.annual)}`);
+  }
+  lines.push(`• Formule : ${formuleLabel}`);
+  lines.push('');
+  lines.push('Souhaitez-vous que je vous envoie le devis officiel par mail ?');
+  lines.push('');
+  lines.push(`(réf #${opts.quoteId.slice(0, 8)})`);
+  return lines.join('\n');
+}
+
+/**
+ * Customer-facing message when the Maxance flow blew up. Deliberately vague
+ * — the customer doesn't need to know about Cloudflare / Stagehand / Auth0.
+ * The real diagnostics are in the HUMAN_ACTION the handler also creates.
+ *
+ * Pure function — covered by unit tests.
+ */
+export function formatQuoteFailedMessage(opts: { firstName?: string; quoteId: string }): string {
+  const greeting = opts.firstName ? `Bonjour ${opts.firstName},` : 'Bonjour,';
+  return [
+    greeting,
+    '',
+    "J'ai un petit souci technique pour finaliser votre devis trottinette.",
+    'Un conseiller revient vers vous très rapidement.',
+    '',
+    `(réf #${opts.quoteId.slice(0, 8)})`,
+  ].join('\n');
+}
+
+/**
+ * Format a EUR number French-style: `18.95€/mois` style numbers stay
+ * accurate, but the decimal separator is a comma (`18,95 €`) per French
+ * convention. Two decimals always.
+ */
+function formatEur(value: number): string {
+  // toFixed(2) → "18.95"; swap the dot for a comma.
+  return `${value.toFixed(2).replace('.', ',')} €`;
 }
 
 /**
