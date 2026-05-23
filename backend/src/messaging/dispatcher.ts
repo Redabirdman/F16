@@ -58,6 +58,8 @@ const INTENT_TO_QUEUE: Record<string, string> = {
   // quote
   'QUOTE.REQUESTED': 'quote',
   'QUOTE.READY': 'quote',
+  'QUOTE.PREVIEW_READY': 'quote',
+  'QUOTE.FAILED': 'quote',
   'QUOTE.DELIVERED': 'quote',
   'QUOTE.ACCEPTED': 'quote',
   'QUOTE.REJECTED': 'quote',

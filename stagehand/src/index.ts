@@ -11,7 +11,14 @@ import { logger } from './logger.js';
 import { pool } from './browser-pool.js';
 import { executeIntent, type IntentName } from './intents.js';
 import { loginMaxance } from './maxance/login.js';
-import type { HumanActionRequest, MaxanceLoginResult } from './maxance/types.js';
+import { startQuote } from './maxance/quote.js';
+import type {
+  HumanActionRequest,
+  MaxanceLoginResult,
+  MaxanceQuoteParams,
+  MaxanceQuoteResult,
+  MaxanceStationnement,
+} from './maxance/types.js';
 
 /**
  * Read package.json once at module load to surface the running version on /health.
@@ -319,6 +326,133 @@ app.post('/v1/maxance/2fa-code', async (c) => {
   }
   pending.resolve(body.code.trim());
   return c.json({ accepted: true }, 200);
+});
+
+/**
+ * POST /v1/maxance/quote — drive the trottinette quote flow on a session
+ * that is ALREADY logged in to Maxance.
+ *
+ * Body (JSON):
+ *   {
+ *     sessionName: string,         // BrowserPool name; default 'maxance-default'
+ *     params: MaxanceQuoteParams,  // see stagehand/src/maxance/types.ts
+ *     dryRun?: boolean,            // default TRUE — stops at price preview
+ *     timeoutMs?: number,          // override the 5-min wall-clock budget
+ *   }
+ *
+ * Returns MaxanceQuoteResult (200) on success. The backend Maxance Operator
+ * agent (M8.T4) is the canonical caller; the dryRun guardrail in quote.ts
+ * makes accidental full-Valider submissions impossible from this endpoint.
+ *
+ * HMAC: same shared secret as /v1/maxance/login. Body MUST be the exact
+ * raw bytes the signature was computed over.
+ */
+app.post('/v1/maxance/quote', async (c) => {
+  const raw = await c.req.text();
+  if (!verifyHmac(c, raw)) {
+    return c.json({ error: 'invalid_signature' }, 401);
+  }
+  let body: {
+    sessionName?: string;
+    params?: Partial<MaxanceQuoteParams>;
+    dryRun?: boolean;
+    timeoutMs?: number;
+  };
+  try {
+    body = JSON.parse(raw) as typeof body;
+  } catch {
+    return c.json({ error: 'invalid_json' }, 400);
+  }
+
+  // Param surface validation — the agent should be sending a complete payload
+  // but we double-check the must-haves so a malformed envelope dies with a
+  // descriptive 400 instead of a 500 from deep inside startQuote.
+  const p = body.params;
+  if (!p || typeof p !== 'object') {
+    return c.json({ error: 'missing_params' }, 400);
+  }
+  if (p.vehicleKind !== 'trottinette') {
+    return c.json({ error: 'unsupported_vehicle_kind' }, 400);
+  }
+  if (typeof p.purchasePriceEur !== 'number' || !Number.isFinite(p.purchasePriceEur)) {
+    return c.json({ error: 'invalid_purchase_price' }, 400);
+  }
+  if (!p.purchaseDate) {
+    return c.json({ error: 'missing_purchase_date' }, 400);
+  }
+  if (!p.postalCode || typeof p.postalCode !== 'string') {
+    return c.json({ error: 'missing_postal_code' }, 400);
+  }
+  if (!p.clientDateOfBirth) {
+    return c.json({ error: 'missing_client_dob' }, 400);
+  }
+  const stationnement = p.stationnement as MaxanceStationnement | undefined;
+  const validStationnements: MaxanceStationnement[] = [
+    'garage_box',
+    'parking_prive_clos',
+    'parking_prive_non_clos',
+    'rue',
+  ];
+  if (!stationnement || !validStationnements.includes(stationnement)) {
+    return c.json({ error: 'invalid_stationnement' }, 400);
+  }
+  // Date strings may arrive as ISO — convert at the boundary.
+  const purchaseDate =
+    p.purchaseDate instanceof Date ? p.purchaseDate : new Date(p.purchaseDate as string);
+  const clientDob =
+    p.clientDateOfBirth instanceof Date
+      ? p.clientDateOfBirth
+      : new Date(p.clientDateOfBirth as string);
+  if (!Number.isFinite(purchaseDate.getTime()) || !Number.isFinite(clientDob.getTime())) {
+    return c.json({ error: 'invalid_date_format' }, 400);
+  }
+
+  const fullParams: MaxanceQuoteParams = {
+    vehicleKind: 'trottinette',
+    purchasePriceEur: p.purchasePriceEur,
+    purchaseDate,
+    postalCode: p.postalCode,
+    stationnement,
+    clientDateOfBirth: clientDob,
+    ...(p.city ? { city: p.city } : {}),
+    ...(p.formule ? { formule: p.formule } : {}),
+    ...(p.commissionPct !== undefined ? { commissionPct: p.commissionPct } : {}),
+    ...(p.fractionnement ? { fractionnement: p.fractionnement } : {}),
+  };
+
+  const sessionName = body.sessionName ?? 'maxance-default';
+  const existing = pool.list().find((s) => s.name === sessionName);
+  if (!existing) {
+    return c.json({ error: 'session_not_found', sessionName }, 404);
+  }
+
+  let session;
+  try {
+    session = pool.borrow(existing.sessionId);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return c.json({ error: msg }, 409);
+  }
+
+  try {
+    const result: MaxanceQuoteResult = await startQuote(
+      session.stagehand,
+      existing.sessionId,
+      fullParams,
+      {
+        dataRoot: dataRoot(),
+        dryRun: body.dryRun ?? true,
+        ...(body.timeoutMs ? { timeoutMs: body.timeoutMs } : {}),
+      },
+    );
+    return c.json(result, 200);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.warn({ sessionId: existing.sessionId, err: msg }, 'maxance-quote: HTTP flow failed');
+    return c.json({ error: msg }, 500);
+  } finally {
+    pool.release(existing.sessionId);
+  }
 });
 
 /**
