@@ -8,6 +8,7 @@ import { logger } from './logger.js';
 import type { Database } from './db/index.js';
 import { buildWhatsAppWebhook, parseAuthorisedResolvers } from './channels/whatsapp/webhook.js';
 import { buildLeadIntakeRouter } from './leads/intake-http.js';
+import { buildAdminLeadsRouter } from './admin/leads-list.js';
 
 /**
  * Read package.json once at module load to surface the running version on /health.
@@ -85,6 +86,12 @@ export function buildApp(opts: BuildAppOptions = {}): Hono {
       ...(opts.leadIntakeHmacSecret ? { hmacSecret: opts.leadIntakeHmacSecret } : {}),
     });
     app.route('/', leadIntakeApp);
+
+    // Option D — admin read-only API. Backs the admin UI lead board.
+    // Open on the local network; the F16 PC isn't internet-exposed (see
+    // project_hosting_pivot.md). Phase 2 of D wires Cloudflare Access.
+    const adminLeadsApp = buildAdminLeadsRouter({ db: opts.db });
+    app.route('/', adminLeadsApp);
   }
 
   return app;
