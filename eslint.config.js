@@ -65,6 +65,25 @@ export default tseslint.config(
     },
   },
 
+  // Extension: Chrome MV3 (browser globals + webextensions). No React.
+  // Service workers see `self` instead of `window`; both blocks of globals
+  // cover SW + content-script + popup contexts. Console is allowed because
+  // it's the only logging surface in an extension — there's no pino, no
+  // process.stderr, no file handles.
+  {
+    files: ['extension/**/*.ts'],
+    languageOptions: {
+      globals: {
+        ...globals.browser,
+        ...globals.webextensions,
+        ...globals.serviceworker,
+      },
+    },
+    rules: {
+      'no-console': 'off',
+    },
+  },
+
   // Admin: React + browser environment.
   {
     files: ['admin/**/*.{ts,tsx}'],

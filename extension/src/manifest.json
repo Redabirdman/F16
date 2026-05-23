@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "F16 Maxance Driver",
+  "short_name": "F16 Maxance",
+  "version": "0.0.1",
+  "description": "Drives Maxance Proximéo on behalf of the F16 backend. Listens on a localhost WebSocket for QUOTE.REQUESTED commands and runs deterministic DOM flows in Ridaa's daily Chrome.",
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.maxance.com/*", "https://extranet.maxance.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+  "action": {
+    "default_title": "F16 Maxance Driver",
+    "default_popup": "popup.html"
+  },
+  "permissions": ["scripting", "tabs", "storage"],
+  "host_permissions": ["https://www.maxance.com/*", "https://extranet.maxance.com/*"]
+}

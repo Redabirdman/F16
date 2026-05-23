@@ -11,6 +11,7 @@ export default {
         'backend',
         'admin',
         'stagehand',
+        'extension',
         'pipecat',
         'infra',
         'docs',
