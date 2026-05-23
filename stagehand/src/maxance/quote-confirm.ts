@@ -1,6 +1,17 @@
 /**
  * Maxance "Valider devis" + email send step planner (M8.T6).
  *
+ * 🚨 STEP-PLANNER REFERENCE ONLY — DOES NOT DRIVE PROD (2026-05-23 lock).
+ *
+ * Cloudflare Turnstile blocks every Playwright-launched Chrome against the
+ * real Maxance portal. The live verification noted below ran via the Claude
+ * Chrome extension (mcp__Claude_in_Chrome__*), NOT this code. The V1 prod
+ * driver is a hand-rolled Chrome extension (M8.T8 phase 2). The selectors,
+ * field labels, popup coordinates, and email-subject template encoded here
+ * are CANONICAL and will be re-imported by the extension when phase 2
+ * lands. The Stagehand/Playwright runtime in this file is dead in prod and
+ * gated off via MAXANCE_DRIVER on the backend.
+ *
  * LIVE-VERIFIED 2026-05-23 against the real Maxance Proximéo, driven via
  * the Claude Chrome extension on Ridaa's daily Chrome (the ONLY viable
  * driver per project_hosting_pivot.md). Sample case: 350€ trottinette,

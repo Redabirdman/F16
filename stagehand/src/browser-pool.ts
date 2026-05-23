@@ -1,6 +1,18 @@
 /**
  * Stagehand session manager (M8.T1).
  *
+ * 🚨 NOT THE MAXANCE DRIVER — see project_hosting_pivot.md.
+ *
+ * This pool spawns Playwright Chromium / real Chrome via Stagehand. For
+ * Maxance specifically, Cloudflare Turnstile blocks every Playwright-launched
+ * browser regardless of stealth treatment. The V1 Maxance driver is a Chrome
+ * extension running in Ridaa's daily Chrome (M8.T8 phase 2 — not built yet).
+ *
+ * This pool may still be useful for non-Maxance flows (other broker portals
+ * that don't fingerprint as aggressively) and for the M8.T3 selector
+ * regression tests against jsdom fixtures. Do not point it at any production
+ * Maxance endpoint.
+ *
  * One **session** = one Stagehand V3 instance backed by one local Chromium
  * via a per-session `userDataDir` so cookies, localStorage, and signed-in state
  * survive across `act`/`extract`/`observe` intents within the same logical run.

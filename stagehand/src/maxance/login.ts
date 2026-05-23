@@ -1,6 +1,16 @@
 /**
  * Maxance login + SSO-bootstrap flow (M8.T2).
  *
+ * 🚨 STEP-PLANNER REFERENCE ONLY — DOES NOT DRIVE PROD (2026-05-23 lock).
+ *
+ * Cloudflare Turnstile blocks every Playwright-launched Chrome against the
+ * real Maxance portal. The V1 prod driver is a Chrome extension running in
+ * Ridaa's daily Chrome (M8.T8 phase 2). The selectors + form-field labels
+ * encoded here are CANONICAL and will be re-imported by the extension when
+ * phase 2 lands. The Stagehand/Playwright runtime in this file is dead in
+ * prod and gated off via MAXANCE_DRIVER on the backend (see
+ * backend/src/agents/maxance-operator/agent.ts).
+ *
  * Encodes Achraf's walkthrough (`Assuryal/Maxance insstructions/ETAPE MAXANCE AI.pdf`)
  * as a deterministic Stagehand step planner. The function opens the broker
  * portal, signs in, follows the "Accès Proximéo" SSO bounce, and confirms the

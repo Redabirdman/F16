@@ -1,6 +1,19 @@
 /**
  * Quote-flow shared helpers (M8.T3).
  *
+ * 🚨 MIXED FILE — constants stay canonical, Playwright helpers go dead.
+ *
+ * The Maxance constants in this file (Marque, Cylindrée, Type d'acquisition,
+ * Profession codes, Version-band mapping, Stationnement codes, Formule/
+ * Fractionnement labels, formatDateFr) are CANONICAL and survive the V1
+ * driver migration — the M8.T8 phase 2 Chrome extension will re-export them
+ * from here directly. The Playwright form helpers (setSelectByLabel,
+ * fillByLabel, clickByTextOrThrow) and the LLM tab-detection prompt are
+ * Stagehand-runtime artifacts that DO NOT drive prod (Cloudflare blocks
+ * Playwright on Maxance — see project_hosting_pivot.md). When phase 2 lands,
+ * the helpers will be replaced by the extension's content-script DOM
+ * equivalents; the constants will not move.
+ *
  * Extracted from `quote.ts` to keep both files under the 500-line guideline.
  * Holds:
  *   - Verified Maxance constants (Marque label, Cylindrée, Type d'acquisition,

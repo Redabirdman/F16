@@ -1,35 +1,46 @@
 /**
- * Maxance Operator Agent (M8.T4).
+ * Maxance Operator Agent (M8.T4 + M8.T8 phase 1 gate).
  *
- * Subscribes to the `quote` queue and consumes QUOTE.REQUESTED. For each
- * request:
- *   1. Translate the QUOTE.REQUESTED payload into a MaxanceQuoteParams
- *      (the M8.T3 intent library's shape).
- *   2. Make sure a Maxance-logged-in session exists on the Stagehand
- *      service (`ensureLoggedIn` is idempotent — reuses the existing
- *      session if cookies are still warm).
- *   3. POST /v1/maxance/quote with dryRun=true. Stagehand drives the
- *      Proximéo wizard, extracts the price preview, returns the result.
- *   4. Emit QUOTE.PREVIEW_READY back into the queue so the Sales Agent
- *      can surface the price to the customer.
- *   5. On any Stagehand-side failure, emit QUOTE.FAILED with the tagged
- *      error code so the operator UI can surface it.
+ * 🚨 PRODUCTION DRIVER STATUS (2026-05-23 lock, see memory/project_hosting_pivot.md):
+ *
+ * Stagehand+Playwright CANNOT drive Maxance in production — Cloudflare
+ * Turnstile blocks every Playwright-launched Chrome regardless of stealth
+ * treatment (proven by 3 live attempts in M8.T2/T3). The only viable driver
+ * is a Chrome extension running inside Ridaa's daily Chrome — the V1 path
+ * is M8.T8 phase 2 (not yet built).
+ *
+ * Until M8.T8 phase 2 lands, this agent is GATED by the MAXANCE_DRIVER env:
+ *   - unset / wrong value  → handler returns maxance_driver_disabled +
+ *                             emits QUOTE.FAILED. Prevents anyone from
+ *                             accidentally turning on the broken Stagehand
+ *                             path in prod.
+ *   - 'chrome_extension'   → V1 target. Currently throws
+ *                             maxance_driver_chrome_extension_not_implemented
+ *                             because the extension client isn't built yet.
+ *   - 'stagehand_legacy_DO_NOT_USE_IN_PROD' → explicit opt-in to the legacy
+ *                             Stagehand-HTTP path. Cloudflare WILL block it.
+ *                             Used only for selector regression tests against
+ *                             a non-Cloudflare staging environment if one ever
+ *                             exists. PRODUCTION NEVER.
+ *
+ * The Stagehand step-planner code (stagehand/src/maxance/*.ts) survives as
+ * the canonical selectors + field-mappings reference — the extension will
+ * import those constants when phase 2 lands.
+ *
+ * Original (pre-gate) flow, kept for documentation:
+ *   1. Translate the QUOTE.REQUESTED payload into a MaxanceQuoteParams.
+ *   2. Make sure a logged-in session exists (`ensureLoggedIn`).
+ *   3. Drive the trottinette quote with dryRun=true.
+ *   4. Emit QUOTE.PREVIEW_READY → Sales Agent surfaces the price.
+ *   5. On failure → QUOTE.FAILED with tagged errorCode.
  *
  * The agent does NOT touch the customer-facing channel directly — the
- * Sales Agent owns that surface (M6.T3). Separation of concerns: the
- * Operator's job is "drive Maxance and report the result"; the Sales
- * Agent's job is "speak to the customer".
+ * Sales Agent owns that surface (M6.T3).
  *
- * Failure modes mapped to QUOTE.FAILED:
- *   - stagehand_health_unreachable → Stagehand process down (most ops issue)
- *   - stagehand_timeout            → Quote flow exceeded its budget
- *   - maxance_quote_*              → Stagehand-internal failure (Cloudflare,
- *                                     UI drift, missing session, etc.)
- *
- * Concurrency: BaseAgent gives us per-instance serialisation (concurrency=1).
- * That's intentional — only ONE Maxance session is logged in at a time on
- * the PC, so two concurrent quote runs would race on the same Chrome.
- * Scaling beyond 1 quote/sec is M8.T5's job (pre-warm pool of sessions).
+ * Concurrency: BaseAgent gives per-instance serialisation (concurrency=1).
+ * Only one Maxance session is logged in at a time on the PC; two concurrent
+ * quote runs would race on the same Chrome. M8.T5 (pre-warm pool) skipped
+ * per Ridaa's V1 decision.
  */
 import { BaseAgent } from '../base.js';
 import type { AgentMessageEnvelope, MessageHandlerResult } from '../../messaging/dispatcher.js';
@@ -42,6 +53,25 @@ import {
   type StagehandQuoteParams,
   type StagehandSubscriberInfo,
 } from './stagehand-client.js';
+
+/** Recognised MAXANCE_DRIVER values. Anything else → driver disabled. */
+type MaxanceDriver = 'chrome_extension' | 'stagehand_legacy_DO_NOT_USE_IN_PROD';
+
+/**
+ * Read MAXANCE_DRIVER from the environment and return the typed value, or
+ * throw `maxance_driver_disabled` if unset / invalid. Called at the top of
+ * every handler so the failure surfaces as a tagged QUOTE.FAILED rather
+ * than a dropped message.
+ */
+function readDriverFromEnv(): MaxanceDriver {
+  const v = process.env.MAXANCE_DRIVER;
+  if (v === 'chrome_extension') return v;
+  if (v === 'stagehand_legacy_DO_NOT_USE_IN_PROD') return v;
+  throw new Error(
+    'maxance_driver_disabled: set MAXANCE_DRIVER=chrome_extension (V1 prod, M8.T8 phase 2) ' +
+      'or MAXANCE_DRIVER=stagehand_legacy_DO_NOT_USE_IN_PROD (broken on prod — Cloudflare blocks)',
+  );
+}
 
 /**
  * Per-broker session name on the Stagehand pool. V1 is single-broker
@@ -109,6 +139,39 @@ export class MaxanceOperatorAgent extends BaseAgent {
       leadId: string;
       subscriber: StagehandSubscriberInfo;
     };
+
+    // M8.T8 phase 1 driver gate. See file header for the full rationale.
+    let driver: MaxanceDriver;
+    try {
+      driver = readDriverFromEnv();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.warn(
+        { quoteId: payload.quoteId, err: msg },
+        'maxance-operator: driver gate refused — emitting QUOTE.FAILED',
+      );
+      await this.emitFailed(
+        payload.quoteId,
+        payload.customerId,
+        payload.leadId,
+        'maxance_driver_disabled',
+        msg,
+      );
+      return { ok: false, error: 'maxance_driver_disabled' };
+    }
+    if (driver === 'chrome_extension') {
+      // V1 target — phase 2 will wire this to the WS-backed extension client.
+      await this.emitFailed(
+        payload.quoteId,
+        payload.customerId,
+        payload.leadId,
+        'maxance_driver_chrome_extension_not_implemented',
+        'M8.T8 phase 2 not yet built — chrome-extension driver is the V1 target',
+      );
+      return { ok: false, error: 'maxance_driver_chrome_extension_not_implemented' };
+    }
+    // driver === 'stagehand_legacy_DO_NOT_USE_IN_PROD' — fall through to the
+    // legacy Stagehand-HTTP path. Cloudflare WILL block this in prod.
 
     // Re-validate the session is alive. If the cookie expired since the
     // PREVIEW_READY we need to bail — the Stagehand session has lost its
@@ -203,6 +266,39 @@ export class MaxanceOperatorAgent extends BaseAgent {
       productVariant: string;
       formData: Record<string, unknown>;
     };
+
+    // M8.T8 phase 1 driver gate. See file header for the full rationale.
+    let driver: MaxanceDriver;
+    try {
+      driver = readDriverFromEnv();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.warn(
+        { quoteId: payload.quoteId, err: msg },
+        'maxance-operator: driver gate refused — emitting QUOTE.FAILED',
+      );
+      await this.emitFailed(
+        payload.quoteId,
+        payload.customerId,
+        payload.leadId,
+        'maxance_driver_disabled',
+        msg,
+      );
+      return { ok: false, error: 'maxance_driver_disabled' };
+    }
+    if (driver === 'chrome_extension') {
+      // V1 target — phase 2 will wire this to the WS-backed extension client.
+      await this.emitFailed(
+        payload.quoteId,
+        payload.customerId,
+        payload.leadId,
+        'maxance_driver_chrome_extension_not_implemented',
+        'M8.T8 phase 2 not yet built — chrome-extension driver is the V1 target',
+      );
+      return { ok: false, error: 'maxance_driver_chrome_extension_not_implemented' };
+    }
+    // driver === 'stagehand_legacy_DO_NOT_USE_IN_PROD' — fall through to the
+    // legacy Stagehand-HTTP path. Cloudflare WILL block this in prod.
 
     // Product/variant guard — M8 ships ONLY trottinette. Other products
     // (car, full moto, NVEI variants) will land as their own agents or

@@ -1,7 +1,25 @@
 /**
  * Typed HTTP client for the Stagehand service (M8.T4).
  *
- * Wraps the four endpoints the Maxance Operator agent calls:
+ * 🚨 LEGACY — BROKEN IN PROD (M8.T8 phase 1 disposition, 2026-05-23).
+ *
+ * This client targets the Stagehand HTTP service which drives Maxance via
+ * Playwright. Cloudflare Turnstile blocks that path 100% of the time on the
+ * real Maxance portal — proven by 3 live attempts in M8.T2/T3. The V1 prod
+ * driver is a Chrome extension running inside Ridaa's daily Chrome (M8.T8
+ * phase 2, scaffold pending).
+ *
+ * This file is KEPT as the reference HTTP contract (request/response shapes
+ * + HMAC scheme) because the chrome-extension driver will likely reuse the
+ * same wire format with `extension-client.ts` as the WS analogue. It will
+ * also stay callable behind the explicit
+ *   MAXANCE_DRIVER=stagehand_legacy_DO_NOT_USE_IN_PROD
+ * opt-in for any non-Cloudflare staging mirror Achraf might surface.
+ *
+ * DO NOT POINT THIS AT PROD MAXANCE — Cloudflare will block, the customer
+ * will not get a quote, and the operator UI will show a stale spinner.
+ *
+ * Original wraps the four endpoints the Maxance Operator agent calls:
  *   - POST /v1/maxance/login   — ensure a logged-in session exists
  *   - POST /v1/maxance/quote   — drive the trottinette quote flow
  *   - POST /v1/maxance/2fa-code — resolve an SMS prompt (used only when the

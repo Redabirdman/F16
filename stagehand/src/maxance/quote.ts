@@ -1,6 +1,16 @@
 /**
  * Maxance quote-flow intent library (M8.T3).
  *
+ * 🚨 STEP-PLANNER REFERENCE ONLY — DOES NOT DRIVE PROD (2026-05-23 lock).
+ *
+ * Cloudflare Turnstile blocks every Playwright-launched Chrome against the
+ * real Maxance portal. The V1 prod driver is a Chrome extension running in
+ * Ridaa's daily Chrome (M8.T8 phase 2). The selectors + form values encoded
+ * in `quote-form.ts` (Marque, Cylindrée, Version bands, Stationnement,
+ * Profession, Civilité) are CANONICAL and will be re-imported by the
+ * extension when phase 2 lands. The Stagehand/Playwright runtime in this
+ * file is dead in prod and gated off via MAXANCE_DRIVER on the backend.
+ *
  * Encodes Achraf's walkthrough (`Assuryal/Maxance insstructions/ETAPE MAXANCE AI.pdf`,
  * steps 1-4) as a deterministic Stagehand step planner for EDPM trottinettes.
  * Drives the Proximéo quote engine from the broker home through:

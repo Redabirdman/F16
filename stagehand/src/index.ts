@@ -1,3 +1,18 @@
+/**
+ * Stagehand HTTP service entrypoint.
+ *
+ * 🚨 The /v1/maxance/* endpoints in this file DO NOT drive production
+ * Maxance — Cloudflare Turnstile blocks every Playwright-launched Chrome
+ * (proven by 3 live attempts in M8.T2/T3). They survive as the reference
+ * HTTP contract that the M8.T8 phase 2 Chrome-extension WS bridge will
+ * mirror, and as a callable surface for any non-Cloudflare Maxance staging
+ * mirror Achraf might surface later. The Operator agent gates them off via
+ * MAXANCE_DRIVER=stagehand_legacy_DO_NOT_USE_IN_PROD — the prod default
+ * (MAXANCE_DRIVER=chrome_extension or unset) never reaches these handlers.
+ *
+ * Non-Maxance endpoints (/v1/static/*, /v1/intent, /health) are unaffected
+ * and continue to serve real traffic.
+ */
 import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { readFileSync } from 'node:fs';
