@@ -17,6 +17,7 @@
     "lint": "eslint src tests --max-warnings 0"
   },
   "dependencies": {
+    "@f16/stagehand": "workspace:*",
     "zod": "4.4.3"
   },
   "devDependencies": {

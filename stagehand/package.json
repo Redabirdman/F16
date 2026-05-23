@@ -12,6 +12,14 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./maxance/selectors": {
+      "types": "./src/maxance/selectors.ts",
+      "import": "./src/maxance/selectors.ts"
+    },
+    "./maxance/types": {
+      "types": "./src/maxance/types.ts",
+      "import": "./src/maxance/types.ts"
     }
   },
   "scripts": {

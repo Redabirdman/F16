@@ -33,115 +33,27 @@ import { z } from 'zod';
 import { writeFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { logger } from '../logger.js';
-import type { MaxanceQuoteParams, MaxanceQuoteScreenshot } from './types.js';
+import type { MaxanceQuoteScreenshot } from './types.js';
 
 /* ────────────────────────────────────────────────────────────────────────── */
-/*  Verified Maxance constants (live 2026-05-22, stable 12+ months)            */
+/*  Verified Maxance constants (M8.T8 phase 2: moved to ./selectors.ts)        */
 /* ────────────────────────────────────────────────────────────────────────── */
 
-/**
- * Standalone Proximéo SSO entry URL. Reached via "Accès Proximéo" sidebar
- * on the extranet dashboard. Used as a fallback when the sidebar click misses.
- */
-export const PROXIMEO_SSO_URL = 'https://www.maxance.com/Proximeo/ConnexionCourtierSSOCallback.do';
-
-/** Marque dropdown option for our EDPM portfolio. */
-export const MARQUE_TROTTINETTE = 'TROTTINETTE' as const;
-
-/** Cylindrée — all trottinettes bridled at 25 km/h per Achraf. */
-export const CYLINDREE_TROTTINETTE = '25' as const;
-
-/** Type d'acquisition: R = "Achat d'un véhicule de remplacement". Hard-coded default. */
-export const TYPE_ACQUISITION_REMPLACEMENT = 'R' as const;
-
-/** Profession code 125 = "Employé secteur privé". Achraf's default. */
-export const PROFESSION_EMPLOYE_SECTEUR_PRIVE = '125' as const;
-
-/**
- * Maxance's Version dropdown groups the purchase price into 12 bands, each
- * backed by a stable numeric option value. Verified live 2026-05-22:
- *
- *   [0 – 500[      → 8181
- *   [500 – 1000[   → 8182
- *   [1000 – 1500[  → 8183
- *   [1500 – 2000[  → 8184
- *   [2000 – 3000[  → 8185
- *   [3000 – 4000[  → 8186
- *   [4000 – 5000[  → 8187
- *   [5000 – 6000[  → 8188
- *   [6000 – 7000[  → 8189
- *   [7000 – 8000[  → 8190
- *   [8000 – 9000[  → 8191
- *   [9000 – 10000[ → 8192
- *
- * Prices > 10000€ clamp to the top band (8192) — caller should flag for
- * manual review (atypical trottinette price).
- */
-export function trottinetteVersionBand(priceEur: number): string {
-  const p = Math.max(0, Math.floor(priceEur));
-  if (p < 500) return '8181';
-  if (p < 1000) return '8182';
-  if (p < 1500) return '8183';
-  if (p < 2000) return '8184';
-  if (p < 3000) return '8185';
-  if (p < 4000) return '8186';
-  if (p < 5000) return '8187';
-  if (p < 6000) return '8188';
-  if (p < 7000) return '8189';
-  if (p < 8000) return '8190';
-  if (p < 9000) return '8191';
-  return '8192';
-}
-
-/**
- * Translate the param-shaped stationnement enum to the verified live values:
- *   G = Garage ou box fermé
- *   O = Parking ouvert
- *   P = Propriété entièrement close
- *   V = Voie publique
- *
- * `parking_prive_non_clos` maps to "Parking ouvert" (O) — closest semantic match.
- */
-export function stationnementOption(s: MaxanceQuoteParams['stationnement']): {
-  label: string;
-  value: 'G' | 'O' | 'P' | 'V';
-} {
-  switch (s) {
-    case 'garage_box':
-      return { label: 'Garage ou box fermé', value: 'G' };
-    case 'parking_prive_clos':
-      return { label: 'Propriété entièrement close', value: 'P' };
-    case 'parking_prive_non_clos':
-      return { label: 'Parking ouvert', value: 'O' };
-    case 'rue':
-      return { label: 'Voie publique', value: 'V' };
-  }
-}
-
-/** Verbatim French labels for the Garanties tab formule radios. */
-export function formuleLabel(f: NonNullable<MaxanceQuoteParams['formule']>): string {
-  switch (f) {
-    case 'tiers_illimite':
-      return 'Tiers illimité';
-    case 'vol_incendie':
-      return 'Tiers illimité + Vol Incendie';
-    case 'dommages_tous_accidents':
-      return 'Dommages tous accidents';
-  }
-}
-
-/** Fractionnement dropdown labels. */
-export function fractionnementLabel(f: NonNullable<MaxanceQuoteParams['fractionnement']>): string {
-  return f === 'annuel' ? 'Annuel' : 'Mensuel';
-}
-
-/** Format Date as Maxance's dd/mm/yyyy input mask. */
-export function formatDateFr(d: Date): string {
-  const dd = String(d.getDate()).padStart(2, '0');
-  const mm = String(d.getMonth() + 1).padStart(2, '0');
-  const yyyy = String(d.getFullYear());
-  return `${dd}/${mm}/${yyyy}`;
-}
+// The canonical selectors + form values live in `./selectors.ts` (PURE module,
+// importable from the Chrome extension). We re-export them here so existing
+// callers in this workspace don't change.
+export {
+  PROXIMEO_SSO_URL,
+  MARQUE_TROTTINETTE,
+  CYLINDREE_TROTTINETTE,
+  TYPE_ACQUISITION_REMPLACEMENT,
+  PROFESSION_EMPLOYE_SECTEUR_PRIVE,
+  trottinetteVersionBand,
+  stationnementOption,
+  formuleLabel,
+  fractionnementLabel,
+  formatDateFr,
+} from './selectors.js';
 
 /* ────────────────────────────────────────────────────────────────────────── */
 /*  Tab-detection schema + LLM prompts                                         */

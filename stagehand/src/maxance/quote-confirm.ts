@@ -65,7 +65,6 @@ import type {
   MaxanceConfirmQuoteParams,
   MaxanceConfirmQuoteResult,
   MaxanceQuoteScreenshot,
-  MaxanceSubscriberInfo,
 } from './types.js';
 import {
   captureStep,
@@ -76,88 +75,32 @@ import {
   sleep,
   withTimeout,
 } from './quote-form.js';
+// Canonical selectors moved to ./selectors.ts (M8.T8 phase 2) so the Chrome
+// extension can import them without dragging Stagehand into a browser bundle.
+import {
+  CIVILITE_VALUE,
+  PHONE_TYPE_MOBILE,
+  PHONE_USAGE_PERSO,
+  EMAIL_ROLE_GESTION,
+  PROFESSION_VALUE,
+  COURRIER_POPUP_FALLBACK_COORDS,
+} from './selectors.js';
 
 const DEFAULT_CONFIRM_TIMEOUT_MS = 3 * 60 * 1000;
 
 /**
- * Civilité dropdown — verified live 2026-05-23. The <option value=> attribute
- * carries the abbreviation (M., MME, MLLE) NOT the spelled-out label. We
- * pass the value because setSelectByLabel uses Playwright's selectOption
- * which matches by value first then by label.
+ * Courrier popup pixel coordinates — kept as fallback documentation only.
+ * M8.T8 lock: the V1 driver (Chrome extension) traverses the same-origin
+ * iframe directly and does not click coordinates. This Stagehand path is
+ * dead in prod (Cloudflare blocks Playwright); the coords stay only so the
+ * banner-marked legacy runtime still compiles.
  */
-const CIVILITE_VALUE: Record<MaxanceSubscriberInfo['civilite'], 'M.' | 'MME'> = {
-  monsieur: 'M.',
-  madame: 'MME',
-};
-
-/**
- * Phone widget dropdowns (verified 2026-05-23). The Devis tab phone widget
- * is THREE dropdowns + one textbox stacked horizontally:
- *   1) Type: FIXE / MOBILE
- *   2) Usage: PERSO / PRO
- *   3) Country: FR (France default) / MC (Monaco)
- *   4) Number: free-text — Maxance auto-formats to "06 12 34 56 78" style.
- *
- * Per Achraf's PDF: Mobile-Personnel. We default to that for trottinette
- * customers (every customer has a mobile; landlines are rare in our funnel).
- */
-const PHONE_TYPE_MOBILE = 'MOBILE' as const;
-const PHONE_USAGE_PERSO = 'PERSO' as const;
-
-/**
- * E-mail widget — dropdown of role + textbox. Verified live values:
- *   ADMIN  → "Gestion"               (the one Achraf uses for quote-PDF send)
- *   AGIRA  → "Gestion Agira"
- *   PSPCM  → "Gestion et Promo"
- *   DTA2R  → "Gestion et Promo Partenaires"
- *
- * We always pick "ADMIN" (Gestion) — that's the role Maxance routes the
- * quote PDF + future contract emails to.
- */
-const EMAIL_ROLE_GESTION = 'ADMIN' as const;
-
-/**
- * Edition à imprimer pixel-coordinates captured live 2026-05-23. These
- * target the Courrier popup's toolbar:
- *   - envelope icon at (86, 33) inside the popup — opens the mail composer
- *   - close X at (474, 10)
- *
- * The popup's mail composer fields:
- *   - Adresse input: ~(290, 50)
- *   - CC input:      ~(290, 73)
- *   - Objet input:   ~(290, 95)
- *   - [Envoyer] button:           ~(31, 115)
- *   - [Envoyer + Imprimer]:       ~(105, 115)
- *
- * These are page-relative (popup is rendered at top-left of viewport).
- * Will need adjustment if Maxance moves the popup, but per Ridaa the UI is
- * locked for 12+ months.
- */
-const COURRIER_POPUP_ENVELOPE_ICON: readonly [number, number] = [86, 33];
-/**
- * Courrier popup close-X (top-right of the popup window). Exported in case
- * the caller needs to dismiss the popup mid-flow (e.g. after a dryRun
- * inspection). Not used by confirmQuote itself.
- */
-export const COURRIER_POPUP_CLOSE_X: readonly [number, number] = [474, 10];
-const MAIL_COMPOSER_ADRESSE_INPUT: readonly [number, number] = [290, 50];
-const MAIL_COMPOSER_OBJET_INPUT: readonly [number, number] = [290, 95];
-const MAIL_COMPOSER_ENVOYER_BUTTON: readonly [number, number] = [31, 115];
-
-/**
- * Profession dropdown — same values we set on the Conducteur tab in M8.T3.
- * Devis tab re-asks the question (Maxance doesn't carry it forward between
- * tabs for Reasons), so we set it again here. NB: verified live that
- * Profession DOES carry forward to the Devis tab — but setting it again is
- * a no-op so safer to keep doing so.
- */
-const PROFESSION_VALUE: Record<NonNullable<MaxanceSubscriberInfo['profession']>, string> = {
-  employe_prive: '125',
-  employe_public: '126',
-  etudiant: '108',
-  retraite: '109',
-  sans_profession: '130',
-};
+const COURRIER_POPUP_ENVELOPE_ICON = COURRIER_POPUP_FALLBACK_COORDS.envelopeIcon;
+/** Re-export of the close-X coord — historically consumed by callers. */
+export const COURRIER_POPUP_CLOSE_X = COURRIER_POPUP_FALLBACK_COORDS.closeX;
+const MAIL_COMPOSER_ADRESSE_INPUT = COURRIER_POPUP_FALLBACK_COORDS.mailComposer.adresseInput;
+const MAIL_COMPOSER_OBJET_INPUT = COURRIER_POPUP_FALLBACK_COORDS.mailComposer.objetInput;
+const MAIL_COMPOSER_ENVOYER_BUTTON = COURRIER_POPUP_FALLBACK_COORDS.mailComposer.envoyerButton;
 
 /**
  * Zod schema for the devisNumber extract on the Edition à imprimer page.

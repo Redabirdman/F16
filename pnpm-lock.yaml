@@ -196,6 +196,9 @@ importers:
 
   extension:
     dependencies:
+      '@f16/stagehand':
+        specifier: workspace:*
+        version: link:../stagehand
       zod:
         specifier: 4.4.3
         version: 4.4.3
