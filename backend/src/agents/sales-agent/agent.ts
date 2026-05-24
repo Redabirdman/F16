@@ -42,6 +42,7 @@ import type { ChannelId, ContactRef } from '../../channels/types.js';
 import { checkComplianceFor } from '../../compliance/index.js';
 import * as humanActions from '../../db/repositories/human-actions.js';
 import { sendMessage } from '../../messaging/dispatcher.js';
+import { appendAudit } from '../../db/repositories/audit-log.js';
 // Importing the tools barrel registers all built-in tools at module load
 // (side-effect registration). The Sales Agent is the first user of the
 // tool-use loop, so this is the natural boot point until a dedicated tool
@@ -230,6 +231,23 @@ export class SalesAgent extends BaseAgent {
       .update(leads)
       .set({ status: 'qualifying', updatedAt: new Date() })
       .where(eq(leads.id, lead.id));
+
+    // M13 — audit the welcome transition. Best-effort: a failed audit
+    // shouldn't undo the welcome (already sent + status flipped).
+    try {
+      await appendAudit(this.db, {
+        actorType: 'agent',
+        actorId: `${this.role}#${this.instanceId}`,
+        action: 'lead.status.change',
+        targetType: 'lead',
+        targetId: lead.id,
+        before: { status: 'scored' },
+        after: { status: 'qualifying', reason: 'sales-agent-welcomed' },
+        meta: { channel: payload.channel },
+      });
+    } catch {
+      // non-blocking
+    }
 
     // Memory event-fact. Best-effort — if embeddings are down we still want
     // the welcome (already sent above) to register as a success. Same fallback

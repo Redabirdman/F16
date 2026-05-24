@@ -1,7 +1,17 @@
 import type { ReactElement } from 'react';
-import { Link, Route, Routes } from 'react-router-dom';
+import { Link, NavLink, Route, Routes } from 'react-router-dom';
 
 import LeadsPage from '@/pages/Leads';
+import LeadDetailPage from '@/pages/LeadDetail';
+import HumanActionsPage from '@/pages/HumanActions';
+import AuditPage from '@/pages/Audit';
+
+function navItemClass({ isActive }: { isActive: boolean }): string {
+  return [
+    'text-sm transition-colors',
+    isActive ? 'text-slate-900 font-semibold' : 'text-slate-600 hover:text-slate-900',
+  ].join(' ');
+}
 
 function Nav(): ReactElement {
   return (
@@ -10,9 +20,15 @@ function Nav(): ReactElement {
         <Link to="/" className="text-sm font-semibold text-slate-900">
           F16 admin
         </Link>
-        <Link to="/leads" className="text-sm text-slate-600 hover:text-slate-900">
+        <NavLink to="/leads" className={navItemClass}>
           Leads
-        </Link>
+        </NavLink>
+        <NavLink to="/queue" className={navItemClass}>
+          File humaine
+        </NavLink>
+        <NavLink to="/audit" className={navItemClass}>
+          Audit
+        </NavLink>
       </div>
     </nav>
   );
@@ -30,7 +46,19 @@ function Home(): ReactElement {
           <Link className="text-sky-700 hover:underline" to="/leads">
             Leads
           </Link>{' '}
-          — les soumissions récentes (formulaire web, WhatsApp, Meta).
+          — soumissions récentes (web, WhatsApp, Meta). Clic sur une ligne pour le détail.
+        </li>
+        <li>
+          <Link className="text-sky-700 hover:underline" to="/queue">
+            File humaine
+          </Link>{' '}
+          — actions agent en attente de validation Ridaa/Achraf.
+        </li>
+        <li>
+          <Link className="text-sky-700 hover:underline" to="/audit">
+            Audit
+          </Link>{' '}
+          — journal forensic + export NDJSON conforme ACPR.
         </li>
       </ul>
     </main>
@@ -44,6 +72,9 @@ export default function App(): ReactElement {
       <Routes>
         <Route path="/" element={<Home />} />
         <Route path="/leads" element={<LeadsPage />} />
+        <Route path="/leads/:id" element={<LeadDetailPage />} />
+        <Route path="/queue" element={<HumanActionsPage />} />
+        <Route path="/audit" element={<AuditPage />} />
       </Routes>
     </div>
   );

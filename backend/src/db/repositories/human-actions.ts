@@ -24,6 +24,7 @@ import type {
   HumanActionOption,
   HumanActionResolution,
 } from '../schema/agent-runtime.js';
+import { appendAudit } from './audit-log.js';
 
 export interface CreateHumanActionInput {
   createdByAgent: string;
@@ -54,6 +55,30 @@ export async function createAction(
     .returning();
 
   if (!row) throw new Error('createAction: insert returned no row');
+
+  // M13 — audit write. Best-effort: if the audit table is unavailable we'd
+  // rather still surface the human action than 500 the caller's primary
+  // flow. Log and continue. Audit columns are deliberately bounded — no
+  // freeform PII (summary is operator-authored + may contain customer
+  // names; we redact at export, not here, to preserve forensic fidelity).
+  try {
+    await appendAudit(db, {
+      actorType: 'agent',
+      actorId: input.createdByAgent,
+      action: 'human_action.create',
+      targetType: 'human_action',
+      targetId: row.id,
+      after: {
+        intent: input.intent,
+        severity: input.severity,
+        summary: input.summary,
+        optionCount: input.options.length,
+      },
+      ...(input.correlationId ? { meta: { correlationId: input.correlationId } } : {}),
+    });
+  } catch {
+    // swallow — audit failures are non-blocking by design
+  }
   return row;
 }
 
@@ -96,7 +121,31 @@ export async function resolveAction(
     .where(and(eq(humanActions.id, id), eq(humanActions.status, 'pending')))
     .returning();
 
-  if (updated) return updated;
+  if (updated) {
+    // M13 — audit write on the actual state transition. The WAHA + admin
+    // paths each ALSO append their own caller-level audit row (with the
+    // resolver phone / 'admin-ui' as actorId); this row captures the
+    // pending → resolved transition itself from the repository's POV.
+    try {
+      await appendAudit(db, {
+        actorType:
+          opts.source === 'admin' ? 'human' : opts.source === 'whatsapp' ? 'human' : 'system',
+        actorId: opts.by,
+        action: 'human_action.transition',
+        targetType: 'human_action',
+        targetId: id,
+        before: { status: 'pending' },
+        after: {
+          status: 'resolved',
+          chosenOptionId: opts.chosenOption.id,
+          source: opts.source,
+        },
+      });
+    } catch {
+      // non-blocking
+    }
+    return updated;
+  }
 
   // Already resolved (or cancelled / expired) — return current row.
   const [existing] = await db.select().from(humanActions).where(eq(humanActions.id, id)).limit(1);

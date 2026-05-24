@@ -11,6 +11,7 @@
  * without SSHing into the dev PC to `psql` the leads table.
  */
 import type { ReactElement } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 
 import { Button } from '@/components/ui/button';
@@ -40,6 +41,7 @@ function relativeTime(iso: string): string {
 }
 
 export default function LeadsPage(): ReactElement {
+  const navigate = useNavigate();
   const { data, error, isLoading, isFetching, refetch } = useQuery({
     queryKey: ['admin', 'leads'],
     queryFn: () => listLeads({ limit: 50 }),
@@ -91,7 +93,11 @@ export default function LeadsPage(): ReactElement {
             </thead>
             <tbody className="divide-y divide-slate-100">
               {data.rows.map((r: LeadRow) => (
-                <tr key={r.leadId} className="hover:bg-slate-50">
+                <tr
+                  key={r.leadId}
+                  className="cursor-pointer hover:bg-slate-50"
+                  onClick={() => navigate(`/leads/${r.leadId}`)}
+                >
                   <td className="px-3 py-2 font-medium text-slate-900">
                     {r.customerName ?? <span className="text-slate-400">(sans nom)</span>}
                   </td>

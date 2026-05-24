@@ -40,6 +40,7 @@ import { sendViaChannel } from '../../channels/send.js';
 import type { ChannelId, ContactRef } from '../../channels/types.js';
 import { sendMessage } from '../../messaging/dispatcher.js';
 import * as humanActions from '../../db/repositories/human-actions.js';
+import { appendAudit } from '../../db/repositories/audit-log.js';
 import { isQuietNow } from './quiet-hours.js';
 import { generateNudgeText, type EngagementStep, type NudgeGenInput } from './messaging.js';
 import { ELIGIBLE_LEAD_STATUSES } from './candidate.js';
@@ -303,6 +304,25 @@ export class EngagementAgent extends BaseAgent {
       .update(leads)
       .set({ status: 'dormant', updatedAt: now })
       .where(eq(leads.id, lead.id));
+
+    // M13 — capture the status transition as a discrete audit event.
+    // human_action.create already audits the escalation row above; this
+    // row captures the LEAD-side state change so the lead-detail view
+    // can replay "who flipped this to dormant when".
+    try {
+      await appendAudit(this.db, {
+        actorType: 'agent',
+        actorId: `${this.role}#${this.instanceId}`,
+        action: 'lead.status.change',
+        targetType: 'lead',
+        targetId: lead.id,
+        before: { status: lead.status },
+        after: { status: 'dormant', reason: 'engagement-agent-7d-silent' },
+        meta: { humanActionId: action.id },
+      });
+    } catch {
+      // non-blocking — primary action (escalation + dormant) already landed
+    }
 
     await sendMessage(
       { db: this.db },

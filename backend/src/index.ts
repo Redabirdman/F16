@@ -9,6 +9,9 @@ import type { Database } from './db/index.js';
 import { buildWhatsAppWebhook, parseAuthorisedResolvers } from './channels/whatsapp/webhook.js';
 import { buildLeadIntakeRouter } from './leads/intake-http.js';
 import { buildAdminLeadsRouter } from './admin/leads-list.js';
+import { buildAdminLeadDetailRouter } from './admin/lead-detail.js';
+import { buildAdminHumanActionsRouter } from './admin/human-actions.js';
+import { buildAdminAuditRouter } from './admin/audit-export.js';
 
 /**
  * Read package.json once at module load to surface the running version on /health.
@@ -87,11 +90,18 @@ export function buildApp(opts: BuildAppOptions = {}): Hono {
     });
     app.route('/', leadIntakeApp);
 
-    // Option D — admin read-only API. Backs the admin UI lead board.
-    // Open on the local network; the F16 PC isn't internet-exposed (see
-    // project_hosting_pivot.md). Phase 2 of D wires Cloudflare Access.
+    // Option D + M14 V1 — admin read-only API surface. Backs the admin
+    // UI's lead board, lead detail, human-action queue, and audit page.
+    // Same open-on-LAN posture as the rest; Cloudflare Access lands later.
     const adminLeadsApp = buildAdminLeadsRouter({ db: opts.db });
     app.route('/', adminLeadsApp);
+    const adminLeadDetailApp = buildAdminLeadDetailRouter({ db: opts.db });
+    app.route('/', adminLeadDetailApp);
+    const adminHumanActionsApp = buildAdminHumanActionsRouter({ db: opts.db });
+    app.route('/', adminHumanActionsApp);
+    // M13 — audit log read + ACPR forensic NDJSON export.
+    const adminAuditApp = buildAdminAuditRouter({ db: opts.db });
+    app.route('/', adminAuditApp);
   }
 
   return app;
