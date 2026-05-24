@@ -1070,6 +1070,18 @@ M0 → M1 → M2 → M3 → M5 → M6 → M8 → M9 → M13 → M15 → M16 → 
 **Depends on:** M3, M4 (WA), M5+ (sources of actions)
 **Blocks:** M14 (queue UI), M15
 
+> **Status (2026-05-24, night session):** ✅ shipped. The roadmap doc's
+> M13 here ("Human Action Channel") was substantially built in earlier
+> sessions via options G + G-followup (Reporter Agent outbound +
+> inbound WA parser, dual-surface idempotency). Tonight's session shipped
+> the _milestone-status memory's_ M13 framing — **ACPR forensic audit
+> export**: `audit_log` repo (append/list/stream) + `GET /v1/admin/audit`
+> JSON + `GET /v1/admin/audit/export` streaming NDJSON with PII-redact
+> toggle, plus audit-write wiring at 5 critical state-change sites.
+> T6 daily digest (Opus 4.7) is folded into M15.T3's daily strategy
+> review which lands per-day operator-readable summaries via the same
+> human-action queue.
+
 ### M13.T1: human_actions lifecycle
 
 **Files:**
@@ -1135,6 +1147,43 @@ M0 → M1 → M2 → M3 → M5 → M6 → M8 → M9 → M13 → M15 → M16 → 
 
 **Depends on:** M3 (realtime), M5 (data), runs partly in parallel with M5-M13
 **Blocks:** none — final deploy depends on it
+
+> **Status (2026-05-24, night session):** 🟢 V2 shipped. Two-pass build:
+>
+> **V1 (queue + lead detail + audit)** — shipped:
+>
+> - T4 `/leads` + `/leads/:id` — clickable lead board → full detail page
+>   with conversation thread + quote attempts + correlated human actions
+> - T5 `/queue/human` — severity-coloured cards with inline approve/
+>   reject/revise buttons; emits HUMAN_ACTION.RESOLVED so the WA-group
+>   closure posts via the same path the WA inbound resolver uses
+> - Bonus: `/audit` page wrapping M13's export endpoint
+>
+> **V2 (auth + realtime + dashboard + integrations)** — shipped:
+>
+> - T1 LITE (bearer-token auth via `ADMIN_BEARER_TOKEN` env, constant-
+>   time compare, header OR `?token=` query param fallback for SSE +
+>   downloads). Real WebAuthn + magic-link deferred to V2.5.
+> - T2 realtime — SSE endpoint at `/v1/admin/events` subscribed to the
+>   existing Postgres LISTEN/NOTIFY listener; `useRealtime()` hook
+>   invalidates affected React Query caches sub-second. Replaces the
+>   10–30s polling for /queue + /audit.
+> - T3 `/dashboard` — single-roundtrip KPI endpoint + tone-coded cards
+>   - segmented pipeline bars for leads + quotes.
+> - T7 `/integrations` — concurrent probes for WAHA / HubSpot / Pipecat
+>   with 2.5s timeout + env-presence checks for Maxance / Anthropic /
+>   OpenRouter / BillionMail.
+>
+> **Deferred to V2.5+ (none blocking):**
+>
+> - T1 REAL (WebAuthn + magic-link)
+> - T6 `/agents` registry + prompt editor (monaco) — _list-side shipped
+>   under M15.T2 as `/agents` page with kill + priority; the prompt-
+>   editor half is V2.5_
+> - T8 `/knowledge` semantic search
+> - T9 `/campaigns` (M12-blocked anyway)
+> - T10 `/team-chat` (WA mirror)
+> - T11 `/office` (PixiJS isometric — 5-7 day moonshot)
 
 ### M14.T1: Auth (WebAuthn + magic link)
 
@@ -1255,6 +1304,37 @@ M0 → M1 → M2 → M3 → M5 → M6 → M8 → M9 → M13 → M15 → M16 → 
 
 **Depends on:** M3, M13
 **Blocks:** M16
+
+> **Status (2026-05-24, night session):** ✅ shipped (T1-T4 all in).
+> Earlier session messages hedged that "leader election needs M17" —
+> that was a misread of M15's scope. M15 here is the supervisor _agent_
+> (observer + arbiter + Opus strategist), not the multi-process leader
+> election (which actually belongs to M17's deploy track).
+>
+> - **T1 supervisor-agent** — BaseAgent singleton on `compliance` +
+>   `knowledge` queues (where COMPLIANCE.BLOCKED, KNOWLEDGE.REINDEXED,
+>   KNOWLEDGE.DRIFT_DETECTED already address `toRole: 'supervisor'`).
+>   Every observation writes a `supervisor.observed.<kind>` audit row.
+>   V1 is observation-only; auto-acting waits for production data.
+> - **T2 kill + setPriority + admin /agents** — `registry.setPriority()`
+>   merges 0..9 into `agents_state.meta.priority` (migration-free).
+>   Admin POST endpoints + a frontend `/agents` page with inline kill
+>   button + priority editor. All mutations write audit rows.
+> - **T3 daily Opus strategy review** — `strategy.ts` builds a 24h
+>   digest (10 parallel COUNT queries), short-circuits on zero activity,
+>   calls Opus 4.7 with a strict-JSON prompt + zod validation. Each
+>   proposal becomes a `CONFIG_CHANGE_PROPOSED` human action (severity
+>   3 = info). **Default OFF** — `SUPERVISOR_STRATEGY_ENABLED=true` to
+>   enable (burns ~$0.10-0.30/day in Opus tokens).
+> - **T4 cross-agent conflict arbitration** — 5-min scan of
+>   `agent_messages` GROUP BY correlation_id. Flags loops (≥5 messages
+>   with exactly 2 distinct fromRole values in 30 min) via
+>   `AGENT_LOOP_DETECTED` human action. Conservative: flags only,
+>   never auto-kills. Dedup via audit-row check.
+>
+> Wired into worker-bootstrap under `flags.supervisorAgent` +
+> `.supervisorArbitration` (default ON) + `.supervisorStrategy`
+> (default OFF, env-opt-in). 18 new tests; backend suite 426 pass.
 
 ### M15.T1: Supervisor singleton skeleton
 
