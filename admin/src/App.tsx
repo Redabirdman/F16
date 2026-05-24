@@ -5,6 +5,9 @@ import LeadsPage from '@/pages/Leads';
 import LeadDetailPage from '@/pages/LeadDetail';
 import HumanActionsPage from '@/pages/HumanActions';
 import AuditPage from '@/pages/Audit';
+import DashboardPage from '@/pages/Dashboard';
+import IntegrationsPage from '@/pages/Integrations';
+import { useRealtime } from '@/lib/use-realtime';
 
 function navItemClass({ isActive }: { isActive: boolean }): string {
   return [
@@ -20,11 +23,17 @@ function Nav(): ReactElement {
         <Link to="/" className="text-sm font-semibold text-slate-900">
           F16 admin
         </Link>
+        <NavLink to="/dashboard" className={navItemClass}>
+          Tableau de bord
+        </NavLink>
         <NavLink to="/leads" className={navItemClass}>
           Leads
         </NavLink>
         <NavLink to="/queue" className={navItemClass}>
           File humaine
+        </NavLink>
+        <NavLink to="/integrations" className={navItemClass}>
+          Intégrations
         </NavLink>
         <NavLink to="/audit" className={navItemClass}>
           Audit
@@ -43,16 +52,28 @@ function Home(): ReactElement {
       </p>
       <ul className="list-inside list-disc text-sm text-slate-600">
         <li>
+          <Link className="text-sky-700 hover:underline" to="/dashboard">
+            Tableau de bord
+          </Link>{' '}
+          — KPI 24 h, pipeline leads + devis, file humaine.
+        </li>
+        <li>
           <Link className="text-sky-700 hover:underline" to="/leads">
             Leads
           </Link>{' '}
-          — soumissions récentes (web, WhatsApp, Meta). Clic sur une ligne pour le détail.
+          — soumissions récentes. Clic sur une ligne pour le détail.
         </li>
         <li>
           <Link className="text-sky-700 hover:underline" to="/queue">
             File humaine
           </Link>{' '}
           — actions agent en attente de validation Ridaa/Achraf.
+        </li>
+        <li>
+          <Link className="text-sky-700 hover:underline" to="/integrations">
+            Intégrations
+          </Link>{' '}
+          — état WAHA, HubSpot, Pipecat, etc.
         </li>
         <li>
           <Link className="text-sky-700 hover:underline" to="/audit">
@@ -66,14 +87,19 @@ function Home(): ReactElement {
 }
 
 export default function App(): ReactElement {
+  // Open the SSE channel once for the whole admin session. The hook is
+  // idempotent across mount/unmount and quietly no-ops when no token is set.
+  useRealtime();
   return (
     <div className="min-h-screen bg-background text-foreground">
       <Nav />
       <Routes>
         <Route path="/" element={<Home />} />
+        <Route path="/dashboard" element={<DashboardPage />} />
         <Route path="/leads" element={<LeadsPage />} />
         <Route path="/leads/:id" element={<LeadDetailPage />} />
         <Route path="/queue" element={<HumanActionsPage />} />
+        <Route path="/integrations" element={<IntegrationsPage />} />
         <Route path="/audit" element={<AuditPage />} />
       </Routes>
     </div>

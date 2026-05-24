@@ -5,6 +5,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { ErrorBoundary } from 'react-error-boundary';
 
 import App from '@/App';
+import { AuthGate } from '@/components/auth-gate';
 import { RootErrorFallback } from '@/components/error-fallback';
 import '@/index.css';
 
@@ -26,9 +27,11 @@ createRoot(rootEl).render(
   <StrictMode>
     <ErrorBoundary FallbackComponent={RootErrorFallback}>
       <QueryClientProvider client={queryClient}>
-        <BrowserRouter>
-          <App />
-        </BrowserRouter>
+        <AuthGate>
+          <BrowserRouter>
+            <App />
+          </BrowserRouter>
+        </AuthGate>
       </QueryClientProvider>
     </ErrorBoundary>
   </StrictMode>,

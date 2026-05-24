@@ -12,6 +12,11 @@ import { buildAdminLeadsRouter } from './admin/leads-list.js';
 import { buildAdminLeadDetailRouter } from './admin/lead-detail.js';
 import { buildAdminHumanActionsRouter } from './admin/human-actions.js';
 import { buildAdminAuditRouter } from './admin/audit-export.js';
+import { buildAdminDashboardRouter } from './admin/dashboard.js';
+import { buildAdminIntegrationsRouter } from './admin/integrations-health.js';
+import { buildAdminRealtimeRouter } from './admin/realtime-sse.js';
+import { requireAdminAuth } from './admin/auth.js';
+import type { RealtimeListener } from './realtime/notify.js';
 
 /**
  * Read package.json once at module load to surface the running version on /health.
@@ -40,6 +45,12 @@ export interface BuildAppOptions {
    * `start()`. When unset, signature verification is skipped — dev only.
    */
   leadIntakeHmacSecret?: string;
+  /**
+   * Shared Postgres LISTEN/NOTIFY listener. When provided, the admin
+   * SSE endpoint (`/v1/admin/events`) is mounted and subscribes to it.
+   * Owned + started by `start()`; left undefined in test/smoke contexts.
+   */
+  realtime?: RealtimeListener;
 }
 
 /**
@@ -90,9 +101,13 @@ export function buildApp(opts: BuildAppOptions = {}): Hono {
     });
     app.route('/', leadIntakeApp);
 
+    // M14 V1 + V2 — admin surface. Auth middleware reads
+    // ADMIN_BEARER_TOKEN; when unset (dev), it's a no-op. Mount BEFORE the
+    // routers so every /v1/admin/* request is gated.
+    app.use('/v1/admin/*', requireAdminAuth());
+
     // Option D + M14 V1 — admin read-only API surface. Backs the admin
     // UI's lead board, lead detail, human-action queue, and audit page.
-    // Same open-on-LAN posture as the rest; Cloudflare Access lands later.
     const adminLeadsApp = buildAdminLeadsRouter({ db: opts.db });
     app.route('/', adminLeadsApp);
     const adminLeadDetailApp = buildAdminLeadDetailRouter({ db: opts.db });
@@ -102,6 +117,17 @@ export function buildApp(opts: BuildAppOptions = {}): Hono {
     // M13 — audit log read + ACPR forensic NDJSON export.
     const adminAuditApp = buildAdminAuditRouter({ db: opts.db });
     app.route('/', adminAuditApp);
+    // M14.T3 — dashboard KPIs (single aggregated endpoint).
+    const adminDashboardApp = buildAdminDashboardRouter({ db: opts.db });
+    app.route('/', adminDashboardApp);
+    // M14.T7 — integrations health (live probes + env-presence checks).
+    const adminIntegrationsApp = buildAdminIntegrationsRouter();
+    app.route('/', adminIntegrationsApp);
+    // M14.T2 — SSE realtime stream, only when a listener was provided.
+    if (opts.realtime) {
+      const adminRealtimeApp = buildAdminRealtimeRouter({ realtime: opts.realtime });
+      app.route('/', adminRealtimeApp);
+    }
   }
 
   return app;
@@ -132,10 +158,32 @@ export async function start(port: number = Number(process.env.PORT ?? 3001)): Pr
   // Shared webhook secret consumed by the M5.T1 `/v1/leads` route. The same
   // value is used by the website + Meta forwarders to sign their POSTs.
   const leadIntakeSecret = process.env['HMAC_WEBHOOK_SECRET'];
+
+  // M14.T2 — start the Postgres LISTEN/NOTIFY listener so the admin SSE
+  // endpoint has events to fan out. Wrapped in try/catch so a missing
+  // realtime trigger (e.g. older schema) doesn't refuse to boot the
+  // server entirely; the admin UI falls back to polling.
+  const { RealtimeListener } = await import('./realtime/notify.js');
+  const dbUrl = process.env['DATABASE_URL'];
+  let realtime: RealtimeListener | undefined;
+  if (dbUrl) {
+    try {
+      const rt = new RealtimeListener({ databaseUrl: dbUrl });
+      await rt.start();
+      realtime = rt;
+    } catch (err) {
+      logger.warn(
+        { err: err instanceof Error ? err.message : String(err) },
+        'realtime: failed to start — admin SSE endpoint will be disabled',
+      );
+    }
+  }
+
   const liveApp = buildApp({
     db: db(),
     ...(wahaSecret ? { wahaHmacSecret: wahaSecret } : {}),
     ...(leadIntakeSecret ? { leadIntakeHmacSecret: leadIntakeSecret } : {}),
+    ...(realtime ? { realtime } : {}),
   });
 
   const server = serve({ fetch: liveApp.fetch, port }) as Server;
@@ -150,13 +198,21 @@ export async function start(port: number = Number(process.env.PORT ?? 3001)): Pr
 
   const shutdown = (signal: NodeJS.Signals): void => {
     logger.info({ signal }, 'shutting down');
-    // Stop workers first (drains in-flight jobs), then close the HTTP server.
+    // Stop workers first (drains in-flight jobs), close the realtime
+    // listener (frees its dedicated pg connection), then the HTTP server.
     void workerSet
       .stop()
       .catch((err: unknown) =>
         logger.warn(
           { err: err instanceof Error ? err.message : String(err) },
           'supervisor: stop threw',
+        ),
+      )
+      .then(() => (realtime ? realtime.stop() : undefined))
+      .catch((err: unknown) =>
+        logger.warn(
+          { err: err instanceof Error ? err.message : String(err) },
+          'realtime: stop threw',
         ),
       )
       .finally(() => server.close(() => process.exit(0)));

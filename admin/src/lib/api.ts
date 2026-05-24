@@ -17,9 +17,35 @@ export class ApiError extends Error {
   }
 }
 
+const ADMIN_TOKEN_KEY = 'f16.adminToken';
+
+/** Read the operator's admin bearer token (set via the auth prompt). */
+export function getAdminToken(): string | null {
+  try {
+    return globalThis.localStorage?.getItem(ADMIN_TOKEN_KEY) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Persist the operator's admin bearer token. Empty string clears it. */
+export function setAdminToken(token: string): void {
+  try {
+    if (token) globalThis.localStorage?.setItem(ADMIN_TOKEN_KEY, token);
+    else globalThis.localStorage?.removeItem(ADMIN_TOKEN_KEY);
+  } catch {
+    /* noop — no localStorage (SSR / private mode) */
+  }
+}
+
+function authHeaders(): Record<string, string> {
+  const t = getAdminToken();
+  return t ? { Authorization: `Bearer ${t}` } : {};
+}
+
 export async function apiGet<T>(path: string): Promise<T> {
   const res = await fetch(path, {
-    headers: { Accept: 'application/json' },
+    headers: { Accept: 'application/json', ...authHeaders() },
     credentials: 'same-origin',
   });
   if (!res.ok) {
@@ -37,7 +63,7 @@ export async function apiGet<T>(path: string): Promise<T> {
 export async function apiPost<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(path, {
     method: 'POST',
-    headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+    headers: { Accept: 'application/json', 'Content-Type': 'application/json', ...authHeaders() },
     credentials: 'same-origin',
     body: JSON.stringify(body),
   });
@@ -243,6 +269,51 @@ export function buildAuditExportUrl(opts: ListAuditOptions & { redactPii?: boole
   for (const [k, v] of Object.entries(opts)) {
     if (v !== undefined && v !== '' && v !== false) params.set(k, String(v));
   }
+  // The bearer token can't ride in an EventSource / `<a href>` request header,
+  // so for downloadable endpoints we pass it as a query param the backend
+  // auth middleware also accepts (see admin/auth.ts). The token shouldn't
+  // appear in browser history because the operator clicks Export rather
+  // than typing the URL.
+  const token = getAdminToken();
+  if (token) params.set('token', token);
   const qs = params.toString();
   return `/v1/admin/audit/export${qs ? `?${qs}` : ''}`;
+}
+
+// ----- M14.T3: dashboard ---------------------------------------------------
+
+export interface DashboardKpis {
+  generatedAt: string;
+  leads: { totalLast24h: number; byStatusAllTime: Record<string, number> };
+  humanActions: {
+    pendingTotal: number;
+    pendingBySeverity: { critical: number; standard: number; info: number };
+  };
+  conversation: { inboundLast24h: number; outboundLast24h: number };
+  quotes: { totalLast24h: number; byStatusAllTime: Record<string, number> };
+}
+
+export function getDashboardKpis(): Promise<DashboardKpis> {
+  return apiGet<DashboardKpis>('/v1/admin/dashboard/kpis');
+}
+
+// ----- M14.T7: integrations health -----------------------------------------
+
+export type IntegrationStatus = 'ok' | 'unconfigured' | 'unreachable' | 'degraded';
+
+export interface IntegrationHealth {
+  name: string;
+  status: IntegrationStatus;
+  detail?: string;
+  durationMs?: number;
+  required: boolean;
+}
+
+export interface IntegrationsHealthResponse {
+  generatedAt: string;
+  integrations: IntegrationHealth[];
+}
+
+export function getIntegrationsHealth(): Promise<IntegrationsHealthResponse> {
+  return apiGet<IntegrationsHealthResponse>('/v1/admin/integrations/health');
 }
