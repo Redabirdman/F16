@@ -15,6 +15,7 @@ import { buildAdminAuditRouter } from './admin/audit-export.js';
 import { buildAdminDashboardRouter } from './admin/dashboard.js';
 import { buildAdminIntegrationsRouter } from './admin/integrations-health.js';
 import { buildAdminRealtimeRouter } from './admin/realtime-sse.js';
+import { buildAdminAgentsRouter } from './admin/agents.js';
 import { requireAdminAuth } from './admin/auth.js';
 import type { RealtimeListener } from './realtime/notify.js';
 
@@ -123,6 +124,9 @@ export function buildApp(opts: BuildAppOptions = {}): Hono {
     // M14.T7 — integrations health (live probes + env-presence checks).
     const adminIntegrationsApp = buildAdminIntegrationsRouter();
     app.route('/', adminIntegrationsApp);
+    // M15.T2 — agents registry view + kill / setPriority.
+    const adminAgentsApp = buildAdminAgentsRouter({ db: opts.db });
+    app.route('/', adminAgentsApp);
     // M14.T2 — SSE realtime stream, only when a listener was provided.
     if (opts.realtime) {
       const adminRealtimeApp = buildAdminRealtimeRouter({ realtime: opts.realtime });

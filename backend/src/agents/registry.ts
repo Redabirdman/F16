@@ -24,7 +24,7 @@
  *   `__resetAgentRegistryForTests()` wipes the maps. It does NOT call stop()
  *   on running instances — tests that spawn must kill before resetting.
  */
-import { eq, and } from 'drizzle-orm';
+import { eq, and, sql } from 'drizzle-orm';
 import type { BaseAgent } from './base.js';
 import type { Database } from '../db/index.js';
 import { logger } from '../logger.js';
@@ -251,6 +251,60 @@ export async function heartbeat(args: {
     .update(agentsState)
     .set({ lastHeartbeatAt: new Date() })
     .where(and(eq(agentsState.role, args.role), eq(agentsState.instanceId, args.instanceId)));
+}
+
+/**
+ * Adjust the runtime priority of an instance (M15.T2). Persisted in
+ * `agents_state.meta.priority` as a small integer 0 (highest) to 9
+ * (lowest). The in-memory `BaseAgent` instance also reflects the
+ * change via `agent.meta.priority` so any future queue/concurrency
+ * logic can read it without round-tripping to pg.
+ *
+ * Migration-free: we use the existing meta jsonb column rather than
+ * adding a dedicated priority column. Reads stay normal Drizzle; writes
+ * merge the new key into existing meta via Postgres' jsonb concat.
+ *
+ * No-op when (role, instanceId) is not registered — same shadow semantics
+ * as the other lifecycle helpers. Returns the new priority on success or
+ * null on no-op.
+ */
+export async function setPriority(args: {
+  role: string;
+  instanceId: string;
+  db: Database;
+  priority: number;
+}): Promise<number | null> {
+  if (!Number.isInteger(args.priority) || args.priority < 0 || args.priority > 9) {
+    throw new Error(`setPriority: priority must be an integer 0..9, got ${args.priority}`);
+  }
+  const k = key(args.role, args.instanceId);
+  const inMemory = _instances.get(k);
+  if (inMemory) {
+    (inMemory as unknown as { meta: Record<string, unknown> }).meta = {
+      ...inMemory.meta,
+      priority: args.priority,
+    };
+  }
+  // jsonb merge — preserves any other meta keys (e.g. leadId).
+  const res = await args.db.execute(
+    sql`UPDATE agents_state
+        SET meta = coalesce(meta, '{}'::jsonb) || jsonb_build_object('priority', ${args.priority}::int)
+        WHERE role = ${args.role} AND instance_id = ${args.instanceId}
+        RETURNING (meta ->> 'priority')::int AS new_priority`,
+  );
+  const row = (res as unknown as Array<{ new_priority: number }>)[0];
+  if (!row) {
+    logger.warn(
+      { role: args.role, instanceId: args.instanceId },
+      'setPriority: no agents_state row matched',
+    );
+    return null;
+  }
+  logger.info(
+    { role: args.role, instanceId: args.instanceId, priority: args.priority },
+    'agent.priority.set',
+  );
+  return row.new_priority;
 }
 
 /**

@@ -36,6 +36,13 @@ import {
   startEngagementScheduler,
   type EngagementSchedulerHandle,
 } from '../agents/engagement-agent/index.js';
+import {
+  registerSupervisorAgentClass,
+  startArbitration,
+  startStrategyReview,
+  type ArbitrationHandle,
+  type StrategyReviewHandle,
+} from '../agents/supervisor-agent/index.js';
 import type { BaseAgent } from '../agents/base.js';
 import {
   bootstrapKnowledgeSources,
@@ -50,6 +57,10 @@ export interface WorkerSet {
   knowledgeCurator: KnowledgeCuratorHandle | null;
   /** Engagement scheduler handle, if started (M11). */
   engagementScheduler: EngagementSchedulerHandle | null;
+  /** Supervisor arbitration scheduler handle, if started (M15.T4). */
+  supervisorArbitration: ArbitrationHandle | null;
+  /** Supervisor strategy review scheduler handle, if started (M15.T3). */
+  supervisorStrategy: StrategyReviewHandle | null;
   /** Stop every worker + agent. Idempotent. */
   stop(): Promise<void>;
 }
@@ -69,6 +80,9 @@ export interface StartWorkersOptions {
     maxanceOperator?: boolean;
     knowledgeCurator?: boolean;
     engagementAgent?: boolean;
+    supervisorAgent?: boolean;
+    supervisorArbitration?: boolean;
+    supervisorStrategy?: boolean;
   };
 }
 
@@ -86,10 +100,18 @@ export async function startWorkers(opts: StartWorkersOptions): Promise<WorkerSet
     maxanceOperator: opts.flags?.maxanceOperator ?? Boolean(process.env.MAXANCE_DRIVER),
     knowledgeCurator: opts.flags?.knowledgeCurator ?? true,
     engagementAgent: opts.flags?.engagementAgent ?? true,
+    supervisorAgent: opts.flags?.supervisorAgent ?? true,
+    supervisorArbitration: opts.flags?.supervisorArbitration ?? true,
+    // Default OFF — burns Opus tokens daily. Operator opts in via env or
+    // explicit flag once the dedicated PC is up.
+    supervisorStrategy:
+      opts.flags?.supervisorStrategy ?? process.env.SUPERVISOR_STRATEGY_ENABLED === 'true',
   };
 
   let knowledgeCurator: KnowledgeCuratorHandle | null = null;
   let engagementScheduler: EngagementSchedulerHandle | null = null;
+  let supervisorArbitration: ArbitrationHandle | null = null;
+  let supervisorStrategy: StrategyReviewHandle | null = null;
 
   // 1. lead-scorer (always — LLM-driven scoring on LEAD.NEW).
   if (flags.leadScorer) {
@@ -224,11 +246,69 @@ export async function startWorkers(opts: StartWorkersOptions): Promise<WorkerSet
     logger.info('supervisor: engagement-agent SKIPPED by flag');
   }
 
+  // 8. supervisor-agent singleton (M15.T1) + optional arbitration + strategy.
+  //    T1 (observation) is a BaseAgent consuming compliance + knowledge
+  //    queues. T4 (arbitration) is a 5-min interval scanning agent_messages
+  //    for loops. T3 (strategy review) is a daily Opus call producing
+  //    HUMAN_ACTION proposals; default OFF (env-opt-in) so dev boxes
+  //    don't burn Opus tokens.
+  if (flags.supervisorAgent) {
+    try {
+      registerSupervisorAgentClass();
+      const agent = await spawn({
+        role: 'supervisor',
+        instanceId: 'singleton',
+        db: opts.db,
+      });
+      agents.push(agent);
+      logger.info('supervisor: supervisor-agent singleton started');
+    } catch (err) {
+      logger.error(
+        { err: err instanceof Error ? err.message : String(err) },
+        'supervisor: supervisor-agent failed to start',
+      );
+    }
+  } else {
+    logger.info('supervisor: supervisor-agent SKIPPED by flag');
+  }
+
+  if (flags.supervisorArbitration) {
+    try {
+      supervisorArbitration = startArbitration({ db: opts.db });
+      logger.info('supervisor: arbitration scheduler started');
+    } catch (err) {
+      logger.error(
+        { err: err instanceof Error ? err.message : String(err) },
+        'supervisor: arbitration failed to start',
+      );
+    }
+  } else {
+    logger.info('supervisor: arbitration SKIPPED by flag');
+  }
+
+  if (flags.supervisorStrategy) {
+    try {
+      supervisorStrategy = startStrategyReview({ db: opts.db });
+      logger.info('supervisor: strategy review scheduler started');
+    } catch (err) {
+      logger.error(
+        { err: err instanceof Error ? err.message : String(err) },
+        'supervisor: strategy review failed to start',
+      );
+    }
+  } else {
+    logger.info(
+      'supervisor: strategy review SKIPPED (default off — set SUPERVISOR_STRATEGY_ENABLED=true)',
+    );
+  }
+
   return {
     workers,
     agents,
     knowledgeCurator,
     engagementScheduler,
+    supervisorArbitration,
+    supervisorStrategy,
     stop: async () => {
       // Close BullMQ workers first (they drain in-flight jobs); then
       // stop the BaseAgent singletons. Order matters: workers may emit
@@ -242,12 +322,20 @@ export async function startWorkers(opts: StartWorkersOptions): Promise<WorkerSet
       if (engagementScheduler) {
         engagementScheduler.stop();
       }
+      if (supervisorArbitration) {
+        supervisorArbitration.stop();
+      }
+      if (supervisorStrategy) {
+        supervisorStrategy.stop();
+      }
       logger.info(
         {
           workers: workers.length,
           agents: agents.length,
           knowledgeCurator: knowledgeCurator !== null,
           engagementScheduler: engagementScheduler !== null,
+          supervisorArbitration: supervisorArbitration !== null,
+          supervisorStrategy: supervisorStrategy !== null,
         },
         'supervisor: all workers stopped',
       );

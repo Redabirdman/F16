@@ -317,3 +317,55 @@ export interface IntegrationsHealthResponse {
 export function getIntegrationsHealth(): Promise<IntegrationsHealthResponse> {
   return apiGet<IntegrationsHealthResponse>('/v1/admin/integrations/health');
 }
+
+// ----- M15.T2: agents registry view + kill / setPriority -------------------
+
+export interface AgentStateRow {
+  role: string;
+  instanceId: string;
+  model: string;
+  queue: string;
+  status: string;
+  priority: number | null;
+  startedAt: string;
+  lastHeartbeatAt: string;
+  stoppedAt: string | null;
+  error: string | null;
+  inMemory: boolean;
+}
+
+export interface ListAgentsResponse {
+  rows: AgentStateRow[];
+}
+
+export function listAgents(): Promise<ListAgentsResponse> {
+  return apiGet<ListAgentsResponse>('/v1/admin/agents');
+}
+
+export interface KillAgentResponse {
+  ok: boolean;
+  alreadyStopped: boolean;
+}
+
+export function killAgent(role: string, instanceId: string): Promise<KillAgentResponse> {
+  return apiPost<KillAgentResponse>(
+    `/v1/admin/agents/${encodeURIComponent(role)}/${encodeURIComponent(instanceId)}/kill`,
+    {},
+  );
+}
+
+export interface SetPriorityResponse {
+  ok: boolean;
+  priority: number;
+}
+
+export function setAgentPriority(
+  role: string,
+  instanceId: string,
+  priority: number,
+): Promise<SetPriorityResponse> {
+  return apiPost<SetPriorityResponse>(
+    `/v1/admin/agents/${encodeURIComponent(role)}/${encodeURIComponent(instanceId)}/priority`,
+    { priority, by: 'admin-ui' },
+  );
+}

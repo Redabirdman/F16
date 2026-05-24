@@ -56,6 +56,19 @@ vi.mock('../../src/agents/engagement-agent/index.js', () => ({
     tickOnce: vi.fn().mockResolvedValue(undefined),
   })),
 }));
+vi.mock('../../src/agents/supervisor-agent/index.js', () => ({
+  registerSupervisorAgentClass: vi.fn(),
+  startArbitration: vi.fn(() => ({
+    scheduler: setInterval(() => undefined, 1_000_000),
+    stop: vi.fn(),
+    tickOnce: vi.fn().mockResolvedValue({ scanned: 0, flagged: 0, skipped: 0, durationMs: 0 }),
+  })),
+  startStrategyReview: vi.fn(() => ({
+    scheduler: setInterval(() => undefined, 1_000_000),
+    stop: vi.fn(),
+    tickOnce: vi.fn().mockResolvedValue({ ok: true, proposalCount: 0, digest: {} }),
+  })),
+}));
 
 const { startWorkers } = await import('../../src/supervisor/index.js');
 const leadScorerMod = await import('../../src/agents/lead-scorer/index.js');
@@ -66,6 +79,7 @@ const maxanceMod = await import('../../src/agents/maxance-operator/index.js');
 const reporterMod = await import('../../src/agents/reporter-agent/index.js');
 const knowledgeMod = await import('../../src/knowledge/index.js');
 const engagementMod = await import('../../src/agents/engagement-agent/index.js');
+const supervisorAgentMod = await import('../../src/agents/supervisor-agent/index.js');
 
 const fakeDb = {} as unknown as Database;
 
@@ -94,6 +108,9 @@ beforeEach(() => {
   vi.mocked(knowledgeMod.startKnowledgeCurator).mockClear();
   vi.mocked(engagementMod.registerEngagementAgentClass).mockClear();
   vi.mocked(engagementMod.startEngagementScheduler).mockClear();
+  vi.mocked(supervisorAgentMod.registerSupervisorAgentClass).mockClear();
+  vi.mocked(supervisorAgentMod.startArbitration).mockClear();
+  vi.mocked(supervisorAgentMod.startStrategyReview).mockClear();
 });
 
 afterEach(() => {
@@ -105,7 +122,7 @@ afterEach(() => {
 });
 
 describe('startWorkers — env-gated startup', () => {
-  it('always starts lead-scorer + sales-spawn-orchestrator + knowledge-curator + engagement-agent', async () => {
+  it('always starts lead-scorer + sales-spawn-orchestrator + knowledge-curator + engagement-agent + supervisor-agent', async () => {
     const set = await startWorkers({ db: fakeDb });
     expect(leadScorerMod.startLeadScorerWorker).toHaveBeenCalledTimes(1);
     expect(orchestrationMod.startSalesSpawnOrchestrator).toHaveBeenCalledTimes(1);
@@ -113,14 +130,23 @@ describe('startWorkers — env-gated startup', () => {
     expect(knowledgeMod.startKnowledgeCurator).toHaveBeenCalledTimes(1);
     expect(engagementMod.registerEngagementAgentClass).toHaveBeenCalledTimes(1);
     expect(engagementMod.startEngagementScheduler).toHaveBeenCalledTimes(1);
+    expect(supervisorAgentMod.registerSupervisorAgentClass).toHaveBeenCalledTimes(1);
+    expect(supervisorAgentMod.startArbitration).toHaveBeenCalledTimes(1);
+    // Strategy review default-off — should NOT have been started.
+    expect(supervisorAgentMod.startStrategyReview).not.toHaveBeenCalled();
     expect(set.workers).toHaveLength(2);
     expect(set.knowledgeCurator).not.toBeNull();
     expect(set.engagementScheduler).not.toBeNull();
-    // engagement-agent spawn went through the same registry mock as the others.
+    expect(set.supervisorArbitration).not.toBeNull();
+    expect(set.supervisorStrategy).toBeNull();
     expect(registryMod.spawn).toHaveBeenCalledWith(
       expect.objectContaining({ role: 'engagement-agent', instanceId: 'singleton' }),
     );
-    expect(set.agents).toHaveLength(1);
+    expect(registryMod.spawn).toHaveBeenCalledWith(
+      expect.objectContaining({ role: 'supervisor', instanceId: 'singleton' }),
+    );
+    // engagement + supervisor agents both spawned via registry.
+    expect(set.agents).toHaveLength(2);
   });
 
   it('skips engagement-agent when flag is false', async () => {
@@ -128,6 +154,17 @@ describe('startWorkers — env-gated startup', () => {
     expect(engagementMod.registerEngagementAgentClass).not.toHaveBeenCalled();
     expect(engagementMod.startEngagementScheduler).not.toHaveBeenCalled();
     expect(set.engagementScheduler).toBeNull();
+  });
+
+  it('skips supervisor-agent when flag is false', async () => {
+    await startWorkers({ db: fakeDb, flags: { supervisorAgent: false } });
+    expect(supervisorAgentMod.registerSupervisorAgentClass).not.toHaveBeenCalled();
+  });
+
+  it('starts strategy review when flag is true', async () => {
+    const set = await startWorkers({ db: fakeDb, flags: { supervisorStrategy: true } });
+    expect(supervisorAgentMod.startStrategyReview).toHaveBeenCalledTimes(1);
+    expect(set.supervisorStrategy).not.toBeNull();
   });
 
   it('skips knowledge-curator when flag is false', async () => {
@@ -170,8 +207,8 @@ describe('startWorkers — env-gated startup', () => {
     expect(registryMod.spawn).toHaveBeenCalledWith(
       expect.objectContaining({ role: 'human-router', instanceId: 'singleton' }),
     );
-    // reporter + engagement-agent (always-on singleton).
-    expect(set.agents).toHaveLength(2);
+    // reporter + engagement-agent + supervisor-agent (all always-on singletons).
+    expect(set.agents).toHaveLength(3);
   });
 
   it('skips maxance-operator when MAXANCE_DRIVER is unset', async () => {
@@ -186,8 +223,8 @@ describe('startWorkers — env-gated startup', () => {
     expect(registryMod.spawn).toHaveBeenCalledWith(
       expect.objectContaining({ role: 'maxance-operator', instanceId: 'singleton' }),
     );
-    // maxance + engagement-agent (always-on singleton).
-    expect(set.agents).toHaveLength(2);
+    // maxance + engagement-agent + supervisor-agent (always-on singletons).
+    expect(set.agents).toHaveLength(3);
   });
 
   it('honors explicit flags overriding env', async () => {
@@ -205,9 +242,9 @@ describe('startWorkers — error tolerance', () => {
     vi.mocked(registryMod.spawn).mockRejectedValueOnce(new Error('boom_register_throw'));
     const set = await startWorkers({ db: fakeDb });
     // lead-scorer + sales-spawn still up; reporter failed silently. The
-    // engagement-agent spawn (boots after reporter) still succeeds.
+    // engagement-agent + supervisor-agent spawns (after reporter) still succeed.
     expect(set.workers).toHaveLength(2);
-    expect(set.agents).toHaveLength(1);
+    expect(set.agents).toHaveLength(2);
   });
 
   it('logs an error and continues if maxance-operator spawn throws', async () => {
@@ -215,8 +252,8 @@ describe('startWorkers — error tolerance', () => {
     vi.mocked(registryMod.spawn).mockRejectedValueOnce(new Error('boom_maxance_spawn'));
     const set = await startWorkers({ db: fakeDb });
     expect(set.workers).toHaveLength(2);
-    // maxance failed; engagement-agent (booted after) still up.
-    expect(set.agents).toHaveLength(1);
+    // maxance failed; engagement-agent + supervisor-agent (booted after) still up.
+    expect(set.agents).toHaveLength(2);
   });
 });
 
