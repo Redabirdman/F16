@@ -69,6 +69,7 @@ const KNOWN_INTENTS: ReadonlyArray<[string, z.ZodTypeAny]> = [
   ['SESSION.HEARTBEAT', intents.SessionHeartbeatPayload],
   ['SESSION.LOGGED_OUT', intents.SessionLoggedOutPayload],
   ['ORG.STATE_TICK', intents.OrgStateTickPayload],
+  ['ENGAGEMENT.TICK', intents.EngagementTickPayload],
 ];
 
 function repopulateRegistry(): void {

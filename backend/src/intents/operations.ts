@@ -40,3 +40,19 @@ export const OrgStateTickPayload = registerIntent(
     timestamp: z.string().datetime(),
   }),
 );
+
+/**
+ * Customer Engagement Agent (M11) — internal tick emitted by the engagement
+ * scheduler, one per lead due for re-engagement evaluation. The agent decides
+ * which cadence step (24h / 72h / 7d) applies based on per-lead state, then
+ * either sends a nudge, escalates, or skips.
+ *
+ * Payload carries only the lead id — the agent re-reads conversation state +
+ * lead row from DB so the durable agent_messages row stays small.
+ */
+export const EngagementTickPayload = registerIntent(
+  'ENGAGEMENT.TICK',
+  z.object({
+    leadId: z.string().uuid(),
+  }),
+);

@@ -48,6 +48,14 @@ vi.mock('../../src/knowledge/index.js', () => ({
     stop: vi.fn().mockResolvedValue(undefined),
   })),
 }));
+vi.mock('../../src/agents/engagement-agent/index.js', () => ({
+  registerEngagementAgentClass: vi.fn(),
+  startEngagementScheduler: vi.fn(() => ({
+    scheduler: setInterval(() => undefined, 1_000_000),
+    stop: vi.fn(),
+    tickOnce: vi.fn().mockResolvedValue(undefined),
+  })),
+}));
 
 const { startWorkers } = await import('../../src/supervisor/index.js');
 const leadScorerMod = await import('../../src/agents/lead-scorer/index.js');
@@ -57,6 +65,7 @@ const registryMod = await import('../../src/agents/registry.js');
 const maxanceMod = await import('../../src/agents/maxance-operator/index.js');
 const reporterMod = await import('../../src/agents/reporter-agent/index.js');
 const knowledgeMod = await import('../../src/knowledge/index.js');
+const engagementMod = await import('../../src/agents/engagement-agent/index.js');
 
 const fakeDb = {} as unknown as Database;
 
@@ -83,6 +92,8 @@ beforeEach(() => {
   vi.mocked(reporterMod.registerReporterAgentClass).mockClear();
   vi.mocked(knowledgeMod.bootstrapKnowledgeSources).mockClear();
   vi.mocked(knowledgeMod.startKnowledgeCurator).mockClear();
+  vi.mocked(engagementMod.registerEngagementAgentClass).mockClear();
+  vi.mocked(engagementMod.startEngagementScheduler).mockClear();
 });
 
 afterEach(() => {
@@ -94,14 +105,29 @@ afterEach(() => {
 });
 
 describe('startWorkers — env-gated startup', () => {
-  it('always starts lead-scorer + sales-spawn-orchestrator + knowledge-curator', async () => {
+  it('always starts lead-scorer + sales-spawn-orchestrator + knowledge-curator + engagement-agent', async () => {
     const set = await startWorkers({ db: fakeDb });
     expect(leadScorerMod.startLeadScorerWorker).toHaveBeenCalledTimes(1);
     expect(orchestrationMod.startSalesSpawnOrchestrator).toHaveBeenCalledTimes(1);
     expect(knowledgeMod.bootstrapKnowledgeSources).toHaveBeenCalledTimes(1);
     expect(knowledgeMod.startKnowledgeCurator).toHaveBeenCalledTimes(1);
+    expect(engagementMod.registerEngagementAgentClass).toHaveBeenCalledTimes(1);
+    expect(engagementMod.startEngagementScheduler).toHaveBeenCalledTimes(1);
     expect(set.workers).toHaveLength(2);
     expect(set.knowledgeCurator).not.toBeNull();
+    expect(set.engagementScheduler).not.toBeNull();
+    // engagement-agent spawn went through the same registry mock as the others.
+    expect(registryMod.spawn).toHaveBeenCalledWith(
+      expect.objectContaining({ role: 'engagement-agent', instanceId: 'singleton' }),
+    );
+    expect(set.agents).toHaveLength(1);
+  });
+
+  it('skips engagement-agent when flag is false', async () => {
+    const set = await startWorkers({ db: fakeDb, flags: { engagementAgent: false } });
+    expect(engagementMod.registerEngagementAgentClass).not.toHaveBeenCalled();
+    expect(engagementMod.startEngagementScheduler).not.toHaveBeenCalled();
+    expect(set.engagementScheduler).toBeNull();
   });
 
   it('skips knowledge-curator when flag is false', async () => {
@@ -144,7 +170,8 @@ describe('startWorkers — env-gated startup', () => {
     expect(registryMod.spawn).toHaveBeenCalledWith(
       expect.objectContaining({ role: 'human-router', instanceId: 'singleton' }),
     );
-    expect(set.agents).toHaveLength(1);
+    // reporter + engagement-agent (always-on singleton).
+    expect(set.agents).toHaveLength(2);
   });
 
   it('skips maxance-operator when MAXANCE_DRIVER is unset', async () => {
@@ -159,7 +186,8 @@ describe('startWorkers — env-gated startup', () => {
     expect(registryMod.spawn).toHaveBeenCalledWith(
       expect.objectContaining({ role: 'maxance-operator', instanceId: 'singleton' }),
     );
-    expect(set.agents).toHaveLength(1);
+    // maxance + engagement-agent (always-on singleton).
+    expect(set.agents).toHaveLength(2);
   });
 
   it('honors explicit flags overriding env', async () => {
@@ -176,9 +204,10 @@ describe('startWorkers — error tolerance', () => {
     process.env.WAHA_BASE_URL = 'http://127.0.0.1:3000';
     vi.mocked(registryMod.spawn).mockRejectedValueOnce(new Error('boom_register_throw'));
     const set = await startWorkers({ db: fakeDb });
-    // lead-scorer + sales-spawn still up; reporter failed silently.
+    // lead-scorer + sales-spawn still up; reporter failed silently. The
+    // engagement-agent spawn (boots after reporter) still succeeds.
     expect(set.workers).toHaveLength(2);
-    expect(set.agents).toHaveLength(0);
+    expect(set.agents).toHaveLength(1);
   });
 
   it('logs an error and continues if maxance-operator spawn throws', async () => {
@@ -186,7 +215,8 @@ describe('startWorkers — error tolerance', () => {
     vi.mocked(registryMod.spawn).mockRejectedValueOnce(new Error('boom_maxance_spawn'));
     const set = await startWorkers({ db: fakeDb });
     expect(set.workers).toHaveLength(2);
-    expect(set.agents).toHaveLength(0);
+    // maxance failed; engagement-agent (booted after) still up.
+    expect(set.agents).toHaveLength(1);
   });
 });
 

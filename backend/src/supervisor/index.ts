@@ -31,6 +31,11 @@ import { HubSpotClient, startHubSpotSyncWorker } from '../integrations/hubspot/i
 import { spawn } from '../agents/registry.js';
 import { registerMaxanceOperatorClass } from '../agents/maxance-operator/index.js';
 import { registerReporterAgentClass } from '../agents/reporter-agent/index.js';
+import {
+  registerEngagementAgentClass,
+  startEngagementScheduler,
+  type EngagementSchedulerHandle,
+} from '../agents/engagement-agent/index.js';
 import type { BaseAgent } from '../agents/base.js';
 import {
   bootstrapKnowledgeSources,
@@ -43,6 +48,8 @@ export interface WorkerSet {
   agents: BaseAgent[];
   /** Knowledge Curator singleton handle, if started. */
   knowledgeCurator: KnowledgeCuratorHandle | null;
+  /** Engagement scheduler handle, if started (M11). */
+  engagementScheduler: EngagementSchedulerHandle | null;
   /** Stop every worker + agent. Idempotent. */
   stop(): Promise<void>;
 }
@@ -61,6 +68,7 @@ export interface StartWorkersOptions {
     reporter?: boolean;
     maxanceOperator?: boolean;
     knowledgeCurator?: boolean;
+    engagementAgent?: boolean;
   };
 }
 
@@ -77,9 +85,11 @@ export async function startWorkers(opts: StartWorkersOptions): Promise<WorkerSet
       Boolean(process.env.HUMAN_ACTION_GROUP_CHAT_ID && process.env.WAHA_BASE_URL),
     maxanceOperator: opts.flags?.maxanceOperator ?? Boolean(process.env.MAXANCE_DRIVER),
     knowledgeCurator: opts.flags?.knowledgeCurator ?? true,
+    engagementAgent: opts.flags?.engagementAgent ?? true,
   };
 
   let knowledgeCurator: KnowledgeCuratorHandle | null = null;
+  let engagementScheduler: EngagementSchedulerHandle | null = null;
 
   // 1. lead-scorer (always — LLM-driven scoring on LEAD.NEW).
   if (flags.leadScorer) {
@@ -188,10 +198,37 @@ export async function startWorkers(opts: StartWorkersOptions): Promise<WorkerSet
     logger.info('supervisor: knowledge-curator SKIPPED by flag');
   }
 
+  // 7. engagement-agent singleton (M11). BaseAgent listening on the
+  //    `engagement` queue, plus a setInterval scheduler that scans the
+  //    candidate query every 5 minutes and enqueues one ENGAGEMENT.TICK
+  //    per due lead. The agent enforces every gate (status, quiet hours,
+  //    cadence, anti-spam) authoritatively, so over-enqueueing is safe.
+  if (flags.engagementAgent) {
+    try {
+      registerEngagementAgentClass();
+      const agent = await spawn({
+        role: 'engagement-agent',
+        instanceId: 'singleton',
+        db: opts.db,
+      });
+      agents.push(agent);
+      engagementScheduler = startEngagementScheduler({ db: opts.db });
+      logger.info('supervisor: engagement-agent + scheduler started');
+    } catch (err) {
+      logger.error(
+        { err: err instanceof Error ? err.message : String(err) },
+        'supervisor: engagement-agent failed to start',
+      );
+    }
+  } else {
+    logger.info('supervisor: engagement-agent SKIPPED by flag');
+  }
+
   return {
     workers,
     agents,
     knowledgeCurator,
+    engagementScheduler,
     stop: async () => {
       // Close BullMQ workers first (they drain in-flight jobs); then
       // stop the BaseAgent singletons. Order matters: workers may emit
@@ -202,11 +239,15 @@ export async function startWorkers(opts: StartWorkersOptions): Promise<WorkerSet
       if (knowledgeCurator) {
         await knowledgeCurator.stop().catch(() => undefined);
       }
+      if (engagementScheduler) {
+        engagementScheduler.stop();
+      }
       logger.info(
         {
           workers: workers.length,
           agents: agents.length,
           knowledgeCurator: knowledgeCurator !== null,
+          engagementScheduler: engagementScheduler !== null,
         },
         'supervisor: all workers stopped',
       );

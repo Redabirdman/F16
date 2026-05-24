@@ -923,6 +923,21 @@ M0 → M1 → M2 → M3 → M5 → M6 → M8 → M9 → M13 → M15 → M16 → 
 **Depends on:** M6, M10
 **Blocks:** M13 (escalations from cascades)
 
+> **Status (2026-05-24, night session):** ✅ shipped as a leaner V1 than the
+> original T1-T5 plan. The locked design (see
+> `memory/project_m11_engagement_design.md`) replaced the Cascade DSL (T1)
+> with a hardcoded 24h / 72h / 7d ladder and derives per-lead cadence from
+> `conversation_turns` instead of a `next_followup_due_at` column. T2
+> (engagement loop), T3 (LLM follow-up composer, Haiku with template
+> fallback), and T5 (idempotency via step-derivation + anti-spam window)
+> ALL shipped. T4 (voice fallback ladder) is deferred to M10 — V1 stops at
+> the WhatsApp + escalate-to-human ladder.
+>
+> Implementation: `backend/src/agents/engagement-agent/{agent,scheduler,candidate,messaging,quiet-hours,register,index}.ts`,
+> wired in `supervisor/index.ts` under `flags.engagementAgent` (default
+> true). New intent `ENGAGEMENT.TICK` on a dedicated `engagement` queue.
+> 33 new tests; full backend suite 413 pass.
+
 ### M11.T1: Cascade definition DSL
 
 **Files:**

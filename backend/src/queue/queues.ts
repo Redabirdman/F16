@@ -15,6 +15,7 @@ export const QUEUE_NAMES = {
   COMPLIANCE: 'compliance',
   HUMAN_ACTION: 'human_action',
   OPERATIONS: 'operations',
+  ENGAGEMENT: 'engagement',
 } as const;
 
 export type QueueName = (typeof QUEUE_NAMES)[keyof typeof QUEUE_NAMES];

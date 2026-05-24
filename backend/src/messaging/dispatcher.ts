@@ -96,6 +96,8 @@ const INTENT_TO_QUEUE: Record<string, string> = {
   'SESSION.HEARTBEAT': 'operations',
   'SESSION.LOGGED_OUT': 'operations',
   'ORG.STATE_TICK': 'operations',
+  // engagement (M11) — internal tick emitted by the engagement scheduler.
+  'ENGAGEMENT.TICK': 'engagement',
 };
 
 export interface SendMessageInput {
