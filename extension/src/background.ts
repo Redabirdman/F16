@@ -93,6 +93,7 @@ async function forwardToContent(command: Command): Promise<Response> {
       detail: 'no maxance.com tab open in this Chrome — operator must navigate first',
     });
   }
+  const tabId = tab.id;
   // `ping` is handled directly by the SW (never reaches forwardToContent),
   // but TypeScript narrows the union here — only the three flow commands
   // carry a `timeoutMs` field. Read it via a small helper.
@@ -100,10 +101,7 @@ async function forwardToContent(command: Command): Promise<Response> {
   const outerTimeoutMs = (cmdTimeout ?? 60_000) + 30_000; // small margin over the flow's own budget
   const envelope: ContentInbound = { kind: 'flow', command };
   try {
-    const result = await raceWithTimeout(
-      chrome.tabs.sendMessage<ContentInbound, FlowOutcome>(tab.id, envelope),
-      outerTimeoutMs,
-    );
+    const result = await sendWithReinjection(tabId, envelope, outerTimeoutMs);
     return result.response;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -121,6 +119,49 @@ async function forwardToContent(command: Command): Promise<Response> {
       errorCode: 'maxance_extension_forward_failed',
       detail: msg.slice(0, 240),
     });
+  }
+}
+
+/**
+ * Send a flow command to the content script, with one auto-reinject retry.
+ *
+ * After the extension is reloaded (chrome://extensions → reload), any
+ * pre-existing Maxance tab still has the OLD content script in memory but
+ * its message bridge to the new SW is severed — sendMessage rejects with
+ * "Could not establish connection. Receiving end does not exist." The
+ * native fix is to re-inject content.js via chrome.scripting.executeScript
+ * and retry. This avoids forcing the operator to F5 every Maxance tab
+ * after every extension reload (which was the M8.T8 phase-2d friction
+ * point that ate 15 min).
+ *
+ * Single retry — if the second attempt also fails, the tab is genuinely
+ * unreachable and we propagate the error.
+ */
+async function sendWithReinjection(
+  tabId: number,
+  envelope: ContentInbound,
+  outerTimeoutMs: number,
+): Promise<FlowOutcome> {
+  try {
+    return await raceWithTimeout(
+      chrome.tabs.sendMessage<ContentInbound, FlowOutcome>(tabId, envelope),
+      outerTimeoutMs,
+    );
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!/receiving end does not exist/i.test(msg)) throw err;
+    console.warn('[f16-ext] content script unreachable — re-injecting content.js', err);
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: ['content.js'],
+    });
+    // Tiny settle pause so the freshly-injected script registers its
+    // onMessage listener before our retry lands.
+    await sleep(120);
+    return raceWithTimeout(
+      chrome.tabs.sendMessage<ContentInbound, FlowOutcome>(tabId, envelope),
+      outerTimeoutMs,
+    );
   }
 }
 

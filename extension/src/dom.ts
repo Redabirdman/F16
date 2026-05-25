@@ -187,18 +187,38 @@ export async function clickByText(
   opts: { timeoutMs?: number; label?: string } = {},
 ): Promise<void> {
   const stepLabel = opts.label ?? text;
-  const needle = text.toLowerCase().trim();
+  // Normalise needle + haystack so the matcher tolerates &nbsp; (U+00A0)
+  // and other whitespace variants Maxance sprinkles in its tab labels.
+  // Without this, "Tarif - Nouveau Client" (ASCII spaces) never matched
+  // the rendered "Tarif - Nouveau Client" — the live phase-2d
+  // run timed out 25s into this exact click. M8.T8 phase-2d fix.
+  const needle = normaliseSpaces(text);
   const el = await waitFor<HTMLElement>(
     () => {
       const candidates = document.querySelectorAll<HTMLElement>(
         'a, button, input[type=button], input[type=submit], td, div, span',
       );
+      // Pick the SMALLEST-area visible candidate that contains the needle.
+      // The naive "first match in document order" approach picks up the
+      // outermost wrapper (e.g. Maxance's `#cacheHeader` at 1920×86) because
+      // textContent contains every descendant's text — clicking it is a
+      // no-op. The actual menu tab is a tight 170×19 leaf. Smallest-area
+      // wins reliably for menu items, buttons, and label-style spans.
+      // M8.T8 phase-2d fix (live-verified 2026-05-25).
+      let best: HTMLElement | null = null;
+      let bestArea = Number.POSITIVE_INFINITY;
       for (const c of candidates) {
         if (!isVisible(c)) continue;
-        const t = (c.textContent ?? c.getAttribute('value') ?? '').toLowerCase();
-        if (t.includes(needle)) return c;
+        const t = normaliseSpaces(c.textContent ?? c.getAttribute('value') ?? '');
+        if (!t.includes(needle)) continue;
+        const r = c.getBoundingClientRect();
+        const area = r.width * r.height || Number.POSITIVE_INFINITY;
+        if (area < bestArea) {
+          best = c;
+          bestArea = area;
+        }
       }
-      return null;
+      return best;
     },
     {
       label: `click:${stepLabel}`,
@@ -206,6 +226,15 @@ export async function clickByText(
     },
   );
   el.click();
+}
+
+/**
+ * Lowercase + collapse every whitespace run (incl. U+00A0 nbsp, tabs,
+ * newlines) to a single ASCII space. Used by `clickByText` so menu labels
+ * rendered with `&nbsp;` still match user-typed needles with normal spaces.
+ */
+function normaliseSpaces(s: string): string {
+  return s.toLowerCase().replace(/\s+/g, ' ').trim();
 }
 
 /**
