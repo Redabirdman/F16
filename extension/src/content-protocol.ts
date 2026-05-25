@@ -62,11 +62,39 @@ export interface MainWorldClickRequest {
   containerId: string;
 }
 
+/**
+ * Content → SW: "click the Nouveau (add) image inside the same <fieldset>
+ * as the given form element name". Used for Maxance's contact-list widgets
+ * (phone + email on the Devis tab) where `currentContact.*` is a DRAFT that
+ * must be explicitly committed to `contactList[]` via the green "+"-style
+ * "Nouveau" img before any form submit. Inline onclick:
+ *   doSubmitFormWithCheckCustomAJAX('SouscriptionContratVehiculeForm',
+ *     'ajouterContactBean.do?formName=…&beanName=<bean>', '<zone>');
+ * The function reads currentContact, validates form via ErrorMessage(),
+ * and if clean issues an AJAX add that promotes currentContact to
+ * contactList[0] + clears the draft inputs. Routed through main world
+ * (same path as click.main-world) so the inline JS executes with the
+ * page's window references.
+ */
+export interface ContactWidgetNouveauRequest {
+  kind: 'click.contact-nouveau';
+  /** Stable input name within the target fieldset (e.g.
+   *  "telephoneListBean.currentContact.type" or
+   *  "emailListBean.currentContact.usage"). The SW walks
+   *  input.closest('fieldset').querySelector('img[alt="Nouveau"]'). */
+  withinFieldsetOfInputName: string;
+}
+
 /** SW → content: outcome of the main-world click attempt. */
 export type MainWorldClickResponse = { kind: 'click.ok' } | { kind: 'click.err'; error: string };
 
 /** All possible inbound messages on the SW side. */
-export type SwInbound = FlowOutcome | ScreenshotRequest | ProgressForward | MainWorldClickRequest;
+export type SwInbound =
+  | FlowOutcome
+  | ScreenshotRequest
+  | ProgressForward
+  | MainWorldClickRequest
+  | ContactWidgetNouveauRequest;
 
 /** All possible inbound messages on the content-script side. */
 export type ContentInbound = FlowInvocation;

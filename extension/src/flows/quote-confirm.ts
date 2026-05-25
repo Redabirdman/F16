@@ -42,6 +42,8 @@ import {
 import {
   captureScreenshot,
   clickByText,
+  clickContactWidgetNouveau,
+  clickMaxanceButton,
   fillByLabel,
   setSelectByLabel,
   sleep,
@@ -231,10 +233,84 @@ async function fillDevisTab(cmd: QuoteConfirmCommand): Promise<void> {
   setSelectByNameLike('telephone-usage', PHONE_USAGE_PERSO);
   setSelectByNameLike('telephone-pays', PHONE_COUNTRY_FR);
   fillInputByNameLike('telephone-numero', subscriber.phoneMobile);
+  // Phase-2d-confirm (2026-05-25 PM live diag): Maxance keeps phone
+  // input row as `currentContact.*` — a draft. The OK submit validator
+  // (ErrorMessage()) checks for at least one entry in
+  // `telephoneListBean.contactList[]`, NOT in the draft. So the draft
+  // MUST be committed first via the green "Nouveau" img which fires
+  // ajouterContactBean.do (AJAX) → promotes currentContact to
+  // contactList[0] + clears the draft inputs. Without this commit, OK
+  // shows "La valeur du champ 'Téléphone' est obligatoire" alerte and
+  // submit is blocked. Verified live via Chrome MCP: with Nouveau
+  // click added, OK created devis DR0000973630 cleanly.
+  await sleep(400);
+  try {
+    await clickContactWidgetNouveau('telephoneListBean.currentContact.type', {
+      label: 'commit_phone_entry',
+    });
+    await reportProgress(cmd.id, 'commit_phone_ok');
+  } catch (e) {
+    await reportProgress(cmd.id, 'commit_phone_err', e instanceof Error ? e.message : String(e));
+  }
+  await sleep(1200); // wait for AJAX response + DOM repopulation
 
-  // Email widget — same pattern.
-  setSelectByNameLike('email-type', EMAIL_ROLE_GESTION);
+  // Email widget — same pattern. Phase-2d-confirm live (2026-05-25): the
+  // Maxance field is `emailListBean.currentContact.usage` (NOT `.type`
+  // like the phone widget), so the substring needle must be 'email-usage'.
+  setSelectByNameLike('email-usage', EMAIL_ROLE_GESTION);
   fillInputByNameLike('email-adresse', subscriber.email);
+  await sleep(500);
+  try {
+    await clickContactWidgetNouveau('emailListBean.currentContact.usage', {
+      label: 'commit_email_entry',
+    });
+    await reportProgress(cmd.id, 'commit_email_ok');
+  } catch (e) {
+    await reportProgress(cmd.id, 'commit_email_err', e instanceof Error ? e.message : String(e));
+  }
+  await sleep(1200);
+
+  // Phase-2d-confirm-3 (2026-05-25 PM): Maxance's "Chargement..." red
+  // indicator (top right) can still be active immediately after the
+  // email Nouveau commits — the form is mid-AJAX-refresh. Clicking OK
+  // during that window has produced "Un problème technique" backend
+  // error on multiple test runs even though all form fields are
+  // populated correctly + contactList[0] entries exist. A manual user
+  // pauses naturally for several seconds before clicking OK; the
+  // extension was clicking OK ~1.2s after the email commit. Bumping
+  // the post-commits settle gives Maxance time to run any onblur
+  // address formatters (the live-test showed red "address unverified"
+  // dots next to N° et nom de voie) and clear session-level loading.
+  await sleep(3000);
+
+  // Phase-2d-confirm-diag: dump devis form state RIGHT BEFORE the OK
+  // click so the backend log shows exactly what Maxance sees. Mirrors the
+  // vehicule_form_dump + conducteur_form_dump pattern from phase 2f.
+  // Caller (runQuoteConfirm) emits this — keeping the dump close to the
+  // submit so it captures the final state after any cascade settlements.
+}
+
+/** Snapshot the visible Devis form values and emit them as a progress
+ *  event. Used pre-OK click to diagnose required-field rejections. */
+async function dumpDevisForm(cmd: QuoteConfirmCommand): Promise<void> {
+  const dump: Record<string, unknown> = {};
+  document.querySelectorAll<HTMLInputElement>('input').forEach((el) => {
+    if (!el.name || el.type === 'hidden') return;
+    const r = el.getBoundingClientRect();
+    if (r.width < 5 || r.height < 5) return;
+    if (el.type === 'checkbox' || el.type === 'radio') {
+      if (el.checked) dump[`${el.type}:${el.name}=${el.value}`] = 'checked';
+    } else {
+      dump[`inp:${el.name}`] = el.value.slice(0, 60);
+    }
+  });
+  document.querySelectorAll<HTMLSelectElement>('select').forEach((el) => {
+    if (!el.name) return;
+    const r = el.getBoundingClientRect();
+    if (r.width < 5 || r.height < 5) return;
+    dump[`sel:${el.name}`] = { v: el.value, opt: el.options.length };
+  });
+  await reportProgress(cmd.id, 'devis_form_dump', JSON.stringify(dump));
 }
 
 /**
@@ -285,16 +361,41 @@ function fillInputByNameLike(nameSubstring: string, value: string): void {
  *     them after the Valider click.
  *   - 'unknown' — neither marker seen; advance loop waits a settle + retries.
  */
-function detectConfirmScreen(): 'devis_tab_pre' | 'edition_imprimer' | 'unknown' {
+function detectConfirmScreen():
+  | 'devis_tab_pre'
+  | 'devis_form_open'
+  | 'edition_imprimer'
+  | 'unknown' {
+  // Phase-2d-confirm (2026-05-25 PM): three distinct states the flow
+  // crosses, identified live via Chrome MCP.
+  //   1. devis_tab_pre — Garanties tab (price preview rendered).
+  //      `#validerDevis` button visible. URL: ...souscriptionNaviguerOngletVehicule.do
+  //      (no `?ONGLET_REQUEST_KEY=...` query OR with a different key).
+  //   2. devis_form_open — Devis subscriber-info form rendered after
+  //      Valider devis click. Same path but `?ONGLET_REQUEST_KEY=ongletDevis`.
+  //      `#validerSouscription` button is now the "OK" submit (the same
+  //      container ID is repurposed on this tab).
+  //   3. edition_imprimer — final page after the Devis OK click navigated;
+  //      URL ends in /souscriptionDevisValiderFinaleMoto.do, body contains
+  //      DRxxxxxxxx devis number.
   if (location.pathname.endsWith(PROXIMEO_URL_SIGNATURES.editionImprimer)) {
     return 'edition_imprimer';
   }
   // Heuristic: presence of devisNumber in body also signals edition page.
   if (extractDevisNumber() !== null) return 'edition_imprimer';
-  // "Valider devis" button visible = pre-state. Use a regex over the body
-  // text; it's a clickable button or labeled input depending on Maxance
-  // page variant.
-  if (/valider\s*devis/i.test(document.body.innerText ?? '')) {
+  // Devis form open: identified by the URL's onglet query param (set by
+  // Maxance after the Valider devis click) OR by the souscripteur fields
+  // being present (the form rendered).
+  if (/[?&]ONGLET_REQUEST_KEY=ongletDevis(\b|&)/.test(location.search)) {
+    return 'devis_form_open';
+  }
+  if (document.querySelector('input[name="souscripteur.nom"]')) {
+    return 'devis_form_open';
+  }
+  // Garanties with the Valider devis button visible = pre-state. Use the
+  // container ID (stable) instead of body text to avoid the same false
+  // positive that bit phase 2f (text from menu strip leaking into matches).
+  if (document.getElementById('validerDevis')) {
     return 'devis_tab_pre';
   }
   return 'unknown';
@@ -337,30 +438,77 @@ export async function runQuoteConfirm(cmd: QuoteConfirmCommand): Promise<Respons
   try {
     await sleep(SETTLE_MS);
 
-    for (let iter = 0; iter < 3; iter += 1) {
+    for (let iter = 0; iter < 6; iter += 1) {
       const screen = detectConfirmScreen();
       await reportProgress(cmd.id, 'confirm_advance_iter', `screen=${screen}`);
 
       if (screen === 'devis_tab_pre') {
-        // 1. Valider devis (soft save — typically does NOT navigate; opens
-        //    the Devis form on the same page).
+        // 1. Click Valider devis via main-world mouse-event dispatch on
+        //    `#validerDevis .buttonMiddle` — same proven pattern as phase
+        //    2f's validerVehicule/validerConducteur. The previous
+        //    clickByText('Valider devis') used plain .click() which
+        //    doesn't fire Maxance's onmouseup-bound framework handler.
         await reportProgress(cmd.id, 'valider_devis');
-        await clickByText('Valider devis', { label: 'valider_devis', timeoutMs: 10_000 });
-        await sleep(2_500);
+        await clickMaxanceButton('validerDevis', { label: 'valider_devis' });
         await shoot('valider_devis_clicked');
+        // Maxance reloads the page with ?ONGLET_REQUEST_KEY=ongletDevis —
+        // treat as a navigation. SW orchestrator re-invokes; next iter
+        // detects 'devis_form_open'.
+        return navigating('devis_tab_pre', 'devis_form_open');
+      }
 
-        // 2. Fill the Devis tab in-place.
+      if (screen === 'devis_form_open') {
+        // 2. Fill the Devis subscriber form.
         await fillDevisTab(cmd);
+        await dumpDevisForm(cmd);
         await shoot('devis_tab_filled');
 
-        // 3. Submit OK — this triggers the top-frame nav to editionImprimer.
+        // 3. Click OK — Maxance reuses the `#validerSouscription` container
+        //    on the Devis tab (its inner .buttonMiddle text is "OK", not
+        //    "Valider souscription" — the SAME wrapper ID hosts the OK
+        //    button on this onglet). Clicking it triggers the top-frame
+        //    nav to /souscriptionDevisValiderFinaleMoto.do (editionImprimer).
         await reportProgress(cmd.id, 'devis_tab_submit');
-        await clickByText('OK', { label: 'devis_tab_ok', timeoutMs: 10_000 });
-        return navigating('devis_tab_pre', 'edition_imprimer');
+        await clickMaxanceButton('validerSouscription', { label: 'devis_tab_ok' });
+        return navigating('devis_form_open', 'edition_imprimer');
       }
 
       if (screen === 'edition_imprimer') {
         await shoot('edition_imprimer');
+
+        // Phase-2d-confirm-diag: dump the edition page state on arrival
+        // so when extractDevisNumber fails we know whether (a) the DR
+        // number is rendered with a different format/separator, (b) it's
+        // on a different page that we'd misread as edition_imprimer, or
+        // (c) Maxance returned an error in the body text.
+        const bodyText = (document.body.innerText ?? '').replace(/\s+/g, ' ').slice(0, 800);
+        const headings = Array.from(document.querySelectorAll('h1, h2, h3, .titre, .titrePage'))
+          .map((h) => (h.textContent ?? '').trim())
+          .filter(Boolean)
+          .slice(0, 8);
+        await reportProgress(
+          cmd.id,
+          'edition_page_dump',
+          JSON.stringify({ bodyText, headings, search: location.search }),
+        );
+
+        // Phase-2d-confirm (2026-05-25 PM): Maxance's /souscriptionDevisValiderFinaleMoto.do
+        // sometimes returns a generic "Un problème technique nous empêche
+        // d'afficher la page" body instead of the devis edition page —
+        // observed when the OK submit triggers a backend exception (e.g.,
+        // session/duplicate constraints). Surface this distinctly so the
+        // caller doesn't burn the 10s extractDevisNumber timeout chasing
+        // a number that isn't there.
+        if (/probl[èe]me technique/i.test(bodyText)) {
+          return ErrorResponseSchema.parse({
+            id: cmd.id,
+            kind: 'error',
+            errorCode: 'maxance_confirm_backend_error',
+            detail:
+              'Maxance returned "Un problème technique" page after OK submit. Session may have stale state, or backend rejected the submission. Try logging out/in or wait then retry.',
+            screenshots,
+          });
+        }
 
         // 5. Extract devisNumber.
         const devisNumber = await waitFor(() => extractDevisNumber(), {

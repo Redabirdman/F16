@@ -395,6 +395,41 @@ export async function clickMaxanceButton(
 }
 
 /**
+ * Click the "Nouveau" img inside the <fieldset> that contains the
+ * input/select named `withinFieldsetOfInputName`. Used by the Devis-tab
+ * phone + email widgets where Maxance keeps `currentContact.*` as a
+ * draft that must be explicitly committed to `contactList[0]` via the
+ * widget's add-img BEFORE the form's OK submit will pass server-side
+ * validation ("La valeur du champ 'Téléphone' est obligatoire").
+ *
+ * The click is routed through chrome.scripting.executeScript({world:'MAIN'})
+ * via the SW so the inline onclick's framework function references
+ * resolve in the page's main JS context. PRE-condition: the form's
+ * cross-field required-field validators (Nom, Prénom, voie, ...) must
+ * already pass — the Nouveau onclick calls ErrorMessage() before the
+ * AJAX add and silently bails on any missing required field.
+ */
+export async function clickContactWidgetNouveau(
+  withinFieldsetOfInputName: string,
+  opts: { label?: string } = {},
+): Promise<void> {
+  const label = opts.label ?? `nouveau:${withinFieldsetOfInputName}`;
+  const msg: import('./content-protocol.js').ContactWidgetNouveauRequest = {
+    kind: 'click.contact-nouveau',
+    withinFieldsetOfInputName,
+  };
+  const resp = (await chrome.runtime.sendMessage(msg)) as
+    | { kind: 'click.ok' }
+    | { kind: 'click.err'; error: string }
+    | undefined;
+  if (!resp || resp.kind !== 'click.ok') {
+    throw new Error(
+      `maxance_dom_nouveau_failed:${label}:${resp?.kind === 'click.err' ? resp.error : 'no_response'}`,
+    );
+  }
+}
+
+/**
  * Find the FIRST <select> whose <option> list includes the given
  * `optionValue`. Used to identify ambiguous Maxance selects whose names
  * are JWT-encoded (e.g. the Conducteur tab's Profession dropdown — its

@@ -416,6 +416,107 @@ chrome.runtime.onMessage.addListener(
       sendResponse({ ok: true });
       return false;
     }
+    if (message.kind === 'click.contact-nouveau') {
+      // Phase-2d-confirm (2026-05-25 PM): Devis tab contact widgets
+      // (phone + email) require a Nouveau-img click to commit
+      // currentContact.* → contactList[0] before OK submit. The inline
+      // onclick calls doSubmitFormWithCheckCustomAJAX which validates
+      // the form via ErrorMessage() — fails silently if any required
+      // field is empty. The fillDevisTab caller ensures Nom/Prénom/voie
+      // are filled BEFORE invoking this helper for phone/email widgets.
+      const tabId = sender.tab?.id;
+      if (tabId === undefined) {
+        sendResponse({ kind: 'click.err', error: 'no_sender_tab' });
+        return false;
+      }
+      void chrome.scripting
+        .executeScript({
+          target: { tabId },
+          world: 'MAIN',
+          func: (inputName: string) => {
+            const input = document.querySelector(
+              `select[name="${inputName}"], input[name="${inputName}"]`,
+            ) as HTMLElement | null;
+            if (!input) return { ok: false, error: 'input_not_found' };
+            const fs = input.closest('fieldset');
+            if (!fs) return { ok: false, error: 'no_fieldset' };
+            const nouveau = fs.querySelector(
+              'img[alt="Nouveau"], img[src$="nouveau.gif"]',
+            ) as HTMLElement | null;
+            if (!nouveau) return { ok: false, error: 'no_nouveau' };
+            // Capture ErrorMessage state for diagnostics — if non-empty,
+            // the Maxance validator will bail and the AJAX add won't fire.
+            // Strip HTML tags for log compactness.
+            // @ts-expect-error — ErrorMessage is page-global
+            const em = typeof ErrorMessage === 'function' ? ErrorMessage() : null;
+            const errBefore = em
+              ? em
+                  .replace(/<[^>]+>/g, ' ')
+                  .replace(/\s+/g, ' ')
+                  .trim()
+                  .slice(0, 200)
+              : null;
+            // Phase-2d-confirm-2 (2026-05-25 PM): directly evaluate the
+            // inline onclick JS (doSubmitFormWithCheckCustomAJAX(...)) so
+            // we don't depend on the synthetic-MouseEvent path triggering
+            // inline onclick handlers. New Function() runs the code in
+            // main world (already are in main world here). Fall back to
+            // MouseEvent dispatch if onclick attr is empty.
+            const oc = (nouveau.getAttribute('onclick') || '').replace(/^\s*javascript:\s*/i, '');
+            if (oc) {
+              try {
+                new Function(oc)();
+                return { ok: true, ranOnclickDirect: true, errBefore };
+              } catch (e) {
+                return {
+                  ok: false,
+                  error: 'eval_err:' + (e instanceof Error ? e.message : String(e)),
+                  errBefore,
+                };
+              }
+            }
+            const r = nouveau.getBoundingClientRect();
+            const init = {
+              bubbles: true,
+              cancelable: true,
+              view: window,
+              button: 0,
+              buttons: 1,
+              clientX: r.left + r.width / 2,
+              clientY: r.top + r.height / 2,
+            } as const;
+            for (const k of ['mousedown', 'mouseup', 'click'] as const) {
+              nouveau.dispatchEvent(new MouseEvent(k, init));
+            }
+            return { ok: true, errBefore };
+          },
+          args: [message.withinFieldsetOfInputName],
+        })
+        .then((results) => {
+          const r = results[0]?.result as
+            | { ok: boolean; error?: string; errBefore?: string | null; ranOnclickDirect?: boolean }
+            | undefined;
+          if (r?.ok) {
+            // Diagnostic-only: errBefore tells us whether ErrorMessage was
+            // bailing at click time. Logging via console so it's visible
+            // in the extension's SW devtools without changing wire shape.
+            if (r.errBefore) {
+              console.warn(
+                '[f16-ext] click.contact-nouveau dispatched but ErrorMessage was non-empty:',
+                r.errBefore,
+              );
+            }
+            sendResponse({ kind: 'click.ok' });
+          } else sendResponse({ kind: 'click.err', error: r?.error ?? 'unknown' });
+        })
+        .catch((err: unknown) => {
+          sendResponse({
+            kind: 'click.err',
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
+      return true;
+    }
     if (message.kind === 'click.main-world') {
       // Phase-2f-4: dispatch mousedown+mouseup+click on .buttonMiddle in the
       // PAGE'S MAIN WORLD via chrome.scripting.executeScript. Bypasses both
