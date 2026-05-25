@@ -51,8 +51,22 @@ export interface ProgressForward {
   detail?: string;
 }
 
+/**
+ * Content → SW: "dispatch a real mouse click on the .buttonMiddle inside
+ * #<containerId> in the page's main world". Lets the extension reach
+ * framework handlers that reject events originating from the content
+ * script's isolated world OR whose dispatch is blocked by the page's CSP.
+ */
+export interface MainWorldClickRequest {
+  kind: 'click.main-world';
+  containerId: string;
+}
+
+/** SW → content: outcome of the main-world click attempt. */
+export type MainWorldClickResponse = { kind: 'click.ok' } | { kind: 'click.err'; error: string };
+
 /** All possible inbound messages on the SW side. */
-export type SwInbound = FlowOutcome | ScreenshotRequest | ProgressForward;
+export type SwInbound = FlowOutcome | ScreenshotRequest | ProgressForward | MainWorldClickRequest;
 
 /** All possible inbound messages on the content-script side. */
 export type ContentInbound = FlowInvocation;

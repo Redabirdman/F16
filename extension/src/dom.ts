@@ -359,14 +359,37 @@ export async function clickMaxanceButton(
   opts: { timeoutMs?: number; label?: string } = {},
 ): Promise<void> {
   const stepLabel = opts.label ?? containerId;
-  const container = await waitFor<HTMLElement>(() => document.getElementById(containerId), {
+  // First wait until the button container exists in the DOM.
+  await waitFor<HTMLElement>(() => document.getElementById(containerId), {
     label: `find_button:${stepLabel}`,
     ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
   });
-  const target = container.querySelector<HTMLElement>('.buttonMiddle') ?? container;
-  for (const eventType of ['mousedown', 'mouseup', 'click'] as const) {
-    target.dispatchEvent(
-      new MouseEvent(eventType, { bubbles: true, cancelable: true, view: window }),
+  // Phase-2f-4: route the actual mouse-event dispatch through the SW which
+  // calls chrome.scripting.executeScript({ world: 'MAIN' }) — this is the
+  // ONLY way to fire events in the page's main JS context from an MV3
+  // extension that also bypasses the page's CSP. Earlier attempts:
+  //   - Phase 2e: synthetic dispatch from isolated world without coords.
+  //     Click fired, but Maxance's post-submit bounced to /accueil.do.
+  //   - Phase 2f-1: added await_zonier_populated. No change.
+  //   - Phase 2f-2: added clientX/clientY/button/buttons to MouseEventInit.
+  //     No change — fields correct, dump shows it, still bounced.
+  //   - Phase 2f-3: inject inline <script> from content script. Maxance's
+  //     CSP blocked the script — click never fired (loop on vehicule_tab,
+  //     no nav at all).
+  // The Chrome MCP javascript_tool uses chrome.scripting under the hood
+  // and the same input deterministically advanced past Suivant in the
+  // diagnostic. So we use that same mechanism here.
+  const msg: import('./content-protocol.js').MainWorldClickRequest = {
+    kind: 'click.main-world',
+    containerId,
+  };
+  const resp = (await chrome.runtime.sendMessage(msg)) as
+    | { kind: 'click.ok' }
+    | { kind: 'click.err'; error: string }
+    | undefined;
+  if (!resp || resp.kind !== 'click.ok') {
+    throw new Error(
+      `maxance_dom_click_failed:${stepLabel}:${resp?.kind === 'click.err' ? resp.error : 'no_response'}`,
     );
   }
 }
@@ -417,17 +440,20 @@ export function setRadioByQuestion(
   for (const r of radios) {
     if (!r.name || seenNames.has(r.name)) continue;
     seenNames.add(r.name);
-    // Walk up to find the nearest ancestor whose text contains the question.
-    let p: HTMLElement | null = r.parentElement;
-    let matched = false;
-    for (let k = 0; k < 6 && p; k += 1) {
-      if (normaliseLabel(p.textContent ?? '').includes(needle)) {
-        matched = true;
-        break;
-      }
-      p = p.parentElement;
-    }
-    if (!matched) continue;
+    // Phase-2f-7 (2026-05-25 PM live-diag fix): match ONLY against the
+    // radio's closest <tr> (or, for non-table layouts, the closest
+    // ancestor that contains exactly one <input type=radio> group). The
+    // previous "walk up 6 ancestors" approach was greedy — a high-level
+    // ancestor (TBODY/TABLE wrapping multiple rows) contains text from
+    // EVERY question in the section, so any needle that appears anywhere
+    // in that section matched the FIRST radio group encountered. Concrete
+    // case: needle "annulation, d'une suspension" matched the
+    // condamnationDelit group at TBODY level (level 5), setting
+    // condamnation again and leaving annulation empty → Maxance Suivant
+    // rejected with "La valeur du champ ... est obligatoire" alerte.
+    const tr = r.closest('tr');
+    const scopeText = normaliseLabel(tr?.textContent ?? '');
+    if (!scopeText.includes(needle)) continue;
     const target = radios.find((x) => x.name === r.name && x.value === targetValue);
     if (!target) return { ok: false, reason: `no_value_${targetValue}_in_group_${r.name}` };
     target.checked = true;

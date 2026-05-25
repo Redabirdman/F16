@@ -44,7 +44,6 @@ import {
   clickMaxanceButton,
   fillByLabel,
   findSelectByOptionValue,
-  isVisible,
   parseEurPrice,
   setRadioByQuestion,
   setSelectByLabel,
@@ -81,43 +80,83 @@ function detectCurrentScreen():
   | 'bridge_modal'
   | 'price_preview'
   | 'unknown' {
-  // Bridge modal first — it overlays whatever tab is underneath.
-  const bridge = Array.from(document.querySelectorAll('*')).find((el) =>
-    /vitesse du nvei doit être limitée/i.test(el.textContent ?? ''),
-  );
-  if (bridge && isVisible(bridge as HTMLElement)) return 'bridge_modal';
+  // Phase-2f-8 (2026-05-25 PM live-diag fix): the "vitesse du NVEI doit
+  // être limitée à 25 km/h" notice is NOT a popin/modal — it's inline
+  // text on the Garanties tab body (an informational warning about NVEI
+  // speed-limit compliance). The previous detector returned 'bridge_modal'
+  // whenever the text was present anywhere on the page, which caused the
+  // orchestrator to loop on the bridge_modal case (whose dismiss code did
+  // nothing because there's nothing to dismiss). Removed the text-based
+  // detection. If a real popin/dialog appears in some future flow, add
+  // detection against a positioned container (z-index > 100 OR position
+  // fixed/absolute with role=dialog), not raw text matching.
 
-  // Garanties tab is unique: has the formule radios + a commission slider.
+  // Phase-2f-5 root-cause fix (2026-05-25): the previous detector chained
+  // text-search fallbacks ending with "any element whose text contains
+  // 'Tarif - Nouveau Client' → vehicle_picker". But that string lives in
+  // the top menu strip of EVERY Proximéo page (TRF tab label), so the
+  // Conducteur tab matched it and the orchestrator looped re-clicking
+  // MOTO. Diagnostic on 2026-05-25 PM confirmed: Suivant on Véhicule had
+  // been navigating cleanly to /souscriptionNaviguerOngletVehicule.do all
+  // along — the bouncing was the screen DETECTION misreading Conducteur as
+  // vehicle_picker. Switch to URL as the authoritative dispatcher (the
+  // wizard's .do endpoints are stable + 1:1 with tabs), with DOM markers
+  // only used to disambiguate the one URL that hosts two tabs (Conducteur
+  // and Garanties share /souscriptionNaviguerOngletVehicule.do; content
+  // swaps in-place after Conducteur's Suivant fires).
+  const path = location.pathname;
+
+  // /accueil.do (or /ConnexionCourtierSSO.do landing) = vehicle picker home.
+  if (/\/(accueil|ConnexionCourtierSSO)\.do$/i.test(path)) {
+    return 'vehicle_picker';
+  }
+
+  // /initialiserSession.do(?branche=MOTO|AUTO|…) = Véhicule wizard tab.
+  if (/\/initialiserSession\.do$/i.test(path)) {
+    return 'vehicule_tab';
+  }
+
+  // /souscriptionNaviguerOngletVehicule.do hosts Conducteur first, then
+  // Garanties (content swap after Conducteur Suivant). Disambiguate by:
+  //   - presence of `currentConducteur.flagAucunPermis` checkbox → Conducteur
+  //     (stable-named per the verified DOM map in project_m8_t8_progress.md)
+  //   - "tiers illimité" text → Garanties (+ a parsed price → price_preview)
+  if (/\/souscriptionNaviguerOngletVehicule\.do$/i.test(path)) {
+    if (document.querySelector('input[name="currentConducteur.flagAucunPermis"]')) {
+      return 'conducteur_tab';
+    }
+    const garantiesMarker = Array.from(document.querySelectorAll('*')).find((el) =>
+      /tiers illimité/i.test(el.textContent ?? ''),
+    );
+    if (garantiesMarker) {
+      const priceText = document.body.innerText;
+      if (parseEurPrice(priceText) !== null) return 'price_preview';
+      return 'garanties_tab';
+    }
+    // URL says wizard tab but markers absent — page may still be loading.
+    return 'unknown';
+  }
+
+  // Fallback markers (in case Maxance changes URLs or we land somewhere
+  // unexpected). Order matters: more-specific markers first.
   const garantiesMarker = Array.from(document.querySelectorAll('*')).find((el) =>
     /tiers illimité/i.test(el.textContent ?? ''),
   );
   if (garantiesMarker) {
-    // If a price is rendered already, classify as price_preview.
     const priceText = document.body.innerText;
     if (parseEurPrice(priceText) !== null) return 'price_preview';
     return 'garanties_tab';
   }
-
-  // Véhicule tab: Marque dropdown present.
-  if (document.querySelector('select[name*="marque" i], select[id*="marque" i]')) {
-    return 'vehicule_tab';
-  }
-  // Conducteur tab: Date de naissance label present.
-  if (
-    Array.from(document.querySelectorAll('label')).some((l) =>
-      /date de naissance/i.test(l.textContent ?? ''),
-    )
-  ) {
+  if (document.querySelector('input[name="currentConducteur.flagAucunPermis"]')) {
     return 'conducteur_tab';
   }
-  // Vehicle picker: "Tarif - Nouveau Client" or "2 roues" visible.
-  if (
-    Array.from(document.querySelectorAll('*')).some((el) =>
-      /tarif\s*-?\s*nouveau\s*client/i.test(el.textContent ?? ''),
-    )
-  ) {
-    return 'vehicle_picker';
+  if (document.querySelector('select[name="vehiculeMarque"]')) {
+    return 'vehicule_tab';
   }
+  // No reliable picker-only marker exists in the DOM (the top menu strip's
+  // #TRF/#MOTO and "Tarif - Nouveau Client" text are present on EVERY
+  // Proximéo wizard page). Returning 'unknown' lets the outer loop retry
+  // after a settle pause — preferable to misclassifying.
   return 'unknown';
 }
 
@@ -200,6 +239,7 @@ async function fillVehiculeTab(cmd: QuotePreviewCommand): Promise<void> {
   // a 2s pause after CP fill let the zonier auto-select and Suivant landed
   // cleanly on Conducteur. We poll for a non-empty value rather than fixed
   // sleep so we cover slow-network cases without padding the happy path.
+  let zonierStatus = 'ok';
   await waitFor<HTMLSelectElement>(
     () => {
       const z = document.querySelector<HTMLSelectElement>('select[name="circulationZonier.key"]');
@@ -211,7 +251,37 @@ async function fillVehiculeTab(cmd: QuotePreviewCommand): Promise<void> {
     // likely fail and the server bounce will surface, but we don't want to
     // throw a tagged error here when the real failure mode is a server
     // round-trip — let validerVehicule's outcome drive the diagnosis.
+    zonierStatus = 'timeout';
   });
+
+  // Phase-2f-diag: dump every form value right before Suivant so the backend
+  // log shows exactly what Maxance sees on the post. If the loop-back
+  // continues, this tells us which field is empty / wrong.
+  const formDump: Record<string, unknown> = { zonierStatus };
+  for (const n of [
+    'vehiculeMarque',
+    'vehiculeCylindree',
+    'vehiculeVersion',
+    'typeAssurance',
+    'mouvement.codeModeStationnement',
+    'protectionVol',
+    'mouvement.leasing',
+    'vehiculeUsage',
+    'circulationZonier.key',
+  ]) {
+    const el = document.querySelector<HTMLSelectElement>(`select[name="${n}"]`);
+    formDump[n] = el ? { value: el.value, opt: el.options.length } : 'MISSING';
+  }
+  for (const n of [
+    'mouvement.dateMiseEnCirculation',
+    'mouvement.dateAchatVehicule',
+    'circulationZonier.codePostal',
+    'mouvement.dateEffet',
+  ]) {
+    const el = document.querySelector<HTMLInputElement>(`input[name="${n}"]`);
+    formDump[n] = el ? el.value : 'MISSING';
+  }
+  await reportProgress(cmd.id, 'vehicule_form_dump', JSON.stringify(formDump));
 
   await sleep(SETTLE_MS);
   // Maxance's Suivant button is a `<div id="validerVehicule"><div class="buttonMiddle">Suivant >></div>`
@@ -271,6 +341,30 @@ async function fillConducteurTab(cmd: QuotePreviewCommand): Promise<void> {
   //    grise. This is the default for a self-quote.
   setRadioByQuestion('Souscripteur', 'O');
   setRadioByQuestion('Titulaire carte grise', 'O');
+
+  // Phase-2f-6 diag: dump conducteur form state right before Suivant so
+  // we can see which required field is missing if the swap-to-garanties
+  // doesn't happen. Strategy: enumerate all visible inputs/selects, key
+  // by name (or id), record value/checked/options-count.
+  const cDump: Record<string, unknown> = {};
+  document.querySelectorAll<HTMLInputElement>('input').forEach((el) => {
+    if (!el.name && !el.id) return;
+    const key = el.name || el.id;
+    if (el.type === 'radio') {
+      if (el.checked) cDump[`radio:${key}=${el.value}`] = 'checked';
+    } else if (el.type === 'checkbox') {
+      cDump[`cb:${key}`] = el.checked;
+    } else if (el.type === 'hidden') {
+      // skip hiddens — too noisy
+    } else {
+      cDump[`inp:${key}`] = el.value;
+    }
+  });
+  document.querySelectorAll<HTMLSelectElement>('select').forEach((el) => {
+    const key = el.name || el.id || '?';
+    cDump[`sel:${key}`] = { v: el.value, opt: el.options.length };
+  });
+  await reportProgress(cmd.id, 'conducteur_form_dump', JSON.stringify(cDump));
 
   await sleep(SETTLE_MS);
   await clickMaxanceButton('validerConducteur', { label: 'suivant_conducteur' });

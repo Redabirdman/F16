@@ -392,8 +392,14 @@ async function captureActiveTabScreenshot(): Promise<ScreenshotResponse> {
 chrome.runtime.onMessage.addListener(
   (
     message: SwInbound,
-    _sender,
-    sendResponse: (resp: ScreenshotResponse | { ok: true }) => void,
+    sender,
+    sendResponse: (
+      resp:
+        | ScreenshotResponse
+        | { ok: true }
+        | { kind: 'click.ok' }
+        | { kind: 'click.err'; error: string },
+    ) => void,
   ) => {
     if (message.kind === 'capture_screenshot') {
       void captureActiveTabScreenshot().then((resp) => sendResponse(resp));
@@ -409,6 +415,57 @@ chrome.runtime.onMessage.addListener(
       sendOnWs(liveSocket, event);
       sendResponse({ ok: true });
       return false;
+    }
+    if (message.kind === 'click.main-world') {
+      // Phase-2f-4: dispatch mousedown+mouseup+click on .buttonMiddle in the
+      // PAGE'S MAIN WORLD via chrome.scripting.executeScript. Bypasses both
+      // (a) isolated-world view-of-window quirks that may make Maxance's
+      // jQuery-bound onmouseup handler see a "wrong" event.view, AND
+      // (b) the page's CSP which blocked the inline-<script> approach in
+      // phase-2f-3. Verified-good pattern from the Chrome MCP javascript_tool
+      // which uses this same mechanism under the hood.
+      const tabId = sender.tab?.id;
+      if (tabId === undefined) {
+        sendResponse({ kind: 'click.err', error: 'no_sender_tab' });
+        return false;
+      }
+      void chrome.scripting
+        .executeScript({
+          target: { tabId },
+          world: 'MAIN',
+          func: (containerId: string) => {
+            const c = document.getElementById(containerId);
+            if (!c) return { ok: false, error: 'container_not_found' };
+            const t = (c.querySelector('.buttonMiddle') as HTMLElement | null) ?? c;
+            const r = t.getBoundingClientRect();
+            const init = {
+              bubbles: true,
+              cancelable: true,
+              view: window,
+              button: 0,
+              buttons: 1,
+              clientX: r.left + r.width / 2,
+              clientY: r.top + r.height / 2,
+            } as const;
+            for (const k of ['mousedown', 'mouseup', 'click'] as const) {
+              t.dispatchEvent(new MouseEvent(k, init));
+            }
+            return { ok: true };
+          },
+          args: [message.containerId],
+        })
+        .then((results) => {
+          const r = results[0]?.result as { ok: boolean; error?: string } | undefined;
+          if (r?.ok) sendResponse({ kind: 'click.ok' });
+          else sendResponse({ kind: 'click.err', error: r?.error ?? 'unknown' });
+        })
+        .catch((err: unknown) => {
+          sendResponse({
+            kind: 'click.err',
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
+      return true;
     }
     return false;
   },
