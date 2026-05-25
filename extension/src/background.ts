@@ -398,7 +398,9 @@ chrome.runtime.onMessage.addListener(
         | ScreenshotResponse
         | { ok: true }
         | { kind: 'click.ok' }
-        | { kind: 'click.err'; error: string },
+        | { kind: 'click.err'; error: string }
+        | { kind: 'devis.ok'; log: string[] }
+        | { kind: 'devis.err'; log: string[]; error: string; errorMsg?: string },
     ) => void,
   ) => {
     if (message.kind === 'capture_screenshot') {
@@ -415,6 +417,291 @@ chrome.runtime.onMessage.addListener(
       sendOnWs(liveSocket, event);
       sendResponse({ ok: true });
       return false;
+    }
+    if (message.kind === 'devis.fill-and-submit-mw') {
+      // Phase-2d-confirm-7 (2026-05-25 PM): Devis form fill via a
+      // sequence of synchronous main-world executeScript calls with
+      // SW-orchestrated sleeps between them. Earlier attempt to do it
+      // all in ONE async main-world function had the function returning
+      // immediately without awaiting its Promise (chrome.scripting's
+      // auto-await of returned Promises behaves inconsistently for
+      // async arrow functions across some Chrome versions). Multi-step
+      // sync calls eliminate that — each step's effect is deterministic
+      // before the next step starts.
+      const tabId = sender.tab?.id;
+      if (tabId === undefined) {
+        sendResponse({ kind: 'devis.err', log: [], error: 'no_sender_tab' });
+        return false;
+      }
+      void (async () => {
+        const log: string[] = [];
+        // Pack all string params into a single JSON-encoded string arg —
+        // chrome.scripting.executeScript serializes args via structured
+        // clone, which works reliably for primitive strings but had
+        // intermittent failures returning null when nested objects were
+        // passed for funcs typed with TS generics. Strings are safe.
+        const payloadJson = JSON.stringify(message.payload);
+        try {
+          // Step 1: fill subscriber + phone draft fields.
+          const r1 = await chrome.scripting.executeScript({
+            target: { tabId },
+            world: 'MAIN',
+            func: (payloadJson: string): { log: string[] } => {
+              const p = JSON.parse(payloadJson);
+              const out: string[] = [];
+              const fire = (el: Element, t: string) =>
+                el.dispatchEvent(new Event(t, { bubbles: true }));
+              const setInp = (name: string, val: string): boolean => {
+                const el = document.querySelector(
+                  `input[name="${name}"]`,
+                ) as HTMLInputElement | null;
+                if (!el) return false;
+                el.focus();
+                const desc = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+                desc?.set?.call(el, val);
+                fire(el, 'input');
+                fire(el, 'change');
+                fire(el, 'blur');
+                return true;
+              };
+              const setSel = (name: string, val: string): boolean => {
+                const el = document.querySelector(
+                  `select[name="${name}"]`,
+                ) as HTMLSelectElement | null;
+                if (!el) return false;
+                el.value = val;
+                fire(el, 'input');
+                fire(el, 'change');
+                return el.value === val;
+              };
+              out.push('nom=' + setInp('souscripteur.nom', p.lastName));
+              out.push('prenom=' + setInp('souscripteur.prenom', p.firstName));
+              out.push(
+                'ligne1=' + setInp('souscripteur.adresseCorrespondance.ligne1', p.addressLine),
+              );
+              if (p.addressComplement) {
+                out.push(
+                  'ligne2=' +
+                    setInp('souscripteur.adresseCorrespondance.ligne2', p.addressComplement),
+                );
+              }
+              out.push('phoneType=' + setSel('telephoneListBean.currentContact.type', p.phoneType));
+              out.push(
+                'phoneUsage=' + setSel('telephoneListBean.currentContact.usage', p.phoneUsage),
+              );
+              out.push(
+                'phoneNum=' +
+                  setInp('telephoneListBean.currentContact.telephoneNumero', p.phoneNumero),
+              );
+              return { log: out };
+            },
+            args: [payloadJson],
+          });
+          const fillStep = r1[0]?.result as { log: string[] } | undefined;
+          log.push(...(fillStep?.log ?? ['fillStep=null']));
+          await new Promise((r) => setTimeout(r, 500));
+
+          // Step 2: phone Nouveau commit (no args).
+          const r2 = await chrome.scripting.executeScript({
+            target: { tabId },
+            world: 'MAIN',
+            func: (): { log: string[] } => {
+              const out: string[] = [];
+              const phoneType = document.querySelector(
+                'select[name="telephoneListBean.currentContact.type"]',
+              );
+              const fs = phoneType?.closest('fieldset');
+              const nv = fs?.querySelector('img[alt="Nouveau"], img[src$="nouveau.gif"]');
+              if (!nv) {
+                out.push('phoneNouveau=no_img');
+                return { log: out };
+              }
+              const oc = (nv.getAttribute('onclick') || '').replace(/^\s*javascript:\s*/i, '');
+              try {
+                new Function(oc)();
+                out.push('phoneNouveau=ok');
+              } catch (e) {
+                out.push('phoneNouveau=err:' + (e instanceof Error ? e.message : String(e)));
+              }
+              return { log: out };
+            },
+          });
+          const phoneStep = r2[0]?.result as { log: string[] } | undefined;
+          log.push(...(phoneStep?.log ?? ['phoneStep=null']));
+          await new Promise((r) => setTimeout(r, 2500));
+
+          // Step 3: fill email draft.
+          const r3 = await chrome.scripting.executeScript({
+            target: { tabId },
+            world: 'MAIN',
+            func: (payloadJson: string): { log: string[] } => {
+              const p = JSON.parse(payloadJson);
+              const out: string[] = [];
+              const fire = (el: Element, t: string) =>
+                el.dispatchEvent(new Event(t, { bubbles: true }));
+              const emailUsage = document.querySelector(
+                'select[name="emailListBean.currentContact.usage"]',
+              ) as HTMLSelectElement | null;
+              const emailAddr = document.querySelector(
+                'input[name="emailListBean.currentContact.adresseMail"]',
+              ) as HTMLInputElement | null;
+              if (!emailUsage || !emailAddr) {
+                out.push('emailFields=missing');
+                return { log: out };
+              }
+              emailUsage.value = p.emailUsage;
+              fire(emailUsage, 'input');
+              fire(emailUsage, 'change');
+              emailAddr.focus();
+              const desc = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+              desc?.set?.call(emailAddr, p.email);
+              fire(emailAddr, 'input');
+              fire(emailAddr, 'change');
+              fire(emailAddr, 'blur');
+              out.push('emailFilled');
+              return { log: out };
+            },
+            args: [payloadJson],
+          });
+          const emailFillStep = r3[0]?.result as { log: string[] } | undefined;
+          log.push(...(emailFillStep?.log ?? ['emailFillStep=null']));
+          await new Promise((r) => setTimeout(r, 500));
+
+          // Step 4: email Nouveau commit (no args).
+          const r4 = await chrome.scripting.executeScript({
+            target: { tabId },
+            world: 'MAIN',
+            func: (): { log: string[] } => {
+              const out: string[] = [];
+              const emailUsage = document.querySelector(
+                'select[name="emailListBean.currentContact.usage"]',
+              );
+              const fs = emailUsage?.closest('fieldset');
+              const nv = fs?.querySelector('img[alt="Nouveau"], img[src$="nouveau.gif"]');
+              if (!nv) {
+                out.push('emailNouveau=no_img');
+                return { log: out };
+              }
+              const oc = (nv.getAttribute('onclick') || '').replace(/^\s*javascript:\s*/i, '');
+              try {
+                new Function(oc)();
+                out.push('emailNouveau=ok');
+              } catch (e) {
+                out.push('emailNouveau=err:' + (e instanceof Error ? e.message : String(e)));
+              }
+              return { log: out };
+            },
+          });
+          const emailNouveauStep = r4[0]?.result as { log: string[] } | undefined;
+          log.push(...(emailNouveauStep?.log ?? ['emailNouveauStep=null']));
+          await new Promise((r) => setTimeout(r, 2500));
+
+          // Step 5: RE-FILL Nom/Prénom/ligne1 (Maxance's Nouveau AJAX zone
+          // refresh replaces them with fresh empty inputs — verified
+          // 2026-05-25 PM: ErrorMessage returned "champ Nom obligatoire"
+          // even though step 1 set them; the post-Nouveau form has new
+          // empty inputs), then verify ErrorMessage + click OK.
+          const r5 = await chrome.scripting.executeScript({
+            target: { tabId },
+            world: 'MAIN',
+            func: (
+              payloadJson: string,
+            ):
+              | { ok: true; log: string[] }
+              | { ok: false; log: string[]; error: string; errorMsg?: string } => {
+              const p = JSON.parse(payloadJson);
+              const out: string[] = [];
+              const fire = (el: Element, t: string) =>
+                el.dispatchEvent(new Event(t, { bubbles: true }));
+              const setInp = (name: string, val: string): boolean => {
+                const el = document.querySelector(
+                  `input[name="${name}"]`,
+                ) as HTMLInputElement | null;
+                if (!el) return false;
+                el.focus();
+                const desc = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+                desc?.set?.call(el, val);
+                fire(el, 'input');
+                fire(el, 'change');
+                fire(el, 'blur');
+                return true;
+              };
+              out.push('refill_nom=' + setInp('souscripteur.nom', p.lastName));
+              out.push('refill_prenom=' + setInp('souscripteur.prenom', p.firstName));
+              out.push(
+                'refill_ligne1=' +
+                  setInp('souscripteur.adresseCorrespondance.ligne1', p.addressLine),
+              );
+              if (p.addressComplement) {
+                out.push(
+                  'refill_ligne2=' +
+                    setInp('souscripteur.adresseCorrespondance.ligne2', p.addressComplement),
+                );
+              }
+              // @ts-expect-error — page-global
+              const em = typeof ErrorMessage === 'function' ? ErrorMessage() : '';
+              const emClean = em
+                ? em
+                    .replace(/<[^>]+>/g, ' ')
+                    .replace(/\s+/g, ' ')
+                    .trim()
+                : '';
+              out.push('errorMessage=' + (emClean ? 'NONEMPTY' : 'empty'));
+              if (emClean) {
+                return {
+                  ok: false,
+                  log: out,
+                  error: 'validator_nonempty',
+                  errorMsg: emClean.slice(0, 240),
+                };
+              }
+              const c = document.getElementById('validerSouscription');
+              if (!c) return { ok: false, log: out, error: 'no_OK_container' };
+              const t = (c.querySelector('.buttonMiddle') as HTMLElement | null) ?? c;
+              const r = t.getBoundingClientRect();
+              const init = {
+                bubbles: true,
+                cancelable: true,
+                view: window,
+                button: 0,
+                buttons: 1,
+                clientX: r.left + r.width / 2,
+                clientY: r.top + r.height / 2,
+              } as const;
+              for (const k of ['mousedown', 'mouseup', 'click'] as const) {
+                t.dispatchEvent(new MouseEvent(k, init));
+              }
+              out.push('OK_clicked');
+              return { ok: true, log: out };
+            },
+            args: [payloadJson],
+          });
+          const okStep = r5[0]?.result as
+            | { ok: true; log: string[] }
+            | { ok: false; log: string[]; error: string; errorMsg?: string }
+            | undefined;
+          log.push(...(okStep?.log ?? ['okStep=null']));
+          if (!okStep || !okStep.ok) {
+            sendResponse({
+              kind: 'devis.err',
+              log,
+              error: okStep?.error ?? 'okStep_null',
+              ...(okStep && 'errorMsg' in okStep && okStep.errorMsg
+                ? { errorMsg: okStep.errorMsg }
+                : {}),
+            });
+            return;
+          }
+          sendResponse({ kind: 'devis.ok', log });
+        } catch (e) {
+          sendResponse({
+            kind: 'devis.err',
+            log,
+            error: e instanceof Error ? e.message : String(e),
+          });
+        }
+      })();
+      return true;
     }
     if (message.kind === 'click.contact-nouveau') {
       // Phase-2d-confirm (2026-05-25 PM): Devis tab contact widgets

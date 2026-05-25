@@ -46,8 +46,16 @@ const sharedOptions = {
   logLevel: 'info',
   // Tree-shake dead code from zod.
   treeShaking: true,
-  // Keep names stable so debugger stacks are readable.
-  keepNames: true,
+  // keepNames was previously true for readable stacks but it wraps every
+  // anonymous arrow with `__name(...)` which is a bundle-LOCAL helper.
+  // chrome.scripting.executeScript serializes funcs via toString() and
+  // runs them in the page's MAIN world where `__name` is undefined →
+  // ReferenceError → executeScript catches it silently and returns null.
+  // The phase-2d-confirm-7 multi-step Devis flow needs all its main-
+  // world funcs to actually run. Disable keepNames; debugger stacks
+  // for anonymous arrows show "(anonymous)" instead of the source name,
+  // which is an acceptable trade for a working extension.
+  keepNames: false,
 };
 
 async function copyStatic() {

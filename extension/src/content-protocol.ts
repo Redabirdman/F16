@@ -88,13 +88,49 @@ export interface ContactWidgetNouveauRequest {
 /** SW → content: outcome of the main-world click attempt. */
 export type MainWorldClickResponse = { kind: 'click.ok' } | { kind: 'click.err'; error: string };
 
+/**
+ * Content → SW: "fill the Devis subscriber form + commit phone/email
+ * widgets via Nouveau + click OK — ALL in the page's main JS world".
+ *
+ * Phase-2d-confirm-6 (2026-05-25 PM): the isolated-world content-script
+ * field-setting path consistently produced "Un problème technique" on
+ * OK submit even when form_dump showed every field correctly populated
+ * AND contactList[0] entries existed. A direct main-world MCP-driven
+ * run with the EXACT SAME operations succeeded (DR0000973635). The
+ * remaining suspect: Maxance's framework caches form state in main-
+ * world JS variables on each onchange, and isolated-world dispatch
+ * doesn't always update those caches reliably. Routing the entire
+ * Devis form sequence through chrome.scripting{world:'MAIN'} eliminates
+ * the boundary.
+ */
+export interface DevisFillAndSubmitRequest {
+  kind: 'devis.fill-and-submit-mw';
+  payload: {
+    lastName: string;
+    firstName: string;
+    addressLine: string;
+    addressComplement?: string;
+    phoneType: string;
+    phoneUsage: string;
+    phoneNumero: string;
+    emailUsage: string;
+    email: string;
+  };
+}
+
+/** SW → content: outcome of the main-world Devis fill+OK. */
+export type DevisFillAndSubmitResponse =
+  | { kind: 'devis.ok'; log: string[] }
+  | { kind: 'devis.err'; log: string[]; error: string; errorMsg?: string };
+
 /** All possible inbound messages on the SW side. */
 export type SwInbound =
   | FlowOutcome
   | ScreenshotRequest
   | ProgressForward
   | MainWorldClickRequest
-  | ContactWidgetNouveauRequest;
+  | ContactWidgetNouveauRequest
+  | DevisFillAndSubmitRequest;
 
 /** All possible inbound messages on the content-script side. */
 export type ContentInbound = FlowInvocation;

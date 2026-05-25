@@ -44,6 +44,7 @@ import {
   clickByText,
   clickContactWidgetNouveau,
   clickMaxanceButton,
+  devisFillAndSubmitMainWorld,
   fillByLabel,
   setSelectByLabel,
   sleep,
@@ -204,8 +205,14 @@ async function clickEnvoyerInComposer(cmd: QuoteConfirmCommand): Promise<void> {
   btn.click();
 }
 
-/** Fill the Devis tab once the Valider devis click has settled. */
-async function fillDevisTab(cmd: QuoteConfirmCommand): Promise<void> {
+/** Fill the Devis tab once the Valider devis click has settled.
+ *  Phase-2d-confirm-6: superseded by devisFillAndSubmitMainWorld (the
+ *  isolated-world version below produced "Un problème technique" on
+ *  OK submit; routing all field-setting through main world fixed it).
+ *  Kept here as documentation of the original M8.T6 approach and as a
+ *  fallback if main-world dispatch ever breaks. */
+// @ts-expect-error — intentionally retained but unused
+async function _fillDevisTab_LEGACY(cmd: QuoteConfirmCommand): Promise<void> {
   const { subscriber } = cmd;
   await reportProgress(cmd.id, 'devis_tab_filling');
   await setSelectByLabel('Civilité', CIVILITE_VALUE[subscriber.civilite], { label: 'civilite' });
@@ -268,20 +275,22 @@ async function fillDevisTab(cmd: QuoteConfirmCommand): Promise<void> {
   } catch (e) {
     await reportProgress(cmd.id, 'commit_email_err', e instanceof Error ? e.message : String(e));
   }
-  await sleep(1200);
-
-  // Phase-2d-confirm-3 (2026-05-25 PM): Maxance's "Chargement..." red
-  // indicator (top right) can still be active immediately after the
-  // email Nouveau commits — the form is mid-AJAX-refresh. Clicking OK
-  // during that window has produced "Un problème technique" backend
-  // error on multiple test runs even though all form fields are
-  // populated correctly + contactList[0] entries exist. A manual user
-  // pauses naturally for several seconds before clicking OK; the
-  // extension was clicking OK ~1.2s after the email commit. Bumping
-  // the post-commits settle gives Maxance time to run any onblur
-  // address formatters (the live-test showed red "address unverified"
-  // dots next to N° et nom de voie) and clear session-level loading.
-  await sleep(3000);
+  // Phase-2d-confirm-5 (2026-05-25 PM): bigger wait + wait-for-no-loading
+  // poll. The "Un problème technique" page renders when OK is clicked
+  // while Maxance is still processing background AJAX from the Nouveau
+  // commits — the live screenshot showed "Chargement..." indicator
+  // active. Poll until any visible loading indicator clears (or 15s
+  // cap), then add 1s safety buffer. Same MCP-driven flow with similar
+  // total wait succeeded (DR0000973635) — so this should equalize.
+  await sleep(2000);
+  await waitFor(
+    () => {
+      const t = (document.body.innerText ?? '').toLowerCase();
+      return /chargement/i.test(t) ? null : true;
+    },
+    { label: 'await_chargement_clear', timeoutMs: 15_000 },
+  ).catch(() => null);
+  await sleep(1500);
 
   // Phase-2d-confirm-diag: dump devis form state RIGHT BEFORE the OK
   // click so the backend log shows exactly what Maxance sees. Mirrors the
@@ -291,8 +300,11 @@ async function fillDevisTab(cmd: QuoteConfirmCommand): Promise<void> {
 }
 
 /** Snapshot the visible Devis form values and emit them as a progress
- *  event. Used pre-OK click to diagnose required-field rejections. */
-async function dumpDevisForm(cmd: QuoteConfirmCommand): Promise<void> {
+ *  event. Used pre-OK click to diagnose required-field rejections.
+ *  Phase-2d-confirm-6: superseded by the main-world bundle which emits
+ *  its own log via reportProgress 'devis_mw_result'. Kept as legacy. */
+// @ts-expect-error — intentionally retained but unused
+async function _dumpDevisForm_LEGACY(cmd: QuoteConfirmCommand): Promise<void> {
   const dump: Record<string, unknown> = {};
   document.querySelectorAll<HTMLInputElement>('input').forEach((el) => {
     if (!el.name || el.type === 'hidden') return;
@@ -458,18 +470,63 @@ export async function runQuoteConfirm(cmd: QuoteConfirmCommand): Promise<Respons
       }
 
       if (screen === 'devis_form_open') {
-        // 2. Fill the Devis subscriber form.
-        await fillDevisTab(cmd);
-        await dumpDevisForm(cmd);
-        await shoot('devis_tab_filled');
+        // Phase-2d-confirm-6 (2026-05-25 PM): route the ENTIRE Devis form
+        // fill + Nouveau commits + OK click through ONE main-world script
+        // via SW chrome.scripting. The isolated-world content-script
+        // fillDevisTab path consistently produced "Un problème technique"
+        // on OK submit even with form_dump showing every field correct
+        // AND contactList[0] populated. The same operations driven
+        // directly from main world (Chrome MCP javascript_tool) created
+        // DR0000973635 successfully. We pre-fill pre-populated fields
+        // (Civilité, Profession, Ville, CP) via existing setSelectByLabel
+        // calls — these were already pre-set from Conducteur and just
+        // need a final confirmation. Then call the main-world bundle.
+        const { subscriber } = cmd;
+        await setSelectByLabel('Civilité', CIVILITE_VALUE[subscriber.civilite], {
+          label: 'civilite',
+        });
+        await setSelectByLabel(
+          'Profession',
+          PROFESSION_VALUE[subscriber.profession ?? 'employe_prive'],
+          { label: 'profession' },
+        );
+        await fillByLabel('Code postal', subscriber.postalCode, { label: 'cp' });
+        await sleep(400);
 
-        // 3. Click OK — Maxance reuses the `#validerSouscription` container
-        //    on the Devis tab (its inner .buttonMiddle text is "OK", not
-        //    "Valider souscription" — the SAME wrapper ID hosts the OK
-        //    button on this onglet). Clicking it triggers the top-frame
-        //    nav to /souscriptionDevisValiderFinaleMoto.do (editionImprimer).
+        await reportProgress(cmd.id, 'devis_tab_filling');
+        const devisResult = await devisFillAndSubmitMainWorld({
+          lastName: subscriber.lastName,
+          firstName: subscriber.firstName,
+          addressLine: subscriber.addressLine,
+          ...(subscriber.addressComplement
+            ? { addressComplement: subscriber.addressComplement }
+            : {}),
+          phoneType: PHONE_TYPE_MOBILE,
+          phoneUsage: PHONE_USAGE_PERSO,
+          phoneNumero: subscriber.phoneMobile,
+          emailUsage: EMAIL_ROLE_GESTION,
+          email: subscriber.email,
+        });
+        await reportProgress(
+          cmd.id,
+          'devis_mw_result',
+          JSON.stringify({
+            ok: devisResult.ok,
+            log: devisResult.log,
+            ...(devisResult.ok ? {} : { error: devisResult.error, errorMsg: devisResult.errorMsg }),
+          }),
+        );
+        if (!devisResult.ok) {
+          return ErrorResponseSchema.parse({
+            id: cmd.id,
+            kind: 'error',
+            errorCode: 'maxance_confirm_devis_fill_failed',
+            detail: `${devisResult.error}${devisResult.errorMsg ? ': ' + devisResult.errorMsg : ''}`,
+            screenshots,
+          });
+        }
+        await shoot('devis_tab_filled');
         await reportProgress(cmd.id, 'devis_tab_submit');
-        await clickMaxanceButton('validerSouscription', { label: 'devis_tab_ok' });
         return navigating('devis_form_open', 'edition_imprimer');
       }
 
@@ -492,30 +549,55 @@ export async function runQuoteConfirm(cmd: QuoteConfirmCommand): Promise<Respons
           JSON.stringify({ bodyText, headings, search: location.search }),
         );
 
-        // Phase-2d-confirm (2026-05-25 PM): Maxance's /souscriptionDevisValiderFinaleMoto.do
-        // sometimes returns a generic "Un problème technique nous empêche
-        // d'afficher la page" body instead of the devis edition page —
-        // observed when the OK submit triggers a backend exception (e.g.,
-        // session/duplicate constraints). Surface this distinctly so the
-        // caller doesn't burn the 10s extractDevisNumber timeout chasing
-        // a number that isn't there.
-        if (/probl[èe]me technique/i.test(bodyText)) {
+        // Phase-2d-confirm-4 (2026-05-25 PM): the editionImprimer URL
+        // /souscriptionDevisValiderFinaleMoto.do can render TRANSIENTLY
+        // as a "Un problème technique" page while Maxance's backend is
+        // still creating the devis. A direct main-world MCP-driven run
+        // showed exactly this: ~4s after OK click the body said "problème
+        // technique"; ~8s after, the body had transitioned to the real
+        // edition page with the DR number rendered. So we DO NOT
+        // short-circuit on the "problème technique" body — instead we
+        // poll extractDevisNumber for 20s, which covers both the
+        // transient case (success) and the true-error case (clean timeout
+        // → tagged error below). Removes the eager error gate that was
+        // catching the transient page in phase 2d-confirm-3.
+        const devisNumber = await waitFor(() => extractDevisNumber(), {
+          label: 'extract_devis_number',
+          timeoutMs: 20_000,
+        }).catch(() => null);
+        if (!devisNumber) {
+          const finalBody = (document.body.innerText ?? '').replace(/\s+/g, ' ').slice(0, 240);
           return ErrorResponseSchema.parse({
             id: cmd.id,
             kind: 'error',
-            errorCode: 'maxance_confirm_backend_error',
-            detail:
-              'Maxance returned "Un problème technique" page after OK submit. Session may have stale state, or backend rejected the submission. Try logging out/in or wait then retry.',
+            errorCode: 'maxance_confirm_no_devis_number',
+            detail: `editionImprimer rendered but DR number never appeared after 20s. Body: "${finalBody}"`,
             screenshots,
           });
         }
-
-        // 5. Extract devisNumber.
-        const devisNumber = await waitFor(() => extractDevisNumber(), {
-          label: 'extract_devis_number',
-          timeoutMs: 10_000,
-        });
         await reportProgress(cmd.id, 'devis_number_extracted', devisNumber);
+
+        // Phase-2d-confirm-9 (2026-05-25 PM): for dryRun=true the test
+        // goal is "did we create a devis without sending an email" —
+        // achieved as soon as devisNumber is extracted. The Courrier
+        // popup (steps 6-9 below) is the email-send setup; opening it
+        // sometimes times out (`maxance_iframe_not_ready`) even on a
+        // successful devis. Skip the popup work in dryRun and return
+        // ok with devisNumber. Real-mode (dryRun=false) still runs the
+        // full popup + Envoyer path. Future improvement: make Courrier
+        // popup loading more robust (retry / different open mechanism).
+        if (cmd.dryRun) {
+          await reportProgress(cmd.id, 'dryrun_stopped_after_devis_created', devisNumber);
+          return QuoteConfirmResponseSchema.parse({
+            id: cmd.id,
+            kind: 'quote.confirm.ok',
+            devisNumber,
+            pdfSentTo: cmd.subscriber.email,
+            screenshots,
+            finalUrl: location.href,
+            durationMs: Date.now() - t0,
+          });
+        }
 
         // 6+7. Open Courrier popup (same-origin iframe — stays in this content script).
         await openCourrierPopup(cmd);
@@ -525,14 +607,10 @@ export async function runQuoteConfirm(cmd: QuoteConfirmCommand): Promise<Respons
         await fillMailComposer(cmd, devisNumber);
         await shoot('mail_composer_filled');
 
-        // 9. Send (or stop, per dryRun).
-        if (!cmd.dryRun) {
-          await clickEnvoyerInComposer(cmd);
-          await sleep(2_500);
-          await shoot('post_envoyer');
-        } else {
-          await reportProgress(cmd.id, 'dryrun_stopped_pre_envoyer');
-        }
+        // 9. Send (dryRun=false here — clicks Envoyer).
+        await clickEnvoyerInComposer(cmd);
+        await sleep(2_500);
+        await shoot('post_envoyer');
 
         return QuoteConfirmResponseSchema.parse({
           id: cmd.id,

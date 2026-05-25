@@ -430,6 +430,47 @@ export async function clickContactWidgetNouveau(
 }
 
 /**
+ * Phase-2d-confirm-6 (2026-05-25 PM): execute the entire Devis form
+ * fill + Nouveau commits + OK click in ONE main-world script via SW
+ * chrome.scripting. The isolated-world content-script path consistently
+ * produced "Un problème technique" on OK submit even when form_dump
+ * showed every field correct AND contactList[0] populated; the same
+ * operations driven directly from main world (MCP) succeeded. Routing
+ * the whole sequence through main world eliminates the boundary as a
+ * variable.
+ */
+export async function devisFillAndSubmitMainWorld(payload: {
+  lastName: string;
+  firstName: string;
+  addressLine: string;
+  addressComplement?: string;
+  phoneType: string;
+  phoneUsage: string;
+  phoneNumero: string;
+  emailUsage: string;
+  email: string;
+}): Promise<
+  { ok: true; log: string[] } | { ok: false; log: string[]; error: string; errorMsg?: string }
+> {
+  const msg: import('./content-protocol.js').DevisFillAndSubmitRequest = {
+    kind: 'devis.fill-and-submit-mw',
+    payload,
+  };
+  const resp = (await chrome.runtime.sendMessage(msg)) as
+    | { kind: 'devis.ok'; log: string[] }
+    | { kind: 'devis.err'; log: string[]; error: string; errorMsg?: string }
+    | undefined;
+  if (!resp) return { ok: false, log: [], error: 'no_response' };
+  if (resp.kind === 'devis.ok') return { ok: true, log: resp.log };
+  return {
+    ok: false,
+    log: resp.log,
+    error: resp.error,
+    ...(resp.errorMsg ? { errorMsg: resp.errorMsg } : {}),
+  };
+}
+
+/**
  * Find the FIRST <select> whose <option> list includes the given
  * `optionValue`. Used to identify ambiguous Maxance selects whose names
  * are JWT-encoded (e.g. the Conducteur tab's Profession dropdown — its
