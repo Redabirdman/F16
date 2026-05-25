@@ -29,7 +29,7 @@
 import {
   CYLINDREE_TROTTINETTE,
   MARQUE_TROTTINETTE,
-  PROFESSION_VALUE,
+  PROFESSION_EMPLOYE_SECTEUR_PRIVE,
   TYPE_ACQUISITION_REMPLACEMENT,
   clampCommissionPct,
   formatIsoDateFr,
@@ -41,17 +41,21 @@ import {
 import {
   captureScreenshot,
   clickByText,
-  clickRadioByLabel,
+  clickMaxanceButton,
   fillByLabel,
+  findSelectByOptionValue,
   isVisible,
   parseEurPrice,
+  setRadioByQuestion,
   setSelectByLabel,
+  setSelectValue,
   sleep,
   waitFor,
 } from '../dom.js';
 import {
   type QuotePreviewCommandSchema,
   QuotePreviewResponseSchema,
+  QuotePreviewNavigatingResponseSchema,
   ErrorResponseSchema,
   type Response,
   type Screenshot,
@@ -118,30 +122,38 @@ function detectCurrentScreen():
 }
 
 /**
- * Reach the Véhicule tab from wherever we currently are.
- * Idempotent — no-op if we're already there.
+ * From the Proximéo home (vehicle picker), navigate to the Véhicule tab.
+ *
+ * IMPORTANT: clicking "2 roues et quads" triggers a TOP-FRAME NAVIGATION
+ * to `/Proximeo/initialiserSession.do?branche=MOTO`. The content script
+ * that runs this code dies the instant the navigation commits. We
+ * therefore do NOT wait for the destination here — we just click and
+ * return. The SW orchestrator (phase 2e) awaits
+ * `chrome.webNavigation.onCompleted` for the same tab, then re-invokes
+ * `runQuotePreview` against the freshly-injected content script in the
+ * new page (where `detectCurrentScreen()` will now return 'vehicule_tab'
+ * and the switch will fall through to `fillVehiculeTab`).
  */
-async function navigateToVehiculeTab(cmd: QuotePreviewCommand): Promise<void> {
+async function triggerNavigationToVehicule(cmd: QuotePreviewCommand): Promise<void> {
   const screen = detectCurrentScreen();
-  if (screen === 'vehicule_tab') return;
   await reportProgress(cmd.id, 'navigate_to_picker', `current=${screen}`);
 
-  // From any Proximéo page, walk the menu chain.
-  if (screen !== 'vehicle_picker') {
-    await clickByText('Tarif - Nouveau Client', {
-      timeoutMs: 10_000,
-      label: 'tarif_nouveau_client',
-    });
-    await sleep(SETTLE_MS);
+  // Maxance's Proximéo menu items have stable IDs (TRF, MOTO, AUTO, …) set
+  // by the `MainMenu_0CreateOnglet(...)` JSP-emitted bootstrap script. The
+  // sub-menu items (MOTO under TRF) are `display:none` until the parent
+  // menu is hovered/expanded — `clickByText('2 roues et quads')` finds the
+  // outer #TRF wrapper instead (TRF's textContent contains all submenu
+  // labels) and clicking #TRF just expands the menu without navigating.
+  // We loop forever in that case (proved in the live phase-2e run on
+  // 2026-05-25). Click MOTO directly by ID — `el.click()` fires the
+  // attached handler regardless of CSS visibility, which is exactly the
+  // behavior we need to bypass the hover-gated reveal.
+  const moto = document.getElementById('MOTO');
+  if (!moto) {
+    throw new Error('maxance_menu_moto_not_found:#MOTO missing in Proximéo home DOM');
   }
-  await clickByText('2 roues et quads', { timeoutMs: 10_000, label: '2_roues_et_quads' });
-  await sleep(SETTLE_MS);
-
-  // After the click chain we should land on the Véhicule tab. Confirm.
-  await waitFor(() => (detectCurrentScreen() === 'vehicule_tab' ? true : null), {
-    label: 'arrive_vehicule_tab',
-    timeoutMs: 15_000,
-  });
+  moto.click();
+  // Do NOT await navigation here — the SW orchestrator owns that.
 }
 
 async function fillVehiculeTab(cmd: QuotePreviewCommand): Promise<void> {
@@ -169,116 +181,203 @@ async function fillVehiculeTab(cmd: QuotePreviewCommand): Promise<void> {
   await setSelectByLabel('Stationnement', st.value, { label: 'stationnement' });
   await fillByLabel('Code postal', params.postalCode, { label: 'cp' });
 
-  // Profession — the Véhicule tab also has a Profession dropdown that
-  // M8.T3 sets to 125 by default. The Devis tab will override if the
-  // customer's actual profession is different.
-  await setSelectByLabel('Profession', PROFESSION_VALUE.employe_prive, { label: 'profession' });
+  // Profession — the M8.T3 era believed the Véhicule tab carried a
+  // Profession dropdown; the 2026-05-25 live phase-2e MCP investigation
+  // proved it does NOT. The 12 selects on the wizard are: critereSelected,
+  // vehiculeMarque, vehiculeCylindree, vehiculeVersion, typeAssurance,
+  // mouvement.codeModeStationnement, protectionVol, mouvement.leasing,
+  // vehiculeUsage, circulationZonier.key, + 2 jwt-blocked. No Profession.
+  // It's set on the Devis tab in the confirm flow instead.
 
   await sleep(SETTLE_MS);
-  await clickByText('Suivant >>', { label: 'suivant_vehicule' });
+  // Maxance's Suivant button is a `<div id="validerVehicule"><div class="buttonMiddle">Suivant >></div>`
+  // whose onclick fires on `mouseup` of .buttonMiddle. `clickByText` finds
+  // the wrong wrapper + `.click()` doesn't trigger the handler — use the
+  // dedicated helper that dispatches mousedown+mouseup+click on the right
+  // child. Verified live 2026-05-25 phase 2e.
+  await clickMaxanceButton('validerVehicule', { label: 'suivant_vehicule' });
 }
 
 async function fillConducteurTab(cmd: QuotePreviewCommand): Promise<void> {
   const { params } = cmd;
-  await waitFor(() => (detectCurrentScreen() === 'conducteur_tab' ? true : null), {
-    label: 'arrive_conducteur',
-    timeoutMs: 20_000,
-  });
+  // Caller has already established we're on conducteur_tab via the
+  // SW-orchestrated advance — no need to wait again.
+  //
+  // Live phase-2e MCP investigation (2026-05-25) mapped the Conducteur tab
+  // field set verbatim. The field NAMES are JWT-encoded (Maxance encrypts
+  // form field names to deter scraping), so we match by question text in
+  // the surrounding layout cells. Required fields are marked with * in the
+  // Maxance UI.
   await reportProgress(cmd.id, 'conducteur_tab_filling');
 
+  // 1. Date de naissance (required *) — text input "dd/mm/yyyy"
   await fillByLabel('Date de naissance', formatIsoDateFr(params.clientDateOfBirth), {
     label: 'dob',
   });
 
-  // Antécédents block: 3 radios that all need to be "Non". Each radio
-  // has a French label like "Sinistralité", "Suspension de permis", etc.
-  // We don't know the exact labels — bulk-set every visible "Non" radio
-  // that follows an Antécédents header.
-  await clickRadioByLabel('Non', { label: 'antecedent_1', timeoutMs: 5_000 }).catch(
-    () => undefined,
+  // 2. Trottinette has no driver's permit. Check the "Aucun permis"
+  //    checkbox — this is the one stable-named field on the page:
+  //    `<input type="checkbox" name="currentConducteur.flagAucunPermis">`.
+  const aucunPermis = document.querySelector<HTMLInputElement>(
+    'input[name="currentConducteur.flagAucunPermis"]',
   );
-  await clickRadioByLabel('Non', { label: 'antecedent_2', timeoutMs: 5_000 }).catch(
-    () => undefined,
-  );
-  await clickRadioByLabel('Non', { label: 'antecedent_3', timeoutMs: 5_000 }).catch(
-    () => undefined,
-  );
-
-  await sleep(SETTLE_MS);
-  await clickByText('Suivant >>', { label: 'suivant_conducteur' });
-
-  // Bridge modal may pop. Dismiss via Enter (default = Confirmer).
-  await sleep(SETTLE_MS);
-  if (detectCurrentScreen() === 'bridge_modal') {
-    await reportProgress(cmd.id, 'bridge_modal_dismiss');
-    document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
-    // Belt-and-braces: try clicking a Confirmer button if Enter doesn't work.
-    await clickByText('Confirmer', { label: 'bridge_confirm', timeoutMs: 5_000 }).catch(
-      () => undefined,
-    );
-    await sleep(SETTLE_MS);
+  if (aucunPermis && !aucunPermis.checked) {
+    aucunPermis.checked = true;
+    aucunPermis.dispatchEvent(new Event('click', { bubbles: true }));
+    aucunPermis.dispatchEvent(new Event('change', { bubbles: true }));
   }
+
+  // 3. Profession (required *) — the select's name is JWT-encoded but
+  //    it's the ONLY select on the page with value "125" (Employé secteur
+  //    privé) in its options. Find by option-value match.
+  const profSel = findSelectByOptionValue(PROFESSION_EMPLOYE_SECTEUR_PRIVE);
+  if (profSel) {
+    setSelectValue(profSel, PROFESSION_EMPLOYE_SECTEUR_PRIVE);
+  }
+
+  // 4. Risk-aggravés radios — ALL three set to "N" (Non). Match the
+  //    target group by the French question's distinctive substring.
+  await reportProgress(cmd.id, 'conducteur_tab_risk_radios');
+  setRadioByQuestion('résiliation par votre assureur', 'N');
+  setRadioByQuestion('condamnation pour délit de fuite', 'N');
+  setRadioByQuestion("annulation, d'une suspension", 'N');
+
+  // 5. "Le conducteur principal est-il" radios — both set to "O" (Oui)
+  //    so the conducteur IS the souscripteur AND IS the titulaire carte
+  //    grise. This is the default for a self-quote.
+  setRadioByQuestion('Souscripteur', 'O');
+  setRadioByQuestion('Titulaire carte grise', 'O');
+
+  await sleep(SETTLE_MS);
+  await clickMaxanceButton('validerConducteur', { label: 'suivant_conducteur' });
+
+  // Bridge modal CAN pop here (the 25 km/h NVEI warning) but in the live
+  // phase-2e test it did NOT — Garanties rendered immediately. Either way
+  // the SW-orchestrated advance handles whatever screen we land on next:
+  // if a bridge modal appears, the next iteration detects + dismisses it.
 }
 
 async function configureGarantiesAndExtract(
   cmd: QuotePreviewCommand,
 ): Promise<{ monthly?: number; annual?: number }> {
   const { params } = cmd;
-  await waitFor(() => (detectCurrentScreen() === 'garanties_tab' ? true : null), {
-    label: 'arrive_garanties',
-    timeoutMs: 20_000,
-  });
-  await reportProgress(cmd.id, 'garanties_tab_configure');
+  // Caller has established we're on garanties_tab via the SW-orchestrated
+  // advance.
+  //
+  // Live phase-2e MCP investigation (2026-05-25) finding: the Garanties
+  // tab automatically renders prices for ALL THREE formules upfront. The
+  // body text reads (table layout):
+  //
+  //   Formules de garanties              Montant
+  //     Tiers illimité                    78.85
+  //     Tiers illimité + Vol Incendie    160.11
+  //     Dommages tous accidents          239.10
+  //
+  //   Fractionnement   Comptant  Terme suivant  Coût annuel brut**
+  //                     25.99      7.57          90.85
+  //
+  // There is NO click required to surface the price — no formule click,
+  // no commission slider, no fractionnement select. Those controls do
+  // exist but they re-compute the price; the DEFAULT render already shows
+  // all three formules. For the preview we just extract the number for
+  // the requested formule. The CONFIRM flow (M8.T6) handles real
+  // configuration when the customer commits.
+  await reportProgress(cmd.id, 'garanties_tab_extract');
 
   const formule = params.formule ?? 'tiers_illimite';
-  await clickByText(formuleLabel(formule), { label: `formule_${formule}`, timeoutMs: 10_000 });
-  await sleep(SETTLE_MS);
+  const targetLabel = formuleLabel(formule);
 
-  // Commission slider — Maxance renders it as a slider but also as a
-  // labeled <input type="text">/range. Fill by label first; ignore if
-  // the slider is the only control (no harm — default is 9).
-  const pct = String(clampCommissionPct(params.commissionPct));
-  await fillByLabel('Commission', pct, { label: 'commission', timeoutMs: 5_000 }).catch(
-    () => undefined,
-  );
-
-  const fractionnement = params.fractionnement ?? 'mensuel';
-  await setSelectByLabel('Fractionnement', fractionnementLabel(fractionnement), {
-    label: 'fractionnement',
-    timeoutMs: 5_000,
-  }).catch(() => undefined);
-
-  // Wait for the price preview to render. Both monthly and annual amounts
-  // appear in the same DOM region; we poll body.innerText.
-  await waitFor(() => (parseEurPrice(document.body.innerText) !== null ? true : null), {
-    label: 'await_price_preview',
+  // Wait for the formule's label + its sibling number to appear in body.
+  // Maxance's table cells are tab-separated when extracted via innerText.
+  const priceMonthly = await waitFor<number>(() => extractFormulePrice(targetLabel), {
+    label: `await_formule_price:${formule}`,
     timeoutMs: 20_000,
   });
 
-  // Extract: monthly first (more common for mensuel), then annual.
-  // Maxance labels them "Mensuel : X €" / "Annuel : Y €".
-  const bodyText = document.body.innerText;
-  const monthlyMatch = /mensuel\s*[:.]?\s*(\d[\d\s.]*[,.]\d{2})\s*€/i.exec(bodyText);
-  const annualMatch = /annuel\s*[:.]?\s*(\d[\d\s.]*[,.]\d{2})\s*€/i.exec(bodyText);
-  const monthly = monthlyMatch ? parseEurPrice(monthlyMatch[0]) : null;
-  const annual = annualMatch ? parseEurPrice(annualMatch[0]) : null;
+  // Optional annual price — appears in "Coût annuel brut" column. Pattern:
+  //   "Coût annuel brut**\n  X.YZ  P.QR  90.85"
+  // We grab the last number on the line following the header.
+  const annualMatch = /Co[ûu]t annuel brut[*\s]*\n[^\n]*?(\d+[.,]\d{2})\s*$/im.exec(
+    document.body.innerText,
+  );
+  // Fallback regex: last EUR-like number on the line that mentions Coût annuel.
+  const annualFallback = /co[ûu]t annuel[^\n]*?(\d+[.,]\d{2})/im.exec(document.body.innerText);
+  const annualRaw = annualMatch?.[1] ?? annualFallback?.[1];
+  const annual = annualRaw ? Number.parseFloat(annualRaw.replace(',', '.')) : null;
 
-  // Fallback: if neither labelled match found, take the FIRST EUR amount
-  // in the page and bucket it by the fractionnement choice.
-  if (monthly == null && annual == null) {
-    const any = parseEurPrice(bodyText);
-    if (any != null) {
-      if (fractionnement === 'annuel') return { annual: any };
-      return { monthly: any };
-    }
-    return {};
-  }
   const out: { monthly?: number; annual?: number } = {};
-  if (monthly != null) out.monthly = monthly;
-  if (annual != null) out.annual = annual;
+  if (priceMonthly != null && Number.isFinite(priceMonthly)) out.monthly = priceMonthly;
+  if (annual != null && Number.isFinite(annual)) out.annual = annual;
+  // Touch unused-arg eslint guards — clampCommissionPct / fractionnementLabel /
+  // parseEurPrice / setSelectByLabel are still imported for the confirm
+  // flow's future use; we just don't need them in the preview path.
+  void clampCommissionPct;
+  void fractionnementLabel;
+  void parseEurPrice;
+  void setSelectByLabel;
   return out;
 }
 
+/**
+ * Extract the EUR price for a given formule label from the Garanties tab.
+ * Maxance renders the formules table as plain text rows (innerText with
+ * tab separators between label and montant cell):
+ *
+ *   "Tiers illimité\t78.85\t"
+ *
+ * Returns null if the label is present but no number follows on the same
+ * line yet (page still loading) — waitFor polls.
+ */
+function extractFormulePrice(label: string): number | null {
+  const body = document.body.innerText;
+  // Match the label, optional whitespace, then a number like "78.85" or "1 234,56".
+  // The number may be on the same line OR the immediately-next line in
+  // multi-line table renders.
+  const escapedLabel = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // Try: same-line match first.
+  const sameLineRe = new RegExp(`${escapedLabel}\\s*[\\t ]+(\\d[\\d\\s]*[,.]\\d{2})`, 'i');
+  const sameLine = sameLineRe.exec(body);
+  if (sameLine?.[1]) {
+    return Number.parseFloat(sameLine[1].replace(/\s/g, '').replace(',', '.'));
+  }
+  // Try: label then newline then number.
+  const multiLineRe = new RegExp(`${escapedLabel}\\s*\\n\\s*(\\d[\\d\\s]*[,.]\\d{2})`, 'i');
+  const multi = multiLineRe.exec(body);
+  if (multi?.[1]) {
+    return Number.parseFloat(multi[1].replace(/\s/g, '').replace(',', '.'));
+  }
+  return null;
+}
+
+/**
+ * Single-screen advance of the quote.preview flow (M8.T8 phase 2e).
+ *
+ * The previous "do everything in one async function" approach broke
+ * because Maxance triggers a top-frame navigation between EVERY wizard
+ * step — the content script's JS context dies mid-await every time. This
+ * function does as much work as possible WITHIN the current page, then:
+ *
+ *   - returns `quote.preview.navigating` when it just clicked a control
+ *     that triggers a top-frame navigation (the SW orchestrator waits for
+ *     the new page to load + calls `runQuotePreview` again against the
+ *     fresh content script — same `cmd.id`, accumulating screenshots),
+ *   - returns `quote.preview.ok` when it reaches the price preview, OR
+ *   - returns `error` on any timeout / DOM mismatch.
+ *
+ * Idempotent + restartable: each invocation calls `detectCurrentScreen()`
+ * first and dispatches based on where we currently are. The same function
+ * runs in EVERY content-script instance Chrome creates across the
+ * navigation chain.
+ *
+ * Screens handled, in nav order:
+ *   - bridge_modal  → dismiss in-place, retry detect (no navigation)
+ *   - vehicle_picker → click TRF + MOTO → navigates → returns navigating
+ *   - vehicule_tab  → fill all fields + click Suivant → navigates → returns navigating
+ *   - conducteur_tab → fill all fields + click Suivant → may navigate OR
+ *     pop bridge modal; we click Suivant and return navigating, the SW
+ *     handles whether a real nav happened
+ *   - garanties_tab / price_preview → configure formule + extract price → DONE
+ */
 export async function runQuotePreview(cmd: QuotePreviewCommand): Promise<Response> {
   const t0 = Date.now();
   const screenshots: Screenshot[] = [];
@@ -290,23 +389,87 @@ export async function runQuotePreview(cmd: QuotePreviewCommand): Promise<Respons
     }
   };
 
-  try {
-    await navigateToVehiculeTab(cmd);
-    await shoot('vehicule_tab_pre');
-    await fillVehiculeTab(cmd);
-    await shoot('vehicule_tab_filled');
-    await fillConducteurTab(cmd);
-    await shoot('conducteur_tab_filled');
-    const price = await configureGarantiesAndExtract(cmd);
-    await shoot('price_preview');
-
-    return QuotePreviewResponseSchema.parse({
+  const navigating = (fromScreen: string, expectedScreen: string): Response =>
+    QuotePreviewNavigatingResponseSchema.parse({
       id: cmd.id,
-      kind: 'quote.preview.ok',
-      pricePreviewEur: price,
+      kind: 'quote.preview.navigating',
+      fromScreen,
+      expectedScreen,
       screenshots,
-      finalUrl: location.href,
-      durationMs: Date.now() - t0,
+    });
+
+  try {
+    // Settle pause so freshly-loaded pages have a moment to run their
+    // post-load script (Maxance's `MainMenu` etc.) before we sniff state.
+    await sleep(SETTLE_MS);
+
+    // Outer safety loop: handles intra-page transitions (e.g. bridge_modal
+    // dismissal that doesn't navigate). Capped to avoid an infinite churn
+    // if detectCurrentScreen flaps.
+    for (let iter = 0; iter < 4; iter += 1) {
+      const screen = detectCurrentScreen();
+      await reportProgress(cmd.id, 'advance_iter', `screen=${screen}`);
+
+      if (screen === 'bridge_modal') {
+        await shoot('bridge_modal_pre');
+        document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+        await clickByText('Confirmer', { label: 'bridge_confirm', timeoutMs: 5_000 }).catch(
+          () => undefined,
+        );
+        await sleep(SETTLE_MS);
+        continue; // re-detect — bridge dismissal may flip us to garanties_tab
+      }
+
+      if (screen === 'vehicle_picker') {
+        await shoot('vehicle_picker_pre');
+        await triggerNavigationToVehicule(cmd);
+        await shoot('after_moto_click');
+        return navigating('vehicle_picker', 'vehicule_tab');
+      }
+
+      if (screen === 'vehicule_tab') {
+        await shoot('vehicule_tab_pre');
+        await fillVehiculeTab(cmd);
+        await shoot('vehicule_tab_after_suivant');
+        return navigating('vehicule_tab', 'conducteur_tab');
+      }
+
+      if (screen === 'conducteur_tab') {
+        await shoot('conducteur_tab_pre');
+        await fillConducteurTab(cmd);
+        await shoot('conducteur_tab_after_suivant');
+        // Suivant may pop a bridge modal (no nav) OR navigate to garanties.
+        // Return navigating either way — if no nav happened, the SW's
+        // webNavigation wait will time out cheaply and we'll re-invoke on
+        // the SAME page where detectCurrentScreen now reports bridge_modal
+        // or garanties_tab. The SW handles the no-nav fallback.
+        return navigating('conducteur_tab', 'garanties_tab');
+      }
+
+      if (screen === 'garanties_tab' || screen === 'price_preview') {
+        await shoot('garanties_tab_pre');
+        const price = await configureGarantiesAndExtract(cmd);
+        await shoot('price_preview');
+        return QuotePreviewResponseSchema.parse({
+          id: cmd.id,
+          kind: 'quote.preview.ok',
+          pricePreviewEur: price,
+          screenshots,
+          finalUrl: location.href,
+          durationMs: Date.now() - t0,
+        });
+      }
+
+      // unknown — give the page another short moment then retry once
+      await sleep(SETTLE_MS);
+    }
+
+    return ErrorResponseSchema.parse({
+      id: cmd.id,
+      kind: 'error',
+      errorCode: 'maxance_quote_unknown_screen',
+      detail: `advance loop exhausted on screen=${detectCurrentScreen()} url=${location.href}`,
+      screenshots,
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

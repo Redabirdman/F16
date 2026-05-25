@@ -212,9 +212,10 @@ export class ExtensionClient {
       this.pending.delete(id);
       entry.resolve(parsed.value);
     } else if (parsed.side === 'event') {
-      logger.info({ kind: parsed.value.kind }, 'extension-client: event received');
-      // V1: just log. Phase 2d may forward progress events to the
-      // operator UI via a separate channel.
+      // Surface the full payload — phase-2d/2e diagnostics need to see
+      // the progress step + detail to debug stuck flows. The events are
+      // already gated to the local extension so PII risk is operator-only.
+      logger.info({ event: parsed.value }, 'extension-client: event received');
     }
   }
 

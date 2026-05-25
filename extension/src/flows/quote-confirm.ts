@@ -46,7 +46,6 @@ import {
   setSelectByLabel,
   sleep,
   waitFor,
-  waitForUrl,
 } from '../dom.js';
 import {
   iframeQuerySelector,
@@ -57,6 +56,7 @@ import {
 import {
   type QuoteConfirmCommandSchema,
   QuoteConfirmResponseSchema,
+  QuoteConfirmNavigatingResponseSchema,
   ErrorResponseSchema,
   type Response,
   type Screenshot,
@@ -273,6 +273,47 @@ function fillInputByNameLike(nameSubstring: string, value: string): void {
   setInputValue(picked, value);
 }
 
+/**
+ * Probe which confirm screen we're currently on.
+ *
+ *   - 'edition_imprimer' — final page after the Devis OK click navigated;
+ *     URL ends in /souscriptionDevisValiderFinaleMoto.do. Has the devis
+ *     number rendered in the page body.
+ *   - 'devis_tab_pre' — we just landed after the preview flow; "Valider
+ *     devis" button is visible in the document. The devis form fields
+ *     (Civilité, Nom, ...) may not be visible YET because Maxance opens
+ *     them after the Valider click.
+ *   - 'unknown' — neither marker seen; advance loop waits a settle + retries.
+ */
+function detectConfirmScreen(): 'devis_tab_pre' | 'edition_imprimer' | 'unknown' {
+  if (location.pathname.endsWith(PROXIMEO_URL_SIGNATURES.editionImprimer)) {
+    return 'edition_imprimer';
+  }
+  // Heuristic: presence of devisNumber in body also signals edition page.
+  if (extractDevisNumber() !== null) return 'edition_imprimer';
+  // "Valider devis" button visible = pre-state. Use a regex over the body
+  // text; it's a clickable button or labeled input depending on Maxance
+  // page variant.
+  if (/valider\s*devis/i.test(document.body.innerText ?? '')) {
+    return 'devis_tab_pre';
+  }
+  return 'unknown';
+}
+
+/**
+ * Single-screen advance of the quote.confirm flow (M8.T8 phase 2e).
+ *
+ * Mirrors `runQuotePreview` — the SW orchestrator may call this multiple
+ * times across top-frame navigations. Returns `quote.confirm.navigating`
+ * after triggering the Devis OK click (which navigates to the Edition à
+ * imprimer page), or `quote.confirm.ok` when the mail composer is fully
+ * handled.
+ *
+ * Note: the Courrier popup opens in a same-origin IFRAME, not a new
+ * top-frame page, so the popup + composer work stays inside ONE
+ * content-script run. The only top-frame navigation is the Devis OK
+ * click.
+ */
 export async function runQuoteConfirm(cmd: QuoteConfirmCommand): Promise<Response> {
   const t0 = Date.now();
   const screenshots: Screenshot[] = [];
@@ -284,61 +325,88 @@ export async function runQuoteConfirm(cmd: QuoteConfirmCommand): Promise<Respons
     }
   };
 
+  const navigating = (fromScreen: string, expectedScreen: string): Response =>
+    QuoteConfirmNavigatingResponseSchema.parse({
+      id: cmd.id,
+      kind: 'quote.confirm.navigating',
+      fromScreen,
+      expectedScreen,
+      screenshots,
+    });
+
   try {
-    // 1. Valider devis (soft save).
-    await reportProgress(cmd.id, 'valider_devis');
-    await clickByText('Valider devis', { label: 'valider_devis', timeoutMs: 10_000 });
-    await sleep(2_500);
-    await shoot('valider_devis_clicked');
-
-    // 2. Fill the Devis tab.
-    await fillDevisTab(cmd);
-    await shoot('devis_tab_filled');
-
-    // 3. Submit.
-    await reportProgress(cmd.id, 'devis_tab_submit');
-    await clickByText('OK', { label: 'devis_tab_ok', timeoutMs: 10_000 });
-
-    // 4. Wait for the Edition à imprimer page.
-    await waitForUrl((u) => u.pathname.endsWith(PROXIMEO_URL_SIGNATURES.editionImprimer), {
-      timeoutMs: 30_000,
-      label: 'await_edition_imprimer',
-    });
     await sleep(SETTLE_MS);
-    await shoot('edition_imprimer');
 
-    // 5. Extract devisNumber.
-    const devisNumber = await waitFor(() => extractDevisNumber(), {
-      label: 'extract_devis_number',
-      timeoutMs: 10_000,
-    });
-    await reportProgress(cmd.id, 'devis_number_extracted', devisNumber);
+    for (let iter = 0; iter < 3; iter += 1) {
+      const screen = detectConfirmScreen();
+      await reportProgress(cmd.id, 'confirm_advance_iter', `screen=${screen}`);
 
-    // 6+7. Open Courrier popup + wait for iframe ready.
-    await openCourrierPopup(cmd);
-    await shoot('courrier_popup_open');
+      if (screen === 'devis_tab_pre') {
+        // 1. Valider devis (soft save — typically does NOT navigate; opens
+        //    the Devis form on the same page).
+        await reportProgress(cmd.id, 'valider_devis');
+        await clickByText('Valider devis', { label: 'valider_devis', timeoutMs: 10_000 });
+        await sleep(2_500);
+        await shoot('valider_devis_clicked');
 
-    // 8. Fill mail composer.
-    await fillMailComposer(cmd, devisNumber);
-    await shoot('mail_composer_filled');
+        // 2. Fill the Devis tab in-place.
+        await fillDevisTab(cmd);
+        await shoot('devis_tab_filled');
 
-    // 9. Send (or stop, per dryRun).
-    if (!cmd.dryRun) {
-      await clickEnvoyerInComposer(cmd);
-      await sleep(2_500);
-      await shoot('post_envoyer');
-    } else {
-      await reportProgress(cmd.id, 'dryrun_stopped_pre_envoyer');
+        // 3. Submit OK — this triggers the top-frame nav to editionImprimer.
+        await reportProgress(cmd.id, 'devis_tab_submit');
+        await clickByText('OK', { label: 'devis_tab_ok', timeoutMs: 10_000 });
+        return navigating('devis_tab_pre', 'edition_imprimer');
+      }
+
+      if (screen === 'edition_imprimer') {
+        await shoot('edition_imprimer');
+
+        // 5. Extract devisNumber.
+        const devisNumber = await waitFor(() => extractDevisNumber(), {
+          label: 'extract_devis_number',
+          timeoutMs: 10_000,
+        });
+        await reportProgress(cmd.id, 'devis_number_extracted', devisNumber);
+
+        // 6+7. Open Courrier popup (same-origin iframe — stays in this content script).
+        await openCourrierPopup(cmd);
+        await shoot('courrier_popup_open');
+
+        // 8. Fill mail composer.
+        await fillMailComposer(cmd, devisNumber);
+        await shoot('mail_composer_filled');
+
+        // 9. Send (or stop, per dryRun).
+        if (!cmd.dryRun) {
+          await clickEnvoyerInComposer(cmd);
+          await sleep(2_500);
+          await shoot('post_envoyer');
+        } else {
+          await reportProgress(cmd.id, 'dryrun_stopped_pre_envoyer');
+        }
+
+        return QuoteConfirmResponseSchema.parse({
+          id: cmd.id,
+          kind: 'quote.confirm.ok',
+          devisNumber,
+          pdfSentTo: cmd.subscriber.email,
+          screenshots,
+          finalUrl: location.href,
+          durationMs: Date.now() - t0,
+        });
+      }
+
+      // unknown — settle and retry detection once
+      await sleep(SETTLE_MS);
     }
 
-    return QuoteConfirmResponseSchema.parse({
+    return ErrorResponseSchema.parse({
       id: cmd.id,
-      kind: 'quote.confirm.ok',
-      devisNumber,
-      pdfSentTo: cmd.subscriber.email,
+      kind: 'error',
+      errorCode: 'maxance_confirm_unknown_screen',
+      detail: `advance loop exhausted on screen=${detectConfirmScreen()} url=${location.href}`,
       screenshots,
-      finalUrl: location.href,
-      durationMs: Date.now() - t0,
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

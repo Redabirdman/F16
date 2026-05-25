@@ -123,6 +123,39 @@ describe('ResponseSchema', () => {
     expect(ok.success).toBe(true);
   });
 
+  // M8.T8 phase 2e — navigation-aware response variants.
+  it('accepts a quote.preview.navigating response (mid-flow handoff)', () => {
+    const ok = ResponseSchema.safeParse({
+      id: UUID,
+      kind: 'quote.preview.navigating',
+      fromScreen: 'vehicle_picker',
+      expectedScreen: 'vehicule_tab',
+      screenshots: [],
+    });
+    expect(ok.success).toBe(true);
+  });
+
+  it('accepts a quote.confirm.navigating response (mid-flow handoff)', () => {
+    const ok = ResponseSchema.safeParse({
+      id: UUID,
+      kind: 'quote.confirm.navigating',
+      fromScreen: 'devis_tab_pre',
+      expectedScreen: 'edition_imprimer',
+      screenshots: [],
+    });
+    expect(ok.success).toBe(true);
+  });
+
+  it('rejects a quote.preview.navigating missing the fromScreen field', () => {
+    const fail = ResponseSchema.safeParse({
+      id: UUID,
+      kind: 'quote.preview.navigating',
+      expectedScreen: 'vehicule_tab',
+      screenshots: [],
+    });
+    expect(fail.success).toBe(false);
+  });
+
   it('accepts an error response with tagged errorCode', () => {
     const ok = ResponseSchema.safeParse({
       id: UUID,

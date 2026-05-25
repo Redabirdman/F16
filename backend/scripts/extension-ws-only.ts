@@ -51,7 +51,9 @@ import { logger } from '../src/logger.js';
 const wsPort = Number.parseInt(process.env.MAXANCE_EXTENSION_WS_PORT ?? '', 10) || 9223;
 const httpPort =
   Number.parseInt(process.env.MAXANCE_EXTENSION_HTTP_PORT ?? '', 10) || DEFAULT_CONTROL_PLANE_PORT;
-const client = new ExtensionClient({ port: wsPort, timeoutMs: 60_000 });
+// 5 min — comfortably above the SW orchestrator's 240s hard deadline for
+// navigation-prone flows (quote.preview chains 4 top-frame navigations).
+const client = new ExtensionClient({ port: wsPort, timeoutMs: 5 * 60_000 });
 
 let httpServer: Server | undefined;
 let pingTimer: NodeJS.Timeout | undefined;

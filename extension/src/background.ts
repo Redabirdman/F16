@@ -94,6 +94,15 @@ async function forwardToContent(command: Command): Promise<Response> {
     });
   }
   const tabId = tab.id;
+
+  // M8.T8 phase 2e — quote.preview / quote.confirm go through the
+  // navigation-aware orchestrator. Plain commands (login.ensure) still
+  // use the single-shot path because they're intra-page or have their
+  // own URL-wait logic baked in.
+  if (command.kind === 'quote.preview' || command.kind === 'quote.confirm') {
+    return orchestrateNavigatingFlow(tabId, command);
+  }
+
   // `ping` is handled directly by the SW (never reaches forwardToContent),
   // but TypeScript narrows the union here — only the three flow commands
   // carry a `timeoutMs` field. Read it via a small helper.
@@ -120,6 +129,159 @@ async function forwardToContent(command: Command): Promise<Response> {
       detail: msg.slice(0, 240),
     });
   }
+}
+
+/* ────────────────────────────────────────────────────────────────────── */
+/*  Navigation-aware flow orchestrator (M8.T8 phase 2e)                   */
+/* ────────────────────────────────────────────────────────────────────── */
+
+/** Max advance iterations before giving up — comfortably above the 4-screen
+ *  quote-preview chain (vehicle_picker → vehicule_tab → conducteur_tab →
+ *  garanties_tab) plus any intra-page bridge-modal dismissals. */
+const ORCHESTRATE_MAX_ITERATIONS = 8;
+/** How long the SW waits for chrome.webNavigation.onCompleted after a
+ *  navigating response. If no nav fires within this window we assume the
+ *  click didn't navigate (e.g. it popped a same-page modal) and just
+ *  re-advance against the same content script. */
+const NAV_COMPLETE_TIMEOUT_MS = 20_000;
+/** Settle pause after a navigation completes — gives the new page's
+ *  inline `MainMenu_0CreateOnglet(...)`-style scripts time to render the
+ *  DOM before our next advance hits `detectCurrentScreen`. */
+const POST_NAV_SETTLE_MS = 800;
+/** Per-advance content-script timeout. Smaller than the legacy 60s
+ *  because each advance is now short (one screen of work). */
+const ADVANCE_TIMEOUT_MS = 60_000;
+
+/**
+ * Drive a navigation-prone flow (quote.preview / quote.confirm) across
+ * top-frame navigations by calling the SAME command repeatedly against
+ * the freshly-injected content script in each new page.
+ *
+ * Content-script contract (see flows/quote-preview.ts):
+ *   - returns `*.navigating` when it just clicked a control that
+ *     triggers a top-frame nav. SW awaits onCompleted, re-invokes.
+ *   - returns `*.ok` when the flow is done. SW returns to caller.
+ *   - returns `error` on any failure. SW returns to caller.
+ *
+ * Screenshots are accumulated across iterations and merged into the
+ * final response so upstream callers see the full forensic chain.
+ */
+async function orchestrateNavigatingFlow(tabId: number, command: Command): Promise<Response> {
+  const accumulatedScreenshots: { step: string; dataUrl: string }[] = [];
+  const envelope: ContentInbound = { kind: 'flow', command };
+  const start = Date.now();
+  const hardDeadline = 'timeoutMs' in command ? (command.timeoutMs ?? 240_000) : 240_000;
+
+  for (let iter = 0; iter < ORCHESTRATE_MAX_ITERATIONS; iter += 1) {
+    if (Date.now() - start > hardDeadline) {
+      return ErrorResponseSchema.parse({
+        id: command.id,
+        kind: 'error',
+        errorCode: 'maxance_extension_orchestrate_hard_timeout',
+        detail: `total elapsed exceeded ${hardDeadline}ms after iter=${iter}`,
+        screenshots: accumulatedScreenshots,
+      });
+    }
+
+    let outcome: FlowOutcome;
+    try {
+      outcome = await sendWithReinjection(tabId, envelope, ADVANCE_TIMEOUT_MS);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return ErrorResponseSchema.parse({
+        id: command.id,
+        kind: 'error',
+        errorCode:
+          msg === 'sw_forward_timeout'
+            ? 'maxance_extension_flow_timeout'
+            : 'maxance_extension_forward_failed',
+        detail: msg.slice(0, 240),
+        screenshots: accumulatedScreenshots,
+      });
+    }
+    const resp = outcome.response;
+
+    // Accumulate any screenshots this advance collected.
+    if ('screenshots' in resp && Array.isArray(resp.screenshots)) {
+      accumulatedScreenshots.push(...resp.screenshots);
+    }
+
+    if (resp.kind === 'error') {
+      return { ...resp, screenshots: accumulatedScreenshots };
+    }
+    if (resp.kind === 'quote.preview.ok' || resp.kind === 'quote.confirm.ok') {
+      // Replace the final response's screenshots with the full accumulated
+      // set so callers see the entire navigation chain.
+      return { ...resp, screenshots: accumulatedScreenshots };
+    }
+    if (resp.kind === 'quote.preview.navigating' || resp.kind === 'quote.confirm.navigating') {
+      console.warn(
+        `[f16-ext] orchestrator: iter ${iter} returned navigating from=${resp.fromScreen} expected=${resp.expectedScreen}`,
+      );
+      try {
+        await waitForNavigationComplete(tabId, NAV_COMPLETE_TIMEOUT_MS);
+      } catch {
+        // No navigation fired in the window — the click was likely an
+        // intra-page action (modal popup, AJAX fragment). Re-advance
+        // immediately against the SAME page; detectCurrentScreen will
+        // report the new state and the switch picks up the right branch.
+        console.warn(
+          `[f16-ext] orchestrator: no nav within ${NAV_COMPLETE_TIMEOUT_MS}ms — re-advancing in place`,
+        );
+      }
+      await sleep(POST_NAV_SETTLE_MS);
+      continue;
+    }
+
+    // Any other kind (pong, login.ensure.ok) shouldn't reach the
+    // orchestrator. Surface as an error so we don't loop forever.
+    return ErrorResponseSchema.parse({
+      id: command.id,
+      kind: 'error',
+      errorCode: 'maxance_extension_orchestrate_unexpected_kind',
+      detail: `unexpected response kind=${resp.kind} at iter=${iter}`,
+      screenshots: accumulatedScreenshots,
+    });
+  }
+
+  return ErrorResponseSchema.parse({
+    id: command.id,
+    kind: 'error',
+    errorCode: 'maxance_extension_orchestrate_too_many_iterations',
+    detail: `flow did not complete after ${ORCHESTRATE_MAX_ITERATIONS} advance iterations`,
+    screenshots: accumulatedScreenshots,
+  });
+}
+
+/**
+ * Resolve when `chrome.webNavigation.onCompleted` fires for `tabId` on
+ * the top frame (frameId 0). Rejects on `timeoutMs` elapsed. The
+ * one-shot listener is always detached on resolve/reject so we don't
+ * leak across the orchestrator's iterations.
+ */
+function waitForNavigationComplete(tabId: number, timeoutMs: number): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const detach = (): void => {
+      chrome.webNavigation.onCompleted.removeListener(listener);
+      clearTimeout(timer);
+    };
+    const listener = (details: chrome.webNavigation.WebNavigationFramedCallbackDetails): void => {
+      if (details.tabId !== tabId) return;
+      if (details.frameId !== 0) return; // top frame only
+      if (settled) return;
+      settled = true;
+      detach();
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      detach();
+      reject(new Error('nav_complete_timeout'));
+    }, timeoutMs);
+    chrome.webNavigation.onCompleted.addListener(listener);
+  });
 }
 
 /**

@@ -88,21 +88,19 @@ export function findControlByLabel<T extends HTMLElement>(
   labelText: string,
   tags: readonly string[],
 ): T | null {
-  const needle = labelText.toLowerCase().trim();
+  const needle = normaliseLabel(labelText);
+  // Pattern 1-3: standard <label> element lookup (RFC, prefer when present).
   const labels = Array.from(document.querySelectorAll('label'));
   for (const lab of labels) {
-    const text = (lab.textContent ?? '').toLowerCase().trim();
+    const text = normaliseLabel(lab.textContent ?? '');
     if (!text.includes(needle)) continue;
-    // Pattern 1: explicit for=id
     const forId = lab.getAttribute('for');
     if (forId) {
       const ctl = document.getElementById(forId);
       if (ctl && tags.includes(ctl.tagName)) return ctl as T;
     }
-    // Pattern 2: nested control
     const nested = lab.querySelector<HTMLElement>(tags.join(','));
     if (nested) return nested as T;
-    // Pattern 3: next form element in DOM order
     let n: Element | null = lab.nextElementSibling;
     while (n) {
       if (tags.includes(n.tagName)) return n as T;
@@ -111,7 +109,59 @@ export function findControlByLabel<T extends HTMLElement>(
       n = n.nextElementSibling;
     }
   }
+  // Pattern 4 (Maxance fallback): the form-control's `name` attribute
+  // embeds the French label. E.g. `<select name="vehiculeMarque">` for
+  // "Marque", `<select name="vehiculeCylindree">` for "Cylindrée",
+  // `<select name="mouvement.codeModeStationnement">` for "Stationnement".
+  // Maxance's Proximéo doesn't use HTML `<label>` elements — labels live
+  // in adjacent `<td>` cells of layout tables — so this name-fallback
+  // catches the common case without us having to walk every layout row.
+  const compactNeedle = needle.replace(/\s+/g, '');
+  const noDiacriticsNeedle = stripDiacritics(compactNeedle);
+  const candidates = document.querySelectorAll<HTMLElement>(tags.join(','));
+  for (const ctl of candidates) {
+    const compactName = normaliseLabel(ctl.getAttribute('name') ?? '').replace(/\s+/g, '');
+    const compactId = normaliseLabel(ctl.getAttribute('id') ?? '').replace(/\s+/g, '');
+    if (
+      compactName.includes(compactNeedle) ||
+      compactId.includes(compactNeedle) ||
+      compactName.includes(noDiacriticsNeedle) ||
+      compactId.includes(noDiacriticsNeedle)
+    ) {
+      return ctl as T;
+    }
+  }
+  // Pattern 5 (last-resort): walk layout-table / div-grid labels — look
+  // for a non-<label> element whose text matches the needle, then take
+  // the first form control in its row's siblings or descendants.
+  const textBearers = Array.from(document.querySelectorAll<HTMLElement>('td, th, div, span'));
+  for (const el of textBearers) {
+    if (el.querySelector(tags.join(','))) continue;
+    const text = normaliseLabel(el.textContent ?? '');
+    if (!text.includes(needle)) continue;
+    let n: Element | null = el.nextElementSibling;
+    while (n) {
+      if (tags.includes(n.tagName)) return n as T;
+      const inner = n.querySelector<HTMLElement>(tags.join(','));
+      if (inner) return inner as T;
+      n = n.nextElementSibling;
+    }
+    const parentRow = el.closest('tr');
+    if (parentRow?.nextElementSibling) {
+      const downstream = parentRow.nextElementSibling.querySelector<HTMLElement>(tags.join(','));
+      if (downstream) return downstream as T;
+    }
+  }
   return null;
+}
+
+function normaliseLabel(s: string): string {
+  return s.toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+function stripDiacritics(s: string): string {
+  // Maxance names drop accents — `vehiculeCylindree` for "Cylindrée".
+  return s.normalize('NFD').replace(/\p{M}+/gu, '');
 }
 
 /**
@@ -126,20 +176,48 @@ export async function setSelectByLabel(
   opts: { timeoutMs?: number; label?: string } = {},
 ): Promise<void> {
   const stepLabel = opts.label ?? labelText;
-  const select = await waitFor(() => findControlByLabel<HTMLSelectElement>(labelText, ['SELECT']), {
-    label: `find_select:${stepLabel}`,
-    ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
-  });
-  // Try value-match first.
-  const byValue = Array.from(select.options).find((o) => o.value === value);
-  const byText = byValue
-    ? null
-    : Array.from(select.options).find(
+  // Re-find the select on each poll. Maxance's Proximéo cascade replaces
+  // dependent <select> elements wholesale when a parent changes — not
+  // just their options — so a cached reference from a prior find quickly
+  // becomes an orphan whose .options reflects the OLD state forever.
+  // We pair "find select" and "lookup option" in one tick so we always
+  // read options off the LIVE element.
+  const found = await waitFor<{ select: HTMLSelectElement; option: HTMLOptionElement }>(
+    () => {
+      const select = findControlByLabel<HTMLSelectElement>(labelText, ['SELECT']);
+      if (!select) return null;
+      const byValue = Array.from(select.options).find((o) => o.value === value);
+      if (byValue) return { select, option: byValue };
+      const byText = Array.from(select.options).find(
         (o) => (o.textContent ?? '').trim().toLowerCase() === value.toLowerCase(),
       );
-  const picked = byValue ?? byText;
-  if (!picked) {
-    throw new Error(`maxance_dom_select_option_missing:${stepLabel}:${value}`);
+      return byText ? { select, option: byText } : null;
+    },
+    {
+      label: `select_option:${stepLabel}:${value}`,
+      // Long enough to survive AJAX populates (typical ~1-2s on Maxance,
+      // up to ~5s when their backend is cold), short enough that a TRULY
+      // missing option (wrong constant) fails fast.
+      timeoutMs: 8_000,
+    },
+  ).catch((err: unknown) => {
+    // Re-throw with the legacy tagged-error format so QUOTE.FAILED routing
+    // continues to surface the same `maxance_dom_select_option_missing`
+    // signature the Operator agent (M8.T4) already knows.
+    throw err instanceof Error && err.message.startsWith('maxance_dom_wait_timeout')
+      ? new Error(`maxance_dom_select_option_missing:${stepLabel}:${value}`)
+      : err;
+  });
+  const { select, option: picked } = found;
+  // Force a real change event even if the select already holds the
+  // target value. Maxance's onchange handlers no-op when
+  // oldValue === newValue, but downstream dependent dropdowns may not
+  // have been populated yet (e.g. partial-fill from a crashed earlier
+  // flow). Clearing to '' first guarantees the next assignment fires.
+  if (select.value === picked.value) {
+    select.value = '';
+    select.dispatchEvent(new Event('input', { bubbles: true }));
+    select.dispatchEvent(new Event('change', { bubbles: true }));
   }
   select.value = picked.value;
   select.dispatchEvent(new Event('input', { bubbles: true }));
@@ -255,6 +333,109 @@ export async function clickRadioByLabel(
     throw new Error(`maxance_dom_not_a_radio:${stepLabel}:${radio.type}`);
   }
   radio.click();
+}
+
+/**
+ * Click a Maxance "Suivant >>" / "Valider devis" style button by its
+ * stable container ID (e.g. `validerVehicule`, `validerConducteur`,
+ * `validerDevis`).
+ *
+ * Why a dedicated helper instead of clickByText: the Maxance Proximéo UI
+ * wraps every action button in `<div id="validerXxx"><div class="buttonMiddle">Suivant >></div>`
+ * and binds its onclick to the `.buttonMiddle` child specifically on the
+ * `mouseup` event (legacy mdiWindNet pattern). Calling `.click()` on the
+ * outer `#validerXxx` div does NOT trigger the framework's onclick
+ * because the event listener checks `event.target === buttonMiddle` and
+ * fires on mouseup, not click. Dispatching `mousedown + mouseup + click`
+ * on `.buttonMiddle` (or falling back to the container) is the only
+ * pattern that actually navigates.
+ *
+ * Verified live 2026-05-25 phase-2e MCP investigation:
+ *   #validerVehicule .buttonMiddle  → navigates from Véhicule → Conducteur
+ *   #validerConducteur .buttonMiddle → navigates from Conducteur → Garanties
+ */
+export async function clickMaxanceButton(
+  containerId: string,
+  opts: { timeoutMs?: number; label?: string } = {},
+): Promise<void> {
+  const stepLabel = opts.label ?? containerId;
+  const container = await waitFor<HTMLElement>(() => document.getElementById(containerId), {
+    label: `find_button:${stepLabel}`,
+    ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
+  });
+  const target = container.querySelector<HTMLElement>('.buttonMiddle') ?? container;
+  for (const eventType of ['mousedown', 'mouseup', 'click'] as const) {
+    target.dispatchEvent(
+      new MouseEvent(eventType, { bubbles: true, cancelable: true, view: window }),
+    );
+  }
+}
+
+/**
+ * Find the FIRST <select> whose <option> list includes the given
+ * `optionValue`. Used to identify ambiguous Maxance selects whose names
+ * are JWT-encoded (e.g. the Conducteur tab's Profession dropdown — its
+ * name is opaque but it's the only select that has value "125"). Pair
+ * with `setSelectValue` to set it.
+ */
+export function findSelectByOptionValue(optionValue: string): HTMLSelectElement | null {
+  const selects = Array.from(document.querySelectorAll<HTMLSelectElement>('select'));
+  return selects.find((s) => Array.from(s.options).some((o) => o.value === optionValue)) ?? null;
+}
+
+/** Set `select.value = value`, dispatch input + change. Force-fires when
+ *  the select is already at value (Maxance's onchange no-ops on no-op set,
+ *  so we briefly clear to '' first to guarantee a real change event). */
+export function setSelectValue(select: HTMLSelectElement, value: string): void {
+  if (select.value === value) {
+    select.value = '';
+    select.dispatchEvent(new Event('input', { bubbles: true }));
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+  select.value = value;
+  select.dispatchEvent(new Event('input', { bubbles: true }));
+  select.dispatchEvent(new Event('change', { bubbles: true }));
+}
+
+/**
+ * Set a radio in the group whose ancestor chain contains `questionNeedle`
+ * (case-insensitive substring match). Pairs the radio with siblings by
+ * `name` then picks the one with `targetValue`. Dispatches click + change.
+ *
+ * Designed for Maxance's Conducteur tab where radio NAMES are JWT-encoded
+ * but each radio group sits in a layout row whose previous cell carries
+ * the French question text ("Souscripteur?", "Titulaire carte grise?",
+ * "...résiliation par votre assureur?", etc.).
+ */
+export function setRadioByQuestion(
+  questionNeedle: string,
+  targetValue: string,
+): { ok: true; groupName: string } | { ok: false; reason: string } {
+  const needle = normaliseLabel(questionNeedle);
+  const radios = Array.from(document.querySelectorAll<HTMLInputElement>('input[type=radio]'));
+  const seenNames = new Set<string>();
+  for (const r of radios) {
+    if (!r.name || seenNames.has(r.name)) continue;
+    seenNames.add(r.name);
+    // Walk up to find the nearest ancestor whose text contains the question.
+    let p: HTMLElement | null = r.parentElement;
+    let matched = false;
+    for (let k = 0; k < 6 && p; k += 1) {
+      if (normaliseLabel(p.textContent ?? '').includes(needle)) {
+        matched = true;
+        break;
+      }
+      p = p.parentElement;
+    }
+    if (!matched) continue;
+    const target = radios.find((x) => x.name === r.name && x.value === targetValue);
+    if (!target) return { ok: false, reason: `no_value_${targetValue}_in_group_${r.name}` };
+    target.checked = true;
+    target.dispatchEvent(new Event('click', { bubbles: true }));
+    target.dispatchEvent(new Event('change', { bubbles: true }));
+    return { ok: true, groupName: r.name };
+  }
+  return { ok: false, reason: 'no_radio_group_matched_needle' };
 }
 
 /**

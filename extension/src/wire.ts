@@ -139,6 +139,34 @@ export const QuotePreviewResponseSchema = z.object({
   durationMs: z.number().nonnegative(),
 });
 
+/**
+ * In-progress response from the content script signaling that it just
+ * clicked a control that triggers a top-frame navigation (M8.T8 phase 2e).
+ *
+ * The content script in the OLD page cannot complete the whole flow
+ * because Chrome destroys its JS context on navigation. Instead, it does
+ * as much as possible WITHIN the current page, then returns this
+ * response. The SW orchestrator awaits `chrome.webNavigation.onCompleted`
+ * for the same tab, then sends the SAME outer command again — the new
+ * page's freshly-injected content script picks up where the old one left
+ * off (using `detectCurrentScreen()` to figure out where it is).
+ *
+ * The orchestrator accumulates `screenshots` across iterations and only
+ * surfaces the final `quote.preview.ok` (or `error`) to the upstream
+ * caller — so the existing `runQuote()` surface on ExtensionClient does
+ * not need to change.
+ */
+export const QuotePreviewNavigatingResponseSchema = z.object({
+  id: z.string().uuid(),
+  kind: z.literal('quote.preview.navigating'),
+  /** Screen we were on when we triggered the navigation. */
+  fromScreen: z.string(),
+  /** What `detectCurrentScreen()` should report after the new page loads. */
+  expectedScreen: z.string(),
+  /** Screenshots captured during THIS advance iteration. SW concatenates. */
+  screenshots: z.array(ScreenshotSchema),
+});
+
 export const QuoteConfirmResponseSchema = z.object({
   id: z.string().uuid(),
   kind: z.literal('quote.confirm.ok'),
@@ -147,6 +175,15 @@ export const QuoteConfirmResponseSchema = z.object({
   screenshots: z.array(ScreenshotSchema),
   finalUrl: z.string().url(),
   durationMs: z.number().nonnegative(),
+});
+
+/** Mirror of QuotePreviewNavigatingResponseSchema for the confirm flow. */
+export const QuoteConfirmNavigatingResponseSchema = z.object({
+  id: z.string().uuid(),
+  kind: z.literal('quote.confirm.navigating'),
+  fromScreen: z.string(),
+  expectedScreen: z.string(),
+  screenshots: z.array(ScreenshotSchema),
 });
 
 /**
@@ -168,7 +205,9 @@ export const ResponseSchema = z.discriminatedUnion('kind', [
   PongResponseSchema,
   LoginEnsureResponseSchema,
   QuotePreviewResponseSchema,
+  QuotePreviewNavigatingResponseSchema,
   QuoteConfirmResponseSchema,
+  QuoteConfirmNavigatingResponseSchema,
   ErrorResponseSchema,
 ]);
 export type Response = z.infer<typeof ResponseSchema>;
