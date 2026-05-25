@@ -189,6 +189,30 @@ async function fillVehiculeTab(cmd: QuotePreviewCommand): Promise<void> {
   // vehiculeUsage, circulationZonier.key, + 2 jwt-blocked. No Profession.
   // It's set on the Devis tab in the confirm flow instead.
 
+  // CP triggers an AJAX cascade that populates <select name="circulationZonier.key">
+  // (the commune lookup). Maxance auto-selects the single matching option
+  // (e.g. "75011|75111|PARIS 11") only AFTER the AJAX response. If we click
+  // Suivant before that auto-selection lands, the form posts an empty
+  // circulationZonier.key and Maxance's server silently redirects back to
+  // the Proximéo home (no banner — the field is form-internal). This was
+  // the validerVehicule-loops-back bug observed in the phase-2e live run
+  // on 2026-05-25; root-caused by phase-2f MCP diagnostic on 2026-05-25:
+  // a 2s pause after CP fill let the zonier auto-select and Suivant landed
+  // cleanly on Conducteur. We poll for a non-empty value rather than fixed
+  // sleep so we cover slow-network cases without padding the happy path.
+  await waitFor<HTMLSelectElement>(
+    () => {
+      const z = document.querySelector<HTMLSelectElement>('select[name="circulationZonier.key"]');
+      return z && z.value && z.value.length > 0 ? z : null;
+    },
+    { label: 'await_zonier_populated', timeoutMs: 8_000 },
+  ).catch(() => {
+    // Best-effort: if zonier doesn't populate in 8s the click below will
+    // likely fail and the server bounce will surface, but we don't want to
+    // throw a tagged error here when the real failure mode is a server
+    // round-trip — let validerVehicule's outcome drive the diagnosis.
+  });
+
   await sleep(SETTLE_MS);
   // Maxance's Suivant button is a `<div id="validerVehicule"><div class="buttonMiddle">Suivant >></div>`
   // whose onclick fires on `mouseup` of .buttonMiddle. `clickByText` finds
