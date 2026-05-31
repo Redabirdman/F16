@@ -123,6 +123,34 @@ export type DevisFillAndSubmitResponse =
   | { kind: 'devis.ok'; log: string[] }
   | { kind: 'devis.err'; log: string[]; error: string; errorMsg?: string };
 
+/**
+ * Content → SW: "open a Maxance MDI popup via mdiWindNet.window() in the
+ * page's MAIN world".
+ *
+ * Phase-2g (Courrier reliability): `mdiWindNet` is a PAGE main-world global
+ * (set by Proximéo's host JS). The content script runs in the ISOLATED
+ * world (manifest content_scripts has no `world:'MAIN'`), so the earlier
+ * `openMdiWindow()` helper in iframe.ts — which read `window.mdiWindNet`
+ * from the isolated world — found it `undefined` on EVERY call, threw
+ * `maxance_iframe_mdiWindNet_unavailable`, and silently fell back to the
+ * flaky `clickByText('Envoyer par...')`. That fallback is the documented
+ * source of the `maxance_iframe_not_ready:courrier_popup_ready` timeouts.
+ * Routing the `mdiWindNet.window(url, null, opts)` call through
+ * chrome.scripting.executeScript({world:'MAIN'}) — the same proven path as
+ * click.main-world / devis.fill-and-submit-mw — lets it resolve against the
+ * page's real `mdiWindNet`. Same-origin iframe `contentDocument` reads
+ * (waitForIframeReady) stay in the content script: they work cross-world
+ * for same-origin frames.
+ */
+export interface OpenMdiWindowRequest {
+  kind: 'open.mdi-window';
+  url: string;
+  popupOptions: string;
+}
+
+/** SW → content: outcome of the main-world mdiWindNet.window() open. */
+export type OpenMdiWindowResponse = { kind: 'mdi.ok' } | { kind: 'mdi.err'; error: string };
+
 /** All possible inbound messages on the SW side. */
 export type SwInbound =
   | FlowOutcome
@@ -130,7 +158,8 @@ export type SwInbound =
   | ProgressForward
   | MainWorldClickRequest
   | ContactWidgetNouveauRequest
-  | DevisFillAndSubmitRequest;
+  | DevisFillAndSubmitRequest
+  | OpenMdiWindowRequest;
 
 /** All possible inbound messages on the content-script side. */
 export type ContentInbound = FlowInvocation;

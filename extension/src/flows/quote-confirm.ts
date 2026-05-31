@@ -52,7 +52,7 @@ import {
 } from '../dom.js';
 import {
   iframeQuerySelector,
-  openMdiWindow,
+  openMdiWindowMainWorld,
   waitForIframeElement,
   waitForIframeReady,
 } from '../iframe.js';
@@ -85,27 +85,59 @@ function extractDevisNumber(): string | null {
 }
 
 /**
- * Open the Courrier popup programmatically via mdiWindNet — skips the
- * "Envoyer par..." button click entirely. Falls back to clicking the
- * button if mdiWindNet isn't available (defensive).
+ * Open the Courrier popup programmatically via mdiWindNet, then wait for
+ * its iframe to populate.
+ *
+ * Phase-2g (Courrier reliability fix): the open now routes through
+ * `openMdiWindowMainWorld` (SW → chrome.scripting{world:'MAIN'}) because
+ * `mdiWindNet` is a page main-world global the isolated content script
+ * can't see. The previous direct `openMdiWindow()` call ALWAYS threw
+ * `maxance_iframe_mdiWindNet_unavailable` in the isolated world and fell
+ * back to the flaky `clickByText('Envoyer par...')` path — the documented
+ * source of the `maxance_iframe_not_ready:courrier_popup_ready` timeouts.
+ *
+ * Robustness: try the main-world open then wait for readiness; on the
+ * first failure, fall back to the Envoyer-par button click and wait again.
+ * Each open gets its own readiness wait so a slow first open doesn't eat
+ * the fallback's budget.
+ *
+ * NOTE: NOT yet live-verified (Maxance portal was closed when this landed
+ * — see project_m8_t8_progress.md). Confirm against the real portal before
+ * flipping dryRun=false.
  */
 async function openCourrierPopup(cmd: QuoteConfirmCommand): Promise<void> {
   await reportProgress(cmd.id, 'courrier_popup_open');
+  const popupUrl = `${COURRIER_POPUP_URL_PATH}?PAGE=0000501000&FORWARD=/preparerLettre.do?ligneSelected=DR`;
+  const popupOpts = 'id:nvCourrier;title:Gestion des courriers;width:600;height:600;';
+
+  // Attempt 1: main-world mdiWindNet.window().
   try {
-    openMdiWindow(
-      `${COURRIER_POPUP_URL_PATH}?PAGE=0000501000&FORWARD=/preparerLettre.do?ligneSelected=DR`,
-      'id:nvCourrier;title:Gestion des courriers;width:600;height:600;',
+    await openMdiWindowMainWorld(popupUrl, popupOpts);
+    await waitForIframeReady(COURRIER_POPUP_IFRAME_ID, {
+      timeoutMs: 20_000,
+      minBodyTextLength: 50,
+      label: 'courrier_popup_ready',
+    });
+    await reportProgress(cmd.id, 'courrier_popup_ready_mw');
+    return;
+  } catch (e) {
+    await reportProgress(
+      cmd.id,
+      'courrier_popup_mw_failed',
+      e instanceof Error ? e.message : String(e),
     );
-  } catch {
-    // Fallback: click [Envoyer par...] for Devis moto. There are two
-    // such buttons (Devis moto + Fiche IPID Moto); we want the first one.
-    await clickByText('Envoyer par...', { label: 'envoyer_par', timeoutMs: 10_000 });
   }
+
+  // Attempt 2 (fallback): click [Envoyer par...] for Devis moto. There are
+  // two such buttons (Devis moto + Fiche IPID Moto); clickByText picks the
+  // smallest-area match so we get the actual button, not an outer wrapper.
+  await clickByText('Envoyer par...', { label: 'envoyer_par', timeoutMs: 10_000 });
   await waitForIframeReady(COURRIER_POPUP_IFRAME_ID, {
     timeoutMs: 20_000,
     minBodyTextLength: 50,
     label: 'courrier_popup_ready',
   });
+  await reportProgress(cmd.id, 'courrier_popup_ready_fallback');
 }
 
 /**

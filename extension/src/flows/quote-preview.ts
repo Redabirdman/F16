@@ -73,6 +73,7 @@ const SETTLE_MS = 600;
  * same .do endpoint for multiple tabs).
  */
 function detectCurrentScreen():
+  | 'sso_transient'
   | 'vehicle_picker'
   | 'vehicule_tab'
   | 'conducteur_tab'
@@ -105,6 +106,19 @@ function detectCurrentScreen():
   // and Garanties share /souscriptionNaviguerOngletVehicule.do; content
   // swaps in-place after Conducteur's Suivant fires).
   const path = location.pathname;
+
+  // /ConnexionCourtierSSOCallback.do = the OAuth2 authorization-code
+  // callback Maxance redirects THROUGH during SSO (carries ?code=&state=).
+  // Normally it immediately redirects to /accueil.do, but it can wedge
+  // (observed live 2026-05-31: the tab sat on
+  // ConnexionCourtierSSOCallback.do?code=… and the flow died with
+  // "advance loop exhausted on screen=unknown"). Treat it as a transient
+  // — the loop self-navigates to /accueil.do to re-enter cleanly. Must be
+  // checked BEFORE the picker regex (whose `$` anchor wouldn't match the
+  // "Callback" suffix anyway, but order makes the intent explicit).
+  if (/\/ConnexionCourtierSSOCallback\.do$/i.test(path)) {
+    return 'sso_transient';
+  }
 
   // /accueil.do (or /ConnexionCourtierSSO.do landing) = vehicle picker home.
   if (/\/(accueil|ConnexionCourtierSSO)\.do$/i.test(path)) {
@@ -527,6 +541,21 @@ export async function runQuotePreview(cmd: QuotePreviewCommand): Promise<Respons
     for (let iter = 0; iter < 4; iter += 1) {
       const screen = detectCurrentScreen();
       await reportProgress(cmd.id, 'advance_iter', `screen=${screen}`);
+
+      if (screen === 'sso_transient') {
+        // Wedged on the SSO authorization-code callback. The page won't
+        // advance on its own (the one-shot code is already spent on reload).
+        // Re-enter the Proximéo home, which silently re-auths if the Auth0
+        // cookie is still valid (~30d) or surfaces a login screen otherwise
+        // (handled downstream as an unknown-screen timeout → login.ensure
+        // human escalation). Navigating ends this content script; the SW
+        // orchestrator awaits webNavigation.onCompleted and re-invokes on
+        // the freshly-loaded page.
+        await shoot('sso_transient_pre');
+        await reportProgress(cmd.id, 'sso_recover_navigate_home', location.href);
+        location.href = '/Proximeo/accueil.do';
+        return navigating('sso_transient', 'vehicle_picker');
+      }
 
       if (screen === 'bridge_modal') {
         await shoot('bridge_modal_pre');

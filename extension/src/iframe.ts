@@ -119,3 +119,33 @@ export function openMdiWindow(url: string, popupOptions: string): void {
   }
   w.mdiWindNet.window(url, null, popupOptions);
 }
+
+/**
+ * Open a Maxance MDI popup via the page's MAIN-world `mdiWindNet.window`.
+ *
+ * Phase-2g (Courrier reliability): `openMdiWindow` above runs in the
+ * content script's ISOLATED world, where `window.mdiWindNet` is undefined
+ * (it's a page main-world global) — so it always threw and the caller fell
+ * back to the flaky `clickByText('Envoyer par...')`. This variant routes
+ * the call through the SW's chrome.scripting{world:'MAIN'} handler (the
+ * same proven path as clickMaxanceButton), so it resolves the real global.
+ *
+ * Throws `maxance_iframe_mdi_open_failed:<reason>` on failure so the
+ * caller can decide whether to retry or fall back.
+ */
+export async function openMdiWindowMainWorld(url: string, popupOptions: string): Promise<void> {
+  const msg: import('./content-protocol.js').OpenMdiWindowRequest = {
+    kind: 'open.mdi-window',
+    url,
+    popupOptions,
+  };
+  const resp = (await chrome.runtime.sendMessage(msg)) as
+    | { kind: 'mdi.ok' }
+    | { kind: 'mdi.err'; error: string }
+    | undefined;
+  if (!resp || resp.kind !== 'mdi.ok') {
+    throw new Error(
+      `maxance_iframe_mdi_open_failed:${resp?.kind === 'mdi.err' ? resp.error : 'no_response'}`,
+    );
+  }
+}

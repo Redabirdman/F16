@@ -400,7 +400,9 @@ chrome.runtime.onMessage.addListener(
         | { kind: 'click.ok' }
         | { kind: 'click.err'; error: string }
         | { kind: 'devis.ok'; log: string[] }
-        | { kind: 'devis.err'; log: string[]; error: string; errorMsg?: string },
+        | { kind: 'devis.err'; log: string[]; error: string; errorMsg?: string }
+        | { kind: 'mdi.ok' }
+        | { kind: 'mdi.err'; error: string },
     ) => void,
   ) => {
     if (message.kind === 'capture_screenshot') {
@@ -850,6 +852,51 @@ chrome.runtime.onMessage.addListener(
         .catch((err: unknown) => {
           sendResponse({
             kind: 'click.err',
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
+      return true;
+    }
+    if (message.kind === 'open.mdi-window') {
+      // Phase-2g (Courrier reliability): call Proximéo's `mdiWindNet.window`
+      // in the page's MAIN world. The content script's isolated-world
+      // `window` has no `mdiWindNet`, so the previous iframe.ts helper
+      // always threw and fell back to the flaky Envoyer-par click. Routing
+      // through chrome.scripting{world:'MAIN'} resolves the real global —
+      // same pattern as click.main-world / devis.fill-and-submit-mw.
+      const tabId = sender.tab?.id;
+      if (tabId === undefined) {
+        sendResponse({ kind: 'mdi.err', error: 'no_sender_tab' });
+        return false;
+      }
+      void chrome.scripting
+        .executeScript({
+          target: { tabId },
+          world: 'MAIN',
+          func: (url: string, popupOptions: string) => {
+            const w = window as unknown as {
+              mdiWindNet?: { window?: (u: string, cb: unknown, o: string) => void };
+            };
+            if (!w.mdiWindNet || typeof w.mdiWindNet.window !== 'function') {
+              return { ok: false, error: 'mdiWindNet_unavailable' };
+            }
+            try {
+              w.mdiWindNet.window(url, null, popupOptions);
+              return { ok: true };
+            } catch (e) {
+              return { ok: false, error: e instanceof Error ? e.message : String(e) };
+            }
+          },
+          args: [message.url, message.popupOptions],
+        })
+        .then((results) => {
+          const r = results[0]?.result as { ok: boolean; error?: string } | undefined;
+          if (r?.ok) sendResponse({ kind: 'mdi.ok' });
+          else sendResponse({ kind: 'mdi.err', error: r?.error ?? 'unknown' });
+        })
+        .catch((err: unknown) => {
+          sendResponse({
+            kind: 'mdi.err',
             error: err instanceof Error ? err.message : String(err),
           });
         });
