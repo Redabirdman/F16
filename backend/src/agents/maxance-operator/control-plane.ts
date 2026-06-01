@@ -83,7 +83,9 @@ const SubscriberSchema = z.object({
     .optional(),
 });
 
-const ConfirmBodySchema = SubscriberSchema.and(z.object({ _dryRun: z.boolean().optional() }));
+const ConfirmBodySchema = SubscriberSchema.and(
+  z.object({ _dryRun: z.boolean().optional(), _exerciseCourrier: z.boolean().optional() }),
+);
 
 /** Build an ExtensionQuoteParams from the parsed body, omitting undefined optionals. */
 function toQuoteParams(parsed: z.infer<typeof QuoteParamsSchema>): ExtensionQuoteParams {
@@ -208,9 +210,11 @@ export function buildExtensionControlPlane(opts: BuildControlPlaneOptions): Hono
     // body. The extension itself stops one click before "Envoyer" when
     // dryRun=true (M8.T6 contract), so this is the second safety on top.
     const dryRun = parse.data._dryRun ?? true;
+    const exerciseCourrier = parse.data._exerciseCourrier ?? false;
     try {
       const res = await opts.client.confirmQuote('maxance-default', toSubscriber(parse.data), {
         dryRun,
+        exerciseCourrier,
       });
       return c.json(res, 200);
     } catch (err) {

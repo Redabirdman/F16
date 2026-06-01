@@ -370,7 +370,7 @@ export class ExtensionClient {
   async confirmQuote(
     _sessionName: string,
     subscriber: ExtensionSubscriberInfo,
-    opts: { dryRun?: boolean; timeoutMs?: number } = {},
+    opts: { dryRun?: boolean; timeoutMs?: number; exerciseCourrier?: boolean } = {},
   ): Promise<ConfirmQuoteResult> {
     void _sessionName;
     const dryRun = opts.dryRun ?? true;
@@ -392,6 +392,7 @@ export class ExtensionClient {
         ...(subscriber.profession !== undefined ? { profession: subscriber.profession } : {}),
       },
       dryRun,
+      ...(opts.exerciseCourrier !== undefined ? { exerciseCourrier: opts.exerciseCourrier } : {}),
       ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
     };
     const resp = await this.send(cmd, opts.timeoutMs);

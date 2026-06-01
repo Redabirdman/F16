@@ -105,16 +105,114 @@ function extractDevisNumber(): string | null {
  * — see project_m8_t8_progress.md). Confirm against the real portal before
  * flipping dryRun=false.
  */
-async function openCourrierPopup(cmd: QuoteConfirmCommand): Promise<void> {
+/**
+ * Phase-2g diagnostic: snapshot the live DOM right after a Courrier open
+ * attempt so the WS log reveals what `mdiWindNet.window()` actually
+ * produced (iframe inventory, candidate IDs, same-origin readability).
+ * Runs in the isolated content script — same-origin iframe enumeration +
+ * contentDocument reads work cross-world. Cheap; emitted via reportProgress.
+ */
+function dumpCourrierDom(): string {
+  // Recursively walk same-origin frames starting at #window_nvCourrier so we
+  // can map the full Courrier frame tree (the content renders several frames
+  // deep, not directly in window_nvCourrier as the legacy code assumed).
+  type FrameInfo = {
+    path: string;
+    id: string;
+    src: string;
+    bodyLen: number;
+    tags: string;
+    bodyText: string;
+  };
+  const out: (FrameInfo & { inputs?: string[]; clicks?: string[] })[] = [];
+  const root = document.getElementById('window_nvCourrier') as HTMLIFrameElement | null;
+  const walk = (frameEl: HTMLIFrameElement, path: string, depth: number): void => {
+    if (depth > 4 || out.length > 16) return;
+    let idoc: Document | null = null;
+    let bodyLen = -1;
+    let tags = '';
+    let bodyText = '';
+    let inputs: string[] | undefined;
+    let clicks: string[] | undefined;
+    try {
+      idoc = frameEl.contentDocument;
+      bodyLen = idoc?.body?.innerText?.length ?? -1;
+      bodyText = (idoc?.body?.innerText ?? '').replace(/\s+/g, ' ').slice(0, 160);
+      if (idoc) {
+        tags = `sel=${idoc.querySelectorAll('select').length} inp=${idoc.querySelectorAll('input').length} a=${idoc.querySelectorAll('a').length} tr=${idoc.querySelectorAll('tr').length} form=${idoc.querySelectorAll('form').length} btn=${idoc.querySelectorAll('button,input[type=submit],input[type=button]').length} ifr=${idoc.querySelectorAll('iframe').length}`;
+        // Capture form fields + clickables for frames that have a form/inputs
+        // (these are the candidate composer frames).
+        const allInputs = Array.from(
+          idoc.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>(
+            'input, textarea, select',
+          ),
+        );
+        if (allInputs.length) {
+          inputs = allInputs.slice(0, 14).map((el) => {
+            const type = el instanceof HTMLInputElement ? el.type : el.tagName.toLowerCase();
+            return `${type}:${el.getAttribute('name') ?? '(noname)'}=${String((el as HTMLInputElement).value ?? '').slice(0, 30)}`;
+          });
+        }
+        const clickEls = Array.from(
+          idoc.querySelectorAll<HTMLElement>(
+            'a, img[onclick], input[type=submit], input[type=button], button, .buttonMiddle, [onclick]',
+          ),
+        );
+        if (clickEls.length) {
+          clicks = clickEls.slice(0, 16).map((el) => {
+            const txt = (el.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 28);
+            const alt = el.getAttribute('alt') ?? '';
+            const val = (el as HTMLInputElement).value ?? '';
+            const href = el.getAttribute('href') ?? '';
+            const oc = (el.getAttribute('onclick') ?? '').slice(0, 50);
+            return `<${el.tagName.toLowerCase()}> t="${txt}" alt="${alt}" v="${val}" href="${href.slice(0, 30)}" oc="${oc}"`;
+          });
+        }
+      }
+    } catch {
+      tags = 'CROSS_ORIGIN_OR_UNREADABLE';
+    }
+    out.push({
+      path,
+      id: frameEl.id || '(noid)',
+      src: (frameEl.getAttribute('src') ?? '').slice(0, 110),
+      bodyLen,
+      tags,
+      bodyText,
+      ...(inputs ? { inputs } : {}),
+      ...(clicks ? { clicks } : {}),
+    });
+    if (idoc) {
+      const kids = Array.from(idoc.querySelectorAll('iframe, frame')) as HTMLIFrameElement[];
+      kids.forEach((kid, i) => walk(kid, `${path}>${kid.id || `f${i}`}`, depth + 1));
+    }
+  };
+  if (root) walk(root, 'window_nvCourrier', 0);
+  return JSON.stringify({
+    url: location.href,
+    hasWindowNvCourrier: Boolean(root),
+    frameTree: out,
+  });
+}
+
+async function openCourrierPopup(cmd: QuoteConfirmCommand, devisNumber: string): Promise<void> {
   await reportProgress(cmd.id, 'courrier_popup_open');
-  const popupUrl = `${COURRIER_POPUP_URL_PATH}?PAGE=0000501000&FORWARD=/preparerLettre.do?ligneSelected=DR`;
+  // Phase-2g fix: pass the REAL devis number in ligneSelected (was the literal
+  // placeholder "DR", which made Maxance load an empty courrier preview).
+  const popupUrl = `${COURRIER_POPUP_URL_PATH}?PAGE=0000501000&FORWARD=/preparerLettre.do?ligneSelected=${encodeURIComponent(devisNumber)}`;
   const popupOpts = 'id:nvCourrier;title:Gestion des courriers;width:600;height:600;';
 
   // Attempt 1: main-world mdiWindNet.window().
   try {
     await openMdiWindowMainWorld(popupUrl, popupOpts);
+    // Phase-2g diagnostic: dump at 12s — the nvCourrier frame loads a Struts
+    // MW_TOKEN form that auto-submits (POST-redirect), so the real composer
+    // content only materialises after the submit round-trip. 12s + the two
+    // readiness waits below stays under the 60s per-advance budget.
+    await sleep(12_000);
+    await reportProgress(cmd.id, 'courrier_dom_dump', dumpCourrierDom());
     await waitForIframeReady(COURRIER_POPUP_IFRAME_ID, {
-      timeoutMs: 20_000,
+      timeoutMs: 10_000,
       minBodyTextLength: 50,
       label: 'courrier_popup_ready',
     });
@@ -131,9 +229,9 @@ async function openCourrierPopup(cmd: QuoteConfirmCommand): Promise<void> {
   // Attempt 2 (fallback): click [Envoyer par...] for Devis moto. There are
   // two such buttons (Devis moto + Fiche IPID Moto); clickByText picks the
   // smallest-area match so we get the actual button, not an outer wrapper.
-  await clickByText('Envoyer par...', { label: 'envoyer_par', timeoutMs: 10_000 });
+  await clickByText('Envoyer par...', { label: 'envoyer_par', timeoutMs: 8_000 });
   await waitForIframeReady(COURRIER_POPUP_IFRAME_ID, {
-    timeoutMs: 20_000,
+    timeoutMs: 12_000,
     minBodyTextLength: 50,
     label: 'courrier_popup_ready',
   });
@@ -609,16 +707,35 @@ export async function runQuoteConfirm(cmd: QuoteConfirmCommand): Promise<Respons
         }
         await reportProgress(cmd.id, 'devis_number_extracted', devisNumber);
 
-        // Phase-2d-confirm-9 (2026-05-25 PM): for dryRun=true the test
-        // goal is "did we create a devis without sending an email" —
-        // achieved as soon as devisNumber is extracted. The Courrier
-        // popup (steps 6-9 below) is the email-send setup; opening it
-        // sometimes times out (`maxance_iframe_not_ready`) even on a
-        // successful devis. Skip the popup work in dryRun and return
-        // ok with devisNumber. Real-mode (dryRun=false) still runs the
-        // full popup + Envoyer path. Future improvement: make Courrier
-        // popup loading more robust (retry / different open mechanism).
+        // Phase-2g (Courrier reliability): restore the M8.T6 dryRun
+        // contract — open the Courrier popup + fill the mail composer, then
+        // STOP one click before Envoyer. Phase-2d-confirm-9 had skipped the
+        // popup in dryRun because it was flaky; the root cause (mdiWindNet
+        // read from the isolated world) is now fixed (commit e203edd), so we
+        // exercise it again to verify the open without ever sending an email.
+        // BEST-EFFORT: the devis is already created, so a popup failure must
+        // NOT fail the dryRun — we record the outcome in courrierDryRunStatus
+        // and still return ok. This both verifies the fix AND preserves the
+        // robust "devis created" success path.
         if (cmd.dryRun) {
+          // Default fast path: devis created, return immediately. Only
+          // exercise the Courrier popup when explicitly opted-in via
+          // exerciseCourrier (the composer is a multi-stage Struts frameset
+          // still being reverse-engineered — keep normal dryRun fast).
+          let courrierDryRunStatus = 'skipped';
+          if (cmd.exerciseCourrier) {
+            courrierDryRunStatus = 'not_attempted';
+            try {
+              await openCourrierPopup(cmd, devisNumber);
+              await shoot('courrier_popup_open');
+              await fillMailComposer(cmd, devisNumber);
+              await shoot('mail_composer_filled');
+              courrierDryRunStatus = 'opened_and_filled_no_send';
+            } catch (e) {
+              courrierDryRunStatus = `failed:${(e instanceof Error ? e.message : String(e)).slice(0, 160)}`;
+            }
+            await reportProgress(cmd.id, 'dryrun_courrier_status', courrierDryRunStatus);
+          }
           await reportProgress(cmd.id, 'dryrun_stopped_after_devis_created', devisNumber);
           return QuoteConfirmResponseSchema.parse({
             id: cmd.id,
@@ -628,11 +745,12 @@ export async function runQuoteConfirm(cmd: QuoteConfirmCommand): Promise<Respons
             screenshots,
             finalUrl: location.href,
             durationMs: Date.now() - t0,
+            courrierDryRunStatus,
           });
         }
 
         // 6+7. Open Courrier popup (same-origin iframe — stays in this content script).
-        await openCourrierPopup(cmd);
+        await openCourrierPopup(cmd, devisNumber);
         await shoot('courrier_popup_open');
 
         // 8. Fill mail composer.

@@ -96,6 +96,15 @@ export const QuoteConfirmCommandSchema = z.object({
   subscriber: SubscriberInfoSchema,
   /** True = stop before final Envoyer click. False = send the real email. */
   dryRun: z.boolean(),
+  /**
+   * Phase-2g diagnostic opt-in. When dryRun=true AND this is true, the flow
+   * also exercises the Courrier popup (open + dump + best-effort fill) and
+   * STOPS before Envoyer — for verifying/mapping the popup without sending.
+   * Default/absent = skip the popup in dryRun (fast "devis created" path).
+   * The Courrier composer is a multi-stage Struts frameset still being
+   * reverse-engineered, so it's off by default to keep normal dryRun fast.
+   */
+  exerciseCourrier: z.boolean().optional(),
   timeoutMs: z.number().int().positive().optional(),
 });
 
@@ -175,6 +184,14 @@ export const QuoteConfirmResponseSchema = z.object({
   screenshots: z.array(ScreenshotSchema),
   finalUrl: z.string().url(),
   durationMs: z.number().nonnegative(),
+  /**
+   * Phase-2g: in dryRun the flow opens the Courrier popup + fills the mail
+   * composer then STOPS before Envoyer (M8.T6 contract). This reports that
+   * best-effort outcome (e.g. 'opened_and_filled_no_send' or 'failed:…')
+   * without failing the dryRun — the devis is already created. Absent on
+   * real-mode (dryRun=false) responses.
+   */
+  courrierDryRunStatus: z.string().optional(),
 });
 
 /** Mirror of QuotePreviewNavigatingResponseSchema for the confirm flow. */
