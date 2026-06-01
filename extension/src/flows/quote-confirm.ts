@@ -159,13 +159,13 @@ function dumpCourrierDom(): string {
           ),
         );
         if (clickEls.length) {
-          clicks = clickEls.slice(0, 16).map((el) => {
-            const txt = (el.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 28);
+          clicks = clickEls.slice(0, 22).map((el) => {
+            const txt = (el.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 36);
             const alt = el.getAttribute('alt') ?? '';
             const val = (el as HTMLInputElement).value ?? '';
             const href = el.getAttribute('href') ?? '';
-            const oc = (el.getAttribute('onclick') ?? '').slice(0, 50);
-            return `<${el.tagName.toLowerCase()}> t="${txt}" alt="${alt}" v="${val}" href="${href.slice(0, 30)}" oc="${oc}"`;
+            const oc = (el.getAttribute('onclick') ?? '').slice(0, 220);
+            return `<${el.tagName.toLowerCase()}> t="${txt}" alt="${alt}" v="${val}" href="${href.slice(0, 200)}" oc="${oc}"`;
           });
         }
       }
@@ -192,6 +192,204 @@ function dumpCourrierDom(): string {
     url: location.href,
     hasWindowNvCourrier: Boolean(root),
     frameTree: out,
+  });
+}
+
+/**
+ * Decision 2026-06-01 (Ridaa): send the devis to the customer via Maxance's
+ * OWN Courrier email (BCC Contact@assuryalconseil.fr); Gmail-PDF pull is V2.
+ * Open the REAL email-management popup using the edition page's own onclick
+ * (id:nvCourrier, listerModeleLettreAutorise.do?TYPE=Devis&PAGE=0000502000 —
+ * NOT the impressionDR print button), then map the nested composer frames
+ * (template list, recipient/destinataire, Cc/Cci-BCC, objet, Envoyer) via the
+ * shared dumpCourrierDom walker so we can build the fill+BCC+send.
+ */
+async function probeEmailComposer(cmd: QuoteConfirmCommand): Promise<string> {
+  const candidates = Array.from(document.querySelectorAll<HTMLElement>('[onclick]')).filter((el) =>
+    /listerModeleLettreAutorise|nvCourrier|courrier/i.test(el.getAttribute('onclick') ?? ''),
+  );
+  const ctrl =
+    candidates.find((el) => {
+      const oc = el.getAttribute('onclick') ?? '';
+      return /id:\s*nvCourrier/i.test(oc) && /PAGE=0000502000|TYPE=Devis/i.test(oc);
+    }) ?? candidates[0];
+  if (!ctrl) {
+    return JSON.stringify({ error: 'no_nvCourrier_email_control' });
+  }
+  const oc = ctrl.getAttribute('onclick') ?? '';
+  const m = /mdiWindNet\.window\(\s*'([^']+)'\s*,\s*[^,]+,\s*'([^']*)'/.exec(oc);
+  if (!m || !m[1]) return JSON.stringify({ error: 'onclick_parse_failed', oc: oc.slice(0, 200) });
+  const url = m[1];
+  const opts = m[2] ?? '';
+  try {
+    await openMdiWindowMainWorld(url, opts);
+  } catch (e) {
+    return JSON.stringify({
+      error: 'open_failed',
+      detail: e instanceof Error ? e.message : String(e),
+      url,
+      opts,
+    });
+  }
+  await sleep(7_000); // let the courrier list frameset load
+  // Step 2: open the AD (Accompagnement Devis) compose window — this is where
+  // the recipient/email/BCC/objet/Envoyer fields live. The list page links
+  // use openWindows('preparerLettre.do?ligneSelected=AD', label); we replay
+  // the underlying mdiWindNet open from the top main world (same session).
+  let adOpen = 'not_attempted';
+  try {
+    await openMdiWindowMainWorld(
+      'preparerLettre.do?ligneSelected=AD',
+      'id:preparerAD; title: Courrier; width: 700; height: 750;',
+    );
+    adOpen = 'ok';
+  } catch (e) {
+    adOpen = `err:${e instanceof Error ? e.message : String(e)}`;
+  }
+  await sleep(10_000); // let the compose window + its frameset load
+  // Walk ALL popup frames (window_*) so we capture both the list popup and
+  // the AD compose window, with inputs + clickables per frame.
+  type FI = {
+    path: string;
+    src: string;
+    bodyLen: number;
+    tags: string;
+    bodyText: string;
+    inputs?: string[];
+    clicks?: string[];
+  };
+  const frames: FI[] = [];
+  const walkAll = (doc: Document, path: string, depth: number): void => {
+    if (depth > 6 || frames.length > 24) return;
+    Array.from(doc.querySelectorAll('iframe, frame')).forEach((f, i) => {
+      const fe = f as HTMLIFrameElement;
+      const fp = `${path}>${fe.id || `f${i}`}`;
+      let idoc: Document | null = null;
+      let bodyLen = -1;
+      let tags = '';
+      let bodyText = '';
+      let inputs: string[] | undefined;
+      let clicks: string[] | undefined;
+      try {
+        idoc = fe.contentDocument;
+        bodyLen = idoc?.body?.innerText?.length ?? -1;
+        bodyText = (idoc?.body?.innerText ?? '').replace(/\s+/g, ' ').slice(0, 140);
+        if (idoc) {
+          tags = `sel=${idoc.querySelectorAll('select').length} inp=${idoc.querySelectorAll('input').length} a=${idoc.querySelectorAll('a').length} ta=${idoc.querySelectorAll('textarea').length} form=${idoc.querySelectorAll('form').length} ifr=${idoc.querySelectorAll('iframe').length}`;
+          // Selective: drop the ~190 hidden template tags. Keep selects,
+          // textareas, and inputs whose name hints at recipient/channel/BCC/
+          // subject (email, courriel, mail, cci, copie, destinat, objet,
+          // envoi, canal, mode, choix, adr).
+          const relevant =
+            /mail|courriel|cci|copie|destinat|objet|envoi|canal|mode|choix|adr|email|telecopie|fax/i;
+          const fields = Array.from(
+            idoc.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>(
+              'input, textarea, select',
+            ),
+          ).filter((el) => {
+            const tag = el.tagName.toLowerCase();
+            if (tag === 'select' || tag === 'textarea') return true;
+            if ((el as HTMLInputElement).type === 'hidden') {
+              return relevant.test(el.getAttribute('name') ?? '');
+            }
+            return true;
+          });
+          if (fields.length) {
+            inputs = fields.slice(0, 30).map((el) => {
+              const tag = el.tagName.toLowerCase();
+              const type = el instanceof HTMLInputElement ? el.type : tag;
+              let extra = '';
+              if (el instanceof HTMLSelectElement) {
+                extra = `[${Array.from(el.options)
+                  .slice(0, 6)
+                  .map((o) => o.value)
+                  .join('|')}]`;
+              }
+              return `${type}:${el.getAttribute('name') ?? '(noname)'}=${String((el as HTMLInputElement).value ?? '').slice(0, 40)}${extra}`;
+            });
+          }
+          // Clickables that look like send/channel/print actions.
+          const sendRe =
+            /envoy|valid|email|courriel|imprim|envoi|annul|fermer|suivant|\bok\b|mail|post/i;
+          const cl = Array.from(
+            idoc.querySelectorAll<HTMLElement>(
+              'a, button, input[type=submit], input[type=button], .buttonMiddle, [onclick]',
+            ),
+          ).filter((el) => {
+            const t = `${el.textContent ?? ''} ${(el as HTMLInputElement).value ?? ''} ${el.getAttribute('onclick') ?? ''} ${el.getAttribute('title') ?? ''} ${el.getAttribute('alt') ?? ''}`;
+            return sendRe.test(t);
+          });
+          if (cl.length) {
+            clicks = cl.slice(0, 16).map((el) => {
+              const txt = (el.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 30);
+              const v = (el as HTMLInputElement).value ?? '';
+              return `<${el.tagName.toLowerCase()}> t="${txt}" v="${v}" oc="${(el.getAttribute('onclick') ?? '').slice(0, 90)}"`;
+            });
+          }
+        }
+      } catch {
+        tags = 'CROSS_ORIGIN';
+      }
+      frames.push({
+        path: fp,
+        src: (fe.getAttribute('src') ?? '').slice(0, 110),
+        bodyLen,
+        tags,
+        bodyText,
+        ...(inputs ? { inputs } : {}),
+        ...(clicks ? { clicks } : {}),
+      });
+      if (idoc) walkAll(idoc, fp, depth + 1);
+    });
+  };
+  walkAll(document, 'top', 0);
+  const popupIds = Array.from(document.querySelectorAll('iframe[id^="window_"]')).map(
+    (f) => (f as HTMLElement).id,
+  );
+  const adFrames = frames.filter((f) => /preparerAD/i.test(f.path));
+  const composeFrame = adFrames.find((f) => /preparerAD>preparerAD/.test(f.path)) ?? adFrames[1];
+  // Emit fields + buttons as SEPARATE small events (the combined dump exceeds
+  // the WS log line cap and truncates).
+  await reportProgress(cmd.id, 'ad_fields', JSON.stringify(composeFrame?.inputs ?? []));
+  await reportProgress(cmd.id, 'ad_buttons', JSON.stringify(composeFrame?.clicks ?? []));
+  // Explicit BCC hunt across ALL inputs (incl. hidden) in the compose frame's
+  // document — Maxance French BCC = "Cci"; CC = "Cc"/"copie".
+  let bcc: string[] = [];
+  try {
+    const cw = document.getElementById('window_preparerAD') as HTMLIFrameElement | null;
+    const findDeep = (doc: Document | null | undefined, depth: number): Element[] => {
+      if (!doc || depth > 4) return [];
+      let acc = Array.from(doc.querySelectorAll('input,select,textarea,label,td,th'));
+      for (const fr of Array.from(doc.querySelectorAll('iframe,frame'))) {
+        try {
+          acc = acc.concat(findDeep((fr as HTMLIFrameElement).contentDocument, depth + 1));
+        } catch {
+          /* skip */
+        }
+      }
+      return acc;
+    };
+    bcc = findDeep(cw?.contentDocument, 0)
+      .filter((el) =>
+        /cci|copie|bcc|cache|invisible|\bcc\b/i.test(
+          `${el.getAttribute('name') ?? ''} ${el.textContent ?? ''}`,
+        ),
+      )
+      .slice(0, 12)
+      .map(
+        (el) =>
+          `${el.tagName.toLowerCase()}:${el.getAttribute('name') ?? (el.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 40)}`,
+      );
+  } catch {
+    /* skip */
+  }
+  await reportProgress(cmd.id, 'ad_bcc_search', JSON.stringify(bcc));
+  return JSON.stringify({
+    listUrl: url,
+    adOpen,
+    popupIds,
+    composeTags: adFrames.map((f) => `${f.path} ${f.tags}`),
+    composeText: composeFrame?.bodyText ?? '',
   });
 }
 
@@ -724,15 +922,15 @@ export async function runQuoteConfirm(cmd: QuoteConfirmCommand): Promise<Respons
           // still being reverse-engineered — keep normal dryRun fast).
           let courrierDryRunStatus = 'skipped';
           if (cmd.exerciseCourrier) {
+            // Option B discovery: probe the edition page for the real devis
+            // PDF mechanism (read-only, no popup). Replaces the abandoned
+            // Courrier-email-popup exercise.
             courrierDryRunStatus = 'not_attempted';
             try {
-              await openCourrierPopup(cmd, devisNumber);
-              await shoot('courrier_popup_open');
-              await fillMailComposer(cmd, devisNumber);
-              await shoot('mail_composer_filled');
-              courrierDryRunStatus = 'opened_and_filled_no_send';
+              await reportProgress(cmd.id, 'email_composer_probe', await probeEmailComposer(cmd));
+              courrierDryRunStatus = 'email_composer_probed';
             } catch (e) {
-              courrierDryRunStatus = `failed:${(e instanceof Error ? e.message : String(e)).slice(0, 160)}`;
+              courrierDryRunStatus = `probe_failed:${(e instanceof Error ? e.message : String(e)).slice(0, 160)}`;
             }
             await reportProgress(cmd.id, 'dryrun_courrier_status', courrierDryRunStatus);
           }
