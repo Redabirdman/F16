@@ -1,38 +1,39 @@
 /**
- * quote.confirm flow — V1 Chrome-extension Maxance driver.
+ * quote.confirm flow — V1 Chrome-extension Maxance driver. **M8 COMPLETE,
+ * live-verified 2026-06-03** (real devis emailed to the customer with PDF).
  *
- * Replicates the M8.T6 Stagehand step planner using vanilla DOM ops +
- * same-origin iframe traversal. The M8.T8 live investigation proved
- * #window_nvCourrier is a same-origin iframe — no coordinate clicks
- * needed.
+ * Pre-condition: caller has just received a successful QuotePreviewOk on the
+ * same tab — we're on the Garanties tab with a price.
  *
- * Pre-condition: caller has just received a successful QuotePreviewOk
- * on the same tab. We're sitting on the Garanties tab with a price.
+ * Flow (SW orchestrates across the top-frame navigations):
+ *   1. devis_tab_pre  → click "Valider devis" (clickMaxanceButton, main-world
+ *      mouse-event dispatch) → navigates to the Devis form.
+ *   2. devis_form_open → fill the whole Devis subscriber form + commit the
+ *      phone/email contact widgets + click OK, all in ONE main-world bundle
+ *      (devisFillAndSubmitMainWorld) → navigates to Edition à imprimer.
+ *   3. edition_imprimer → extract devisNumber. Then deliver the devis email:
+ *        a. openDevisMotoCourrier(): replay the edition page's OWN
+ *           "Envoyer par… (Devis moto)" onclick (id:impressionDR) via
+ *           main-world mdiWindNet → opens the Courrier popup (devis PDF
+ *           AUTO-ATTACHED) + a Mail toolbar (Adresse=To / CC / Objet).
+ *        b. courrierFillAndSend(): fill mailAdresse=customer email + mailObjet;
+ *           dryRun → STOP; real-mode → checkMail('mail','MAIL') (Envoyer)
+ *           THEN click "Valider" (the 2-phase send — Envoyer only opens a
+ *           confirmation; Valider actually sends).
  *
- * Steps:
- *   1. Click "Valider devis".
- *   2. Devis tab fill (Civilité, Nom, Prénom, Profession, CP, Ville,
- *      voie, optional addressComplement, phone widget, email widget).
- *   3. Click "OK".
- *   4. Wait for Edition à imprimer (souscriptionDevisValiderFinaleMoto.do).
- *   5. Extract devisNumber from the page heading.
- *   6. Click "Envoyer par..." next to "Devis moto".
- *   7. Wait for #window_nvCourrier iframe to populate.
- *   8. Inside the iframe: open the mail composer (envelope icon /
- *      template selection), fill Adresse + Objet.
- *   9. If dryRun=false → click Envoyer. Otherwise STOP here.
+ * Self-healing (phase-2j): on any flow error, AND after every quote.confirm,
+ * the SW resets the Maxance tab to a clean Proximéo home so the next run
+ * starts fresh with no manual refresh (see background.ts resetMaxanceTabToHome).
  *
- * The mail-composer sub-dialog inside the iframe couldn't be fully
- * mapped via DOM during the M8.T8 live investigation (the previous
- * popup was in an error state). We use defensive heuristic selectors
- * with fallbacks, document the unknowns in comments, and rely on phase
- * 2d live verification to surface anything we got wrong.
+ * Key gotchas (all live-confirmed): Maxance framework buttons/fields need
+ * MAIN-world dispatch (chrome.scripting{world:'MAIN'}); esbuild keepNames
+ * MUST be false; reusing identical subscriber data trips "Ce contact existe
+ * déjà" (use unique data for tests; handle gracefully for repeat customers).
  */
 import {
   CIVILITE_VALUE,
   COURRIER_POPUP_URL_PATH,
   EMAIL_ROLE_GESTION,
-  PHONE_COUNTRY_FR,
   PHONE_TYPE_MOBILE,
   PHONE_USAGE_PERSO,
   PROFESSION_VALUE,
@@ -40,7 +41,6 @@ import {
 } from '@f16/stagehand/maxance/selectors';
 import {
   captureScreenshot,
-  clickContactWidgetNouveau,
   clickMaxanceButton,
   courrierFillAndSend,
   devisFillAndSubmitMainWorld,
@@ -76,334 +76,6 @@ function extractDevisNumber(): string | null {
   const text = document.body.innerText ?? '';
   const m = DEVIS_NUMBER_REGEX.exec(text);
   return m?.[1] ?? null;
-}
-
-/**
- * Open the Courrier popup programmatically via mdiWindNet, then wait for
- * its iframe to populate.
- *
- * Phase-2g (Courrier reliability fix): the open now routes through
- * `openMdiWindowMainWorld` (SW → chrome.scripting{world:'MAIN'}) because
- * `mdiWindNet` is a page main-world global the isolated content script
- * can't see. The previous direct `openMdiWindow()` call ALWAYS threw
- * `maxance_iframe_mdiWindNet_unavailable` in the isolated world and fell
- * back to the flaky `clickByText('Envoyer par...')` path — the documented
- * source of the `maxance_iframe_not_ready:courrier_popup_ready` timeouts.
- *
- * Robustness: try the main-world open then wait for readiness; on the
- * first failure, fall back to the Envoyer-par button click and wait again.
- * Each open gets its own readiness wait so a slow first open doesn't eat
- * the fallback's budget.
- *
- * NOTE: NOT yet live-verified (Maxance portal was closed when this landed
- * — see project_m8_t8_progress.md). Confirm against the real portal before
- * flipping dryRun=false.
- */
-/**
- * Phase-2g diagnostic: snapshot the live DOM right after a Courrier open
- * attempt so the WS log reveals what `mdiWindNet.window()` actually
- * produced (iframe inventory, candidate IDs, same-origin readability).
- * Runs in the isolated content script — same-origin iframe enumeration +
- * contentDocument reads work cross-world. Cheap; emitted via reportProgress.
- */
-// @ts-expect-error phase-2h diagnostic retained pending cleanup (now unused — the
-// corrected phase-2i send path replaced the probe; delete after live verification)
-function _dumpCourrierDom(): string {
-  // Recursively walk same-origin frames starting at #window_nvCourrier so we
-  // can map the full Courrier frame tree (the content renders several frames
-  // deep, not directly in window_nvCourrier as the legacy code assumed).
-  type FrameInfo = {
-    path: string;
-    id: string;
-    src: string;
-    bodyLen: number;
-    tags: string;
-    bodyText: string;
-  };
-  const out: (FrameInfo & { inputs?: string[]; clicks?: string[] })[] = [];
-  const root = document.getElementById('window_nvCourrier') as HTMLIFrameElement | null;
-  const walk = (frameEl: HTMLIFrameElement, path: string, depth: number): void => {
-    if (depth > 4 || out.length > 16) return;
-    let idoc: Document | null = null;
-    let bodyLen = -1;
-    let tags = '';
-    let bodyText = '';
-    let inputs: string[] | undefined;
-    let clicks: string[] | undefined;
-    try {
-      idoc = frameEl.contentDocument;
-      bodyLen = idoc?.body?.innerText?.length ?? -1;
-      bodyText = (idoc?.body?.innerText ?? '').replace(/\s+/g, ' ').slice(0, 160);
-      if (idoc) {
-        tags = `sel=${idoc.querySelectorAll('select').length} inp=${idoc.querySelectorAll('input').length} a=${idoc.querySelectorAll('a').length} tr=${idoc.querySelectorAll('tr').length} form=${idoc.querySelectorAll('form').length} btn=${idoc.querySelectorAll('button,input[type=submit],input[type=button]').length} ifr=${idoc.querySelectorAll('iframe').length}`;
-        // Capture form fields + clickables for frames that have a form/inputs
-        // (these are the candidate composer frames).
-        const allInputs = Array.from(
-          idoc.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>(
-            'input, textarea, select',
-          ),
-        );
-        if (allInputs.length) {
-          inputs = allInputs.slice(0, 14).map((el) => {
-            const type = el instanceof HTMLInputElement ? el.type : el.tagName.toLowerCase();
-            return `${type}:${el.getAttribute('name') ?? '(noname)'}=${String((el as HTMLInputElement).value ?? '').slice(0, 30)}`;
-          });
-        }
-        const clickEls = Array.from(
-          idoc.querySelectorAll<HTMLElement>(
-            'a, img[onclick], input[type=submit], input[type=button], button, .buttonMiddle, [onclick]',
-          ),
-        );
-        if (clickEls.length) {
-          clicks = clickEls.slice(0, 22).map((el) => {
-            const txt = (el.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 36);
-            const alt = el.getAttribute('alt') ?? '';
-            const val = (el as HTMLInputElement).value ?? '';
-            const href = el.getAttribute('href') ?? '';
-            const oc = (el.getAttribute('onclick') ?? '').slice(0, 220);
-            return `<${el.tagName.toLowerCase()}> t="${txt}" alt="${alt}" v="${val}" href="${href.slice(0, 200)}" oc="${oc}"`;
-          });
-        }
-      }
-    } catch {
-      tags = 'CROSS_ORIGIN_OR_UNREADABLE';
-    }
-    out.push({
-      path,
-      id: frameEl.id || '(noid)',
-      src: (frameEl.getAttribute('src') ?? '').slice(0, 110),
-      bodyLen,
-      tags,
-      bodyText,
-      ...(inputs ? { inputs } : {}),
-      ...(clicks ? { clicks } : {}),
-    });
-    if (idoc) {
-      const kids = Array.from(idoc.querySelectorAll('iframe, frame')) as HTMLIFrameElement[];
-      kids.forEach((kid, i) => walk(kid, `${path}>${kid.id || `f${i}`}`, depth + 1));
-    }
-  };
-  if (root) walk(root, 'window_nvCourrier', 0);
-  return JSON.stringify({
-    url: location.href,
-    hasWindowNvCourrier: Boolean(root),
-    frameTree: out,
-  });
-}
-
-/**
- * Decision 2026-06-01 (Ridaa): send the devis to the customer via Maxance's
- * OWN Courrier email (BCC Contact@assuryalconseil.fr); Gmail-PDF pull is V2.
- * Open the REAL email-management popup using the edition page's own onclick
- * (id:nvCourrier, listerModeleLettreAutorise.do?TYPE=Devis&PAGE=0000502000 —
- * NOT the impressionDR print button), then map the nested composer frames
- * (template list, recipient/destinataire, Cc/Cci-BCC, objet, Envoyer) via the
- * shared dumpCourrierDom walker so we can build the fill+BCC+send.
- */
-// @ts-expect-error phase-2h diagnostic retained pending cleanup (now unused — the
-// corrected phase-2i send path replaced the probe; delete after live verification)
-async function _probeEmailComposer(cmd: QuoteConfirmCommand): Promise<string> {
-  const candidates = Array.from(document.querySelectorAll<HTMLElement>('[onclick]')).filter((el) =>
-    /listerModeleLettreAutorise|nvCourrier|courrier/i.test(el.getAttribute('onclick') ?? ''),
-  );
-  const ctrl =
-    candidates.find((el) => {
-      const oc = el.getAttribute('onclick') ?? '';
-      return /id:\s*nvCourrier/i.test(oc) && /PAGE=0000502000|TYPE=Devis/i.test(oc);
-    }) ?? candidates[0];
-  if (!ctrl) {
-    return JSON.stringify({ error: 'no_nvCourrier_email_control' });
-  }
-  const oc = ctrl.getAttribute('onclick') ?? '';
-  const m = /mdiWindNet\.window\(\s*'([^']+)'\s*,\s*[^,]+,\s*'([^']*)'/.exec(oc);
-  if (!m || !m[1]) return JSON.stringify({ error: 'onclick_parse_failed', oc: oc.slice(0, 200) });
-  const url = m[1];
-  const opts = m[2] ?? '';
-  try {
-    await openMdiWindowMainWorld(url, opts);
-  } catch (e) {
-    return JSON.stringify({
-      error: 'open_failed',
-      detail: e instanceof Error ? e.message : String(e),
-      url,
-      opts,
-    });
-  }
-  await sleep(7_000); // let the courrier list frameset load
-  // Step 2: open the AD (Accompagnement Devis) compose window — this is where
-  // the recipient/email/BCC/objet/Envoyer fields live. The list page links
-  // use openWindows('preparerLettre.do?ligneSelected=AD', label); we replay
-  // the underlying mdiWindNet open from the top main world (same session).
-  let adOpen = 'not_attempted';
-  try {
-    await openMdiWindowMainWorld(
-      'preparerLettre.do?ligneSelected=AD',
-      'id:preparerAD; title: Courrier; width: 700; height: 750;',
-    );
-    adOpen = 'ok';
-  } catch (e) {
-    adOpen = `err:${e instanceof Error ? e.message : String(e)}`;
-  }
-  await sleep(10_000); // let the compose window + its frameset load
-  // Walk ALL popup frames (window_*) so we capture both the list popup and
-  // the AD compose window, with inputs + clickables per frame.
-  type FI = {
-    path: string;
-    src: string;
-    bodyLen: number;
-    tags: string;
-    bodyText: string;
-    inputs?: string[];
-    clicks?: string[];
-  };
-  const frames: FI[] = [];
-  const walkAll = (doc: Document, path: string, depth: number): void => {
-    if (depth > 6 || frames.length > 24) return;
-    Array.from(doc.querySelectorAll('iframe, frame')).forEach((f, i) => {
-      const fe = f as HTMLIFrameElement;
-      const fp = `${path}>${fe.id || `f${i}`}`;
-      let idoc: Document | null = null;
-      let bodyLen = -1;
-      let tags = '';
-      let bodyText = '';
-      let inputs: string[] | undefined;
-      let clicks: string[] | undefined;
-      try {
-        idoc = fe.contentDocument;
-        bodyLen = idoc?.body?.innerText?.length ?? -1;
-        bodyText = (idoc?.body?.innerText ?? '').replace(/\s+/g, ' ').slice(0, 140);
-        if (idoc) {
-          tags = `sel=${idoc.querySelectorAll('select').length} inp=${idoc.querySelectorAll('input').length} a=${idoc.querySelectorAll('a').length} ta=${idoc.querySelectorAll('textarea').length} form=${idoc.querySelectorAll('form').length} ifr=${idoc.querySelectorAll('iframe').length}`;
-          // Selective: drop the ~190 hidden template tags. Keep selects,
-          // textareas, and inputs whose name hints at recipient/channel/BCC/
-          // subject (email, courriel, mail, cci, copie, destinat, objet,
-          // envoi, canal, mode, choix, adr).
-          const relevant =
-            /mail|courriel|cci|copie|destinat|objet|envoi|canal|mode|choix|adr|email|telecopie|fax/i;
-          const fields = Array.from(
-            idoc.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>(
-              'input, textarea, select',
-            ),
-          ).filter((el) => {
-            const tag = el.tagName.toLowerCase();
-            if (tag === 'select' || tag === 'textarea') return true;
-            if ((el as HTMLInputElement).type === 'hidden') {
-              return relevant.test(el.getAttribute('name') ?? '');
-            }
-            return true;
-          });
-          if (fields.length) {
-            inputs = fields.slice(0, 30).map((el) => {
-              const tag = el.tagName.toLowerCase();
-              const type = el instanceof HTMLInputElement ? el.type : tag;
-              let extra = '';
-              if (el instanceof HTMLSelectElement) {
-                extra = `[${Array.from(el.options)
-                  .slice(0, 6)
-                  .map((o) => o.value)
-                  .join('|')}]`;
-              }
-              return `${type}:${el.getAttribute('name') ?? '(noname)'}=${String((el as HTMLInputElement).value ?? '').slice(0, 40)}${extra}`;
-            });
-          }
-          // Clickables that look like send/channel/print actions.
-          const sendRe =
-            /envoy|valid|email|courriel|imprim|envoi|annul|fermer|suivant|\bok\b|mail|post/i;
-          const cl = Array.from(
-            idoc.querySelectorAll<HTMLElement>(
-              'a, button, input[type=submit], input[type=button], .buttonMiddle, [onclick]',
-            ),
-          ).filter((el) => {
-            const t = `${el.textContent ?? ''} ${(el as HTMLInputElement).value ?? ''} ${el.getAttribute('onclick') ?? ''} ${el.getAttribute('title') ?? ''} ${el.getAttribute('alt') ?? ''}`;
-            return sendRe.test(t);
-          });
-          if (cl.length) {
-            clicks = cl.slice(0, 16).map((el) => {
-              const txt = (el.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 30);
-              const v = (el as HTMLInputElement).value ?? '';
-              return `<${el.tagName.toLowerCase()}> t="${txt}" v="${v}" oc="${(el.getAttribute('onclick') ?? '').slice(0, 90)}"`;
-            });
-          }
-        }
-      } catch {
-        tags = 'CROSS_ORIGIN';
-      }
-      frames.push({
-        path: fp,
-        src: (fe.getAttribute('src') ?? '').slice(0, 110),
-        bodyLen,
-        tags,
-        bodyText,
-        ...(inputs ? { inputs } : {}),
-        ...(clicks ? { clicks } : {}),
-      });
-      if (idoc) walkAll(idoc, fp, depth + 1);
-    });
-  };
-  walkAll(document, 'top', 0);
-  const popupIds = Array.from(document.querySelectorAll('iframe[id^="window_"]')).map(
-    (f) => (f as HTMLElement).id,
-  );
-  const adFrames = frames.filter((f) => /preparerAD/i.test(f.path));
-  const composeFrame = adFrames.find((f) => /preparerAD>preparerAD/.test(f.path)) ?? adFrames[1];
-  // Emit fields + buttons as SEPARATE small events (the combined dump exceeds
-  // the WS log line cap and truncates).
-  await reportProgress(cmd.id, 'ad_fields', JSON.stringify(composeFrame?.inputs ?? []));
-  await reportProgress(cmd.id, 'ad_buttons', JSON.stringify(composeFrame?.clicks ?? []));
-  // Map each mail input to its row LABEL so we learn the To/CC/Cci(BCC) field
-  // names (the inputs themselves aren't named cc/cci; labels live in sibling
-  // <td>s like "A :", "CC :", "Cci :"). Deep-walk the preparerAD frame doc.
-  let mailFields: string[] = [];
-  try {
-    const cw = document.getElementById('window_preparerAD') as HTMLIFrameElement | null;
-    const collectInputs = (doc: Document | null | undefined, depth: number): HTMLElement[] => {
-      if (!doc || depth > 4) return [];
-      let acc = Array.from(
-        doc.querySelectorAll<HTMLElement>(
-          'input[type=text],input[type=email],input:not([type]),textarea',
-        ),
-      );
-      for (const fr of Array.from(doc.querySelectorAll('iframe,frame'))) {
-        try {
-          acc = acc.concat(collectInputs((fr as HTMLIFrameElement).contentDocument, depth + 1));
-        } catch {
-          /* skip */
-        }
-      }
-      return acc;
-    };
-    const labelOf = (el: HTMLElement): string => {
-      // nearest enclosing <tr>'s first cell text, else previous cell, else
-      // labelled-by, else placeholder/title.
-      const tr = el.closest('tr');
-      const rowTxt = tr ? (tr.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 40) : '';
-      const td = el.closest('td');
-      const prev =
-        td?.previousElementSibling?.textContent?.replace(/\s+/g, ' ').trim().slice(0, 24) ?? '';
-      return prev || rowTxt || el.getAttribute('placeholder') || el.getAttribute('title') || '';
-    };
-    mailFields = collectInputs(cw?.contentDocument, 0)
-      .slice(0, 40)
-      .map((el) => {
-        const name = el.getAttribute('name') ?? '(noname)';
-        const val = String((el as HTMLInputElement).value ?? '').slice(0, 30);
-        const vis =
-          el.offsetParent === null && getComputedStyle(el).display === 'none' ? 'hidden' : 'vis';
-        return `[${vis}] "${labelOf(el)}" => ${name}=${val}`;
-      })
-      // keep the mail-relevant ones + anything labelled A/CC/Cci/objet/mail
-      .filter((s) => /mail|courriel|\bA\b|cc|cci|copie|objet|destinat|@/i.test(s));
-  } catch {
-    /* skip */
-  }
-  await reportProgress(cmd.id, 'ad_mail_fields', JSON.stringify(mailFields));
-  return JSON.stringify({
-    listUrl: url,
-    adOpen,
-    popupIds,
-    composeTags: adFrames.map((f) => `${f.path} ${f.tags}`),
-    composeText: composeFrame?.bodyText ?? '',
-  });
 }
 
 /**
@@ -460,176 +132,6 @@ async function waitForMailToolbar(timeoutMs: number): Promise<void> {
     await sleep(400);
   }
   throw new Error('maxance_courrier_mail_toolbar_timeout');
-}
-
-function setInputValue(input: HTMLInputElement | HTMLTextAreaElement, value: string): void {
-  input.focus();
-  const desc = Object.getOwnPropertyDescriptor(
-    input instanceof HTMLTextAreaElement
-      ? HTMLTextAreaElement.prototype
-      : HTMLInputElement.prototype,
-    'value',
-  );
-  desc?.set?.call(input, value);
-  input.dispatchEvent(new Event('input', { bubbles: true }));
-  input.dispatchEvent(new Event('change', { bubbles: true }));
-  input.dispatchEvent(new Event('blur', { bubbles: true }));
-}
-
-/** Fill the Devis tab once the Valider devis click has settled.
- *  Phase-2d-confirm-6: superseded by devisFillAndSubmitMainWorld (the
- *  isolated-world version below produced "Un problème technique" on
- *  OK submit; routing all field-setting through main world fixed it).
- *  Kept here as documentation of the original M8.T6 approach and as a
- *  fallback if main-world dispatch ever breaks. */
-// @ts-expect-error — intentionally retained but unused
-async function _fillDevisTab_LEGACY(cmd: QuoteConfirmCommand): Promise<void> {
-  const { subscriber } = cmd;
-  await reportProgress(cmd.id, 'devis_tab_filling');
-  await setSelectByLabel('Civilité', CIVILITE_VALUE[subscriber.civilite], { label: 'civilite' });
-  await fillByLabel('Nom', subscriber.lastName, { label: 'nom' });
-  await fillByLabel('Prénom', subscriber.firstName, { label: 'prenom' });
-  await setSelectByLabel('Profession', PROFESSION_VALUE[subscriber.profession ?? 'employe_prive'], {
-    label: 'profession',
-  });
-  await fillByLabel('Code postal', subscriber.postalCode, { label: 'cp' });
-  await sleep(400);
-  await setSelectByLabel('Ville', subscriber.city, { label: 'ville', timeoutMs: 5_000 }).catch(
-    () => undefined,
-  );
-  await fillByLabel('N° et nom de voie', subscriber.addressLine, { label: 'voie' });
-  if (subscriber.addressComplement) {
-    await fillByLabel('Bâtiment, Résidence', subscriber.addressComplement, {
-      label: 'batiment',
-      timeoutMs: 3_000,
-    }).catch(() => undefined);
-  }
-  // Phone widget — three labelless dropdowns + a textbox. Maxance
-  // doesn't expose stable <label> tags for these, so we set them by
-  // <select name=> heuristic.
-  setSelectByNameLike('telephone-type', PHONE_TYPE_MOBILE);
-  setSelectByNameLike('telephone-usage', PHONE_USAGE_PERSO);
-  setSelectByNameLike('telephone-pays', PHONE_COUNTRY_FR);
-  fillInputByNameLike('telephone-numero', subscriber.phoneMobile);
-  // Phase-2d-confirm (2026-05-25 PM live diag): Maxance keeps phone
-  // input row as `currentContact.*` — a draft. The OK submit validator
-  // (ErrorMessage()) checks for at least one entry in
-  // `telephoneListBean.contactList[]`, NOT in the draft. So the draft
-  // MUST be committed first via the green "Nouveau" img which fires
-  // ajouterContactBean.do (AJAX) → promotes currentContact to
-  // contactList[0] + clears the draft inputs. Without this commit, OK
-  // shows "La valeur du champ 'Téléphone' est obligatoire" alerte and
-  // submit is blocked. Verified live via Chrome MCP: with Nouveau
-  // click added, OK created devis DR0000973630 cleanly.
-  await sleep(400);
-  try {
-    await clickContactWidgetNouveau('telephoneListBean.currentContact.type', {
-      label: 'commit_phone_entry',
-    });
-    await reportProgress(cmd.id, 'commit_phone_ok');
-  } catch (e) {
-    await reportProgress(cmd.id, 'commit_phone_err', e instanceof Error ? e.message : String(e));
-  }
-  await sleep(1200); // wait for AJAX response + DOM repopulation
-
-  // Email widget — same pattern. Phase-2d-confirm live (2026-05-25): the
-  // Maxance field is `emailListBean.currentContact.usage` (NOT `.type`
-  // like the phone widget), so the substring needle must be 'email-usage'.
-  setSelectByNameLike('email-usage', EMAIL_ROLE_GESTION);
-  fillInputByNameLike('email-adresse', subscriber.email);
-  await sleep(500);
-  try {
-    await clickContactWidgetNouveau('emailListBean.currentContact.usage', {
-      label: 'commit_email_entry',
-    });
-    await reportProgress(cmd.id, 'commit_email_ok');
-  } catch (e) {
-    await reportProgress(cmd.id, 'commit_email_err', e instanceof Error ? e.message : String(e));
-  }
-  // Phase-2d-confirm-5 (2026-05-25 PM): bigger wait + wait-for-no-loading
-  // poll. The "Un problème technique" page renders when OK is clicked
-  // while Maxance is still processing background AJAX from the Nouveau
-  // commits — the live screenshot showed "Chargement..." indicator
-  // active. Poll until any visible loading indicator clears (or 15s
-  // cap), then add 1s safety buffer. Same MCP-driven flow with similar
-  // total wait succeeded (DR0000973635) — so this should equalize.
-  await sleep(2000);
-  await waitFor(
-    () => {
-      const t = (document.body.innerText ?? '').toLowerCase();
-      return /chargement/i.test(t) ? null : true;
-    },
-    { label: 'await_chargement_clear', timeoutMs: 15_000 },
-  ).catch(() => null);
-  await sleep(1500);
-
-  // Phase-2d-confirm-diag: dump devis form state RIGHT BEFORE the OK
-  // click so the backend log shows exactly what Maxance sees. Mirrors the
-  // vehicule_form_dump + conducteur_form_dump pattern from phase 2f.
-  // Caller (runQuoteConfirm) emits this — keeping the dump close to the
-  // submit so it captures the final state after any cascade settlements.
-}
-
-/** Snapshot the visible Devis form values and emit them as a progress
- *  event. Used pre-OK click to diagnose required-field rejections.
- *  Phase-2d-confirm-6: superseded by the main-world bundle which emits
- *  its own log via reportProgress 'devis_mw_result'. Kept as legacy. */
-// @ts-expect-error — intentionally retained but unused
-async function _dumpDevisForm_LEGACY(cmd: QuoteConfirmCommand): Promise<void> {
-  const dump: Record<string, unknown> = {};
-  document.querySelectorAll<HTMLInputElement>('input').forEach((el) => {
-    if (!el.name || el.type === 'hidden') return;
-    const r = el.getBoundingClientRect();
-    if (r.width < 5 || r.height < 5) return;
-    if (el.type === 'checkbox' || el.type === 'radio') {
-      if (el.checked) dump[`${el.type}:${el.name}=${el.value}`] = 'checked';
-    } else {
-      dump[`inp:${el.name}`] = el.value.slice(0, 60);
-    }
-  });
-  document.querySelectorAll<HTMLSelectElement>('select').forEach((el) => {
-    if (!el.name) return;
-    const r = el.getBoundingClientRect();
-    if (r.width < 5 || r.height < 5) return;
-    dump[`sel:${el.name}`] = { v: el.value, opt: el.options.length };
-  });
-  await reportProgress(cmd.id, 'devis_form_dump', JSON.stringify(dump));
-}
-
-/**
- * Set the value of the first <select> whose name attribute contains
- * the given substring (case-insensitive). No-op if not found. Used
- * for the labelless phone + email widgets where heuristic name match
- * is the only signal we have.
- */
-function setSelectByNameLike(nameSubstring: string, value: string): void {
-  const sels = Array.from(
-    document.querySelectorAll<HTMLSelectElement>(
-      `select[name*="${nameSubstring.split('-')[0]}" i]`,
-    ),
-  );
-  const picked = sels.find((s) =>
-    nameSubstring
-      .split('-')
-      .every((part) => (s.name ?? '').toLowerCase().includes(part.toLowerCase())),
-  );
-  if (!picked) return;
-  picked.value = value;
-  picked.dispatchEvent(new Event('input', { bubbles: true }));
-  picked.dispatchEvent(new Event('change', { bubbles: true }));
-}
-
-function fillInputByNameLike(nameSubstring: string, value: string): void {
-  const inputs = Array.from(
-    document.querySelectorAll<HTMLInputElement>(`input[name*="${nameSubstring.split('-')[0]}" i]`),
-  );
-  const picked = inputs.find((i) =>
-    nameSubstring
-      .split('-')
-      .every((part) => (i.name ?? '').toLowerCase().includes(part.toLowerCase())),
-  );
-  if (!picked) return;
-  setInputValue(picked, value);
 }
 
 /**
