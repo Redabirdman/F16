@@ -151,6 +151,36 @@ export interface OpenMdiWindowRequest {
 /** SW → content: outcome of the main-world mdiWindNet.window() open. */
 export type OpenMdiWindowResponse = { kind: 'mdi.ok' } | { kind: 'mdi.err'; error: string };
 
+/**
+ * Content → SW: "fill the Courrier email toolbar (Adresse/CC/Objet) and
+ * optionally click Envoyer — in the page's MAIN world, across ALL frames".
+ *
+ * Phase-2i (2026-06-03, corrected path per Ridaa's screenshots): the devis
+ * email is sent from the "Envoyer par…" (Devis moto) Courrier popup
+ * (`id:impressionDR`), which has the devis PDF auto-attached + a Mail
+ * toolbar with inputs `mailAdresse` (To, empty), `mailAdresseCC` (CC),
+ * `mailObjet`, and an Envoyer button = `checkMail('mail','MAIL')`. Those
+ * fields live in a NESTED same-origin frame; the Maxance framework tracks
+ * them in MAIN-world JS, so we fill + send via
+ * chrome.scripting.executeScript({allFrames:true, world:'MAIN'}) and the
+ * func no-ops in frames that lack `mailAdresse`. `send` is gated: false in
+ * dryRun (fill + STOP before Envoyer), true only for a real send.
+ */
+export interface CourrierFillSendRequest {
+  kind: 'courrier.fill-send-mw';
+  payload: {
+    to: string;
+    objet: string;
+    cc?: string;
+    send: boolean;
+  };
+}
+
+/** SW → content: outcome of the main-world Courrier fill (+ optional send). */
+export type CourrierFillSendResponse =
+  | { kind: 'courrier.ok'; log: string[]; filledFrame: boolean; sent: boolean }
+  | { kind: 'courrier.err'; error: string };
+
 /** All possible inbound messages on the SW side. */
 export type SwInbound =
   | FlowOutcome
@@ -159,7 +189,8 @@ export type SwInbound =
   | MainWorldClickRequest
   | ContactWidgetNouveauRequest
   | DevisFillAndSubmitRequest
-  | OpenMdiWindowRequest;
+  | OpenMdiWindowRequest
+  | CourrierFillSendRequest;
 
 /** All possible inbound messages on the content-script side. */
 export type ContentInbound = FlowInvocation;

@@ -402,7 +402,9 @@ chrome.runtime.onMessage.addListener(
         | { kind: 'devis.ok'; log: string[] }
         | { kind: 'devis.err'; log: string[]; error: string; errorMsg?: string }
         | { kind: 'mdi.ok' }
-        | { kind: 'mdi.err'; error: string },
+        | { kind: 'mdi.err'; error: string }
+        | { kind: 'courrier.ok'; log: string[]; filledFrame: boolean; sent: boolean }
+        | { kind: 'courrier.err'; error: string },
     ) => void,
   ) => {
     if (message.kind === 'capture_screenshot') {
@@ -897,6 +899,88 @@ chrome.runtime.onMessage.addListener(
         .catch((err: unknown) => {
           sendResponse({
             kind: 'mdi.err',
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
+      return true;
+    }
+    if (message.kind === 'courrier.fill-send-mw') {
+      // Phase-2i: fill the Courrier popup's Mail toolbar (Adresse/CC/Objet)
+      // and optionally click Envoyer — in MAIN world across ALL frames (the
+      // fields live in a nested same-origin frame; func no-ops where absent).
+      const tabId = sender.tab?.id;
+      if (tabId === undefined) {
+        sendResponse({ kind: 'courrier.err', error: 'no_sender_tab' });
+        return false;
+      }
+      const payloadJson = JSON.stringify(message.payload);
+      void chrome.scripting
+        .executeScript({
+          target: { tabId, allFrames: true },
+          world: 'MAIN',
+          func: (pj: string): { matched: boolean; log: string[]; sent: boolean } => {
+            const p = JSON.parse(pj) as { to: string; objet: string; cc?: string; send: boolean };
+            const out: string[] = [];
+            const adr = document.querySelector(
+              'input[name="mailAdresse"]',
+            ) as HTMLInputElement | null;
+            if (!adr) return { matched: false, log: [], sent: false };
+            const fire = (el: Element, t: string) =>
+              el.dispatchEvent(new Event(t, { bubbles: true }));
+            const set = (name: string, val: string): boolean => {
+              const el = document.querySelector(`[name="${name}"]`) as HTMLInputElement | null;
+              if (!el) return false;
+              el.focus();
+              const d = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+              d?.set?.call(el, val);
+              fire(el, 'input');
+              fire(el, 'change');
+              fire(el, 'blur');
+              return true;
+            };
+            out.push('to=' + set('mailAdresse', p.to));
+            out.push('objet=' + set('mailObjet', p.objet));
+            if (p.cc) out.push('cc=' + set('mailAdresseCC', p.cc));
+            if (p.send) {
+              const w = window as unknown as {
+                checkMail?: (a: string, b: string) => void;
+              };
+              if (typeof w.checkMail === 'function') {
+                w.checkMail('mail', 'MAIL');
+                out.push('envoyer=checkMail_called');
+                return { matched: true, log: out, sent: true };
+              }
+              out.push('envoyer=checkMail_unavailable');
+              return { matched: true, log: out, sent: false };
+            }
+            out.push('stopped_before_envoyer');
+            return { matched: true, log: out, sent: false };
+          },
+          args: [payloadJson],
+        })
+        .then((results) => {
+          const hit = results
+            .map((r) => r.result as { matched: boolean; log: string[]; sent: boolean } | undefined)
+            .find((r) => r?.matched);
+          if (hit) {
+            sendResponse({
+              kind: 'courrier.ok',
+              log: hit.log,
+              filledFrame: true,
+              sent: hit.sent,
+            });
+          } else {
+            sendResponse({
+              kind: 'courrier.ok',
+              log: ['no_mailAdresse_frame'],
+              filledFrame: false,
+              sent: false,
+            });
+          }
+        })
+        .catch((err: unknown) => {
+          sendResponse({
+            kind: 'courrier.err',
             error: err instanceof Error ? err.message : String(err),
           });
         });

@@ -471,6 +471,34 @@ export async function devisFillAndSubmitMainWorld(payload: {
 }
 
 /**
+ * Phase-2i: fill the Courrier popup's Mail toolbar (Adresse=To / CC / Objet)
+ * and optionally click Envoyer — routed through the SW's
+ * chrome.scripting{world:'MAIN', allFrames:true} handler so it reaches the
+ * nested same-origin frame and the Maxance framework tracks the values. The
+ * `send` flag is gated by the caller (false in dryRun → fill + STOP).
+ */
+export async function courrierFillAndSend(payload: {
+  to: string;
+  objet: string;
+  cc?: string;
+  send: boolean;
+}): Promise<{ ok: boolean; filledFrame: boolean; sent: boolean; log: string[]; error?: string }> {
+  const msg: import('./content-protocol.js').CourrierFillSendRequest = {
+    kind: 'courrier.fill-send-mw',
+    payload,
+  };
+  const resp = (await chrome.runtime.sendMessage(msg)) as
+    | { kind: 'courrier.ok'; log: string[]; filledFrame: boolean; sent: boolean }
+    | { kind: 'courrier.err'; error: string }
+    | undefined;
+  if (!resp) return { ok: false, filledFrame: false, sent: false, log: [], error: 'no_response' };
+  if (resp.kind === 'courrier.ok') {
+    return { ok: true, filledFrame: resp.filledFrame, sent: resp.sent, log: resp.log };
+  }
+  return { ok: false, filledFrame: false, sent: false, log: [], error: resp.error };
+}
+
+/**
  * Find the FIRST <select> whose <option> list includes the given
  * `optionValue`. Used to identify ambiguous Maxance selects whose names
  * are JWT-encoded (e.g. the Conducteur tab's Profession dropdown — its

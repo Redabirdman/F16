@@ -30,7 +30,6 @@
  */
 import {
   CIVILITE_VALUE,
-  COURRIER_POPUP_IFRAME_ID,
   COURRIER_POPUP_URL_PATH,
   EMAIL_ROLE_GESTION,
   PHONE_COUNTRY_FR,
@@ -41,21 +40,16 @@ import {
 } from '@f16/stagehand/maxance/selectors';
 import {
   captureScreenshot,
-  clickByText,
   clickContactWidgetNouveau,
   clickMaxanceButton,
+  courrierFillAndSend,
   devisFillAndSubmitMainWorld,
   fillByLabel,
   setSelectByLabel,
   sleep,
   waitFor,
 } from '../dom.js';
-import {
-  iframeQuerySelector,
-  openMdiWindowMainWorld,
-  waitForIframeElement,
-  waitForIframeReady,
-} from '../iframe.js';
+import { openMdiWindowMainWorld } from '../iframe.js';
 import {
   type QuoteConfirmCommandSchema,
   QuoteConfirmResponseSchema,
@@ -112,7 +106,9 @@ function extractDevisNumber(): string | null {
  * Runs in the isolated content script — same-origin iframe enumeration +
  * contentDocument reads work cross-world. Cheap; emitted via reportProgress.
  */
-function dumpCourrierDom(): string {
+// @ts-expect-error phase-2h diagnostic retained pending cleanup (now unused — the
+// corrected phase-2i send path replaced the probe; delete after live verification)
+function _dumpCourrierDom(): string {
   // Recursively walk same-origin frames starting at #window_nvCourrier so we
   // can map the full Courrier frame tree (the content renders several frames
   // deep, not directly in window_nvCourrier as the legacy code assumed).
@@ -204,7 +200,9 @@ function dumpCourrierDom(): string {
  * (template list, recipient/destinataire, Cc/Cci-BCC, objet, Envoyer) via the
  * shared dumpCourrierDom walker so we can build the fill+BCC+send.
  */
-async function probeEmailComposer(cmd: QuoteConfirmCommand): Promise<string> {
+// @ts-expect-error phase-2h diagnostic retained pending cleanup (now unused — the
+// corrected phase-2i send path replaced the probe; delete after live verification)
+async function _probeEmailComposer(cmd: QuoteConfirmCommand): Promise<string> {
   const candidates = Array.from(document.querySelectorAll<HTMLElement>('[onclick]')).filter((el) =>
     /listerModeleLettreAutorise|nvCourrier|courrier/i.test(el.getAttribute('onclick') ?? ''),
   );
@@ -352,38 +350,53 @@ async function probeEmailComposer(cmd: QuoteConfirmCommand): Promise<string> {
   // the WS log line cap and truncates).
   await reportProgress(cmd.id, 'ad_fields', JSON.stringify(composeFrame?.inputs ?? []));
   await reportProgress(cmd.id, 'ad_buttons', JSON.stringify(composeFrame?.clicks ?? []));
-  // Explicit BCC hunt across ALL inputs (incl. hidden) in the compose frame's
-  // document — Maxance French BCC = "Cci"; CC = "Cc"/"copie".
-  let bcc: string[] = [];
+  // Map each mail input to its row LABEL so we learn the To/CC/Cci(BCC) field
+  // names (the inputs themselves aren't named cc/cci; labels live in sibling
+  // <td>s like "A :", "CC :", "Cci :"). Deep-walk the preparerAD frame doc.
+  let mailFields: string[] = [];
   try {
     const cw = document.getElementById('window_preparerAD') as HTMLIFrameElement | null;
-    const findDeep = (doc: Document | null | undefined, depth: number): Element[] => {
+    const collectInputs = (doc: Document | null | undefined, depth: number): HTMLElement[] => {
       if (!doc || depth > 4) return [];
-      let acc = Array.from(doc.querySelectorAll('input,select,textarea,label,td,th'));
+      let acc = Array.from(
+        doc.querySelectorAll<HTMLElement>(
+          'input[type=text],input[type=email],input:not([type]),textarea',
+        ),
+      );
       for (const fr of Array.from(doc.querySelectorAll('iframe,frame'))) {
         try {
-          acc = acc.concat(findDeep((fr as HTMLIFrameElement).contentDocument, depth + 1));
+          acc = acc.concat(collectInputs((fr as HTMLIFrameElement).contentDocument, depth + 1));
         } catch {
           /* skip */
         }
       }
       return acc;
     };
-    bcc = findDeep(cw?.contentDocument, 0)
-      .filter((el) =>
-        /cci|copie|bcc|cache|invisible|\bcc\b/i.test(
-          `${el.getAttribute('name') ?? ''} ${el.textContent ?? ''}`,
-        ),
-      )
-      .slice(0, 12)
-      .map(
-        (el) =>
-          `${el.tagName.toLowerCase()}:${el.getAttribute('name') ?? (el.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 40)}`,
-      );
+    const labelOf = (el: HTMLElement): string => {
+      // nearest enclosing <tr>'s first cell text, else previous cell, else
+      // labelled-by, else placeholder/title.
+      const tr = el.closest('tr');
+      const rowTxt = tr ? (tr.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 40) : '';
+      const td = el.closest('td');
+      const prev =
+        td?.previousElementSibling?.textContent?.replace(/\s+/g, ' ').trim().slice(0, 24) ?? '';
+      return prev || rowTxt || el.getAttribute('placeholder') || el.getAttribute('title') || '';
+    };
+    mailFields = collectInputs(cw?.contentDocument, 0)
+      .slice(0, 40)
+      .map((el) => {
+        const name = el.getAttribute('name') ?? '(noname)';
+        const val = String((el as HTMLInputElement).value ?? '').slice(0, 30);
+        const vis =
+          el.offsetParent === null && getComputedStyle(el).display === 'none' ? 'hidden' : 'vis';
+        return `[${vis}] "${labelOf(el)}" => ${name}=${val}`;
+      })
+      // keep the mail-relevant ones + anything labelled A/CC/Cci/objet/mail
+      .filter((s) => /mail|courriel|\bA\b|cc|cci|copie|objet|destinat|@/i.test(s));
   } catch {
     /* skip */
   }
-  await reportProgress(cmd.id, 'ad_bcc_search', JSON.stringify(bcc));
+  await reportProgress(cmd.id, 'ad_mail_fields', JSON.stringify(mailFields));
   return JSON.stringify({
     listUrl: url,
     adOpen,
@@ -393,105 +406,62 @@ async function probeEmailComposer(cmd: QuoteConfirmCommand): Promise<string> {
   });
 }
 
-async function openCourrierPopup(cmd: QuoteConfirmCommand, devisNumber: string): Promise<void> {
-  await reportProgress(cmd.id, 'courrier_popup_open');
-  // Phase-2g fix: pass the REAL devis number in ligneSelected (was the literal
-  // placeholder "DR", which made Maxance load an empty courrier preview).
-  const popupUrl = `${COURRIER_POPUP_URL_PATH}?PAGE=0000501000&FORWARD=/preparerLettre.do?ligneSelected=${encodeURIComponent(devisNumber)}`;
-  const popupOpts = 'id:nvCourrier;title:Gestion des courriers;width:600;height:600;';
-
-  // Attempt 1: main-world mdiWindNet.window().
-  try {
-    await openMdiWindowMainWorld(popupUrl, popupOpts);
-    // Phase-2g diagnostic: dump at 12s — the nvCourrier frame loads a Struts
-    // MW_TOKEN form that auto-submits (POST-redirect), so the real composer
-    // content only materialises after the submit round-trip. 12s + the two
-    // readiness waits below stays under the 60s per-advance budget.
-    await sleep(12_000);
-    await reportProgress(cmd.id, 'courrier_dom_dump', dumpCourrierDom());
-    await waitForIframeReady(COURRIER_POPUP_IFRAME_ID, {
-      timeoutMs: 10_000,
-      minBodyTextLength: 50,
-      label: 'courrier_popup_ready',
-    });
-    await reportProgress(cmd.id, 'courrier_popup_ready_mw');
-    return;
-  } catch (e) {
-    await reportProgress(
-      cmd.id,
-      'courrier_popup_mw_failed',
-      e instanceof Error ? e.message : String(e),
-    );
-  }
-
-  // Attempt 2 (fallback): click [Envoyer par...] for Devis moto. There are
-  // two such buttons (Devis moto + Fiche IPID Moto); clickByText picks the
-  // smallest-area match so we get the actual button, not an outer wrapper.
-  await clickByText('Envoyer par...', { label: 'envoyer_par', timeoutMs: 8_000 });
-  await waitForIframeReady(COURRIER_POPUP_IFRAME_ID, {
-    timeoutMs: 12_000,
-    minBodyTextLength: 50,
-    label: 'courrier_popup_ready',
+/**
+ * Phase-2i (2026-06-03, corrected path per Ridaa's screenshots): open the
+ * Devis-moto "Envoyer par…" Courrier popup (`id:impressionDR`). This popup
+ * has the devis PDF auto-attached + a Mail toolbar (Adresse=To / CC / Objet)
+ * with EMPTY fields + an Envoyer button. We replay the edition page button's
+ * OWN mdiWindNet onclick (faithful params) via main world, then wait for the
+ * Mail toolbar (`input[name=mailAdresse]`) to appear in any nested frame.
+ */
+async function openDevisMotoCourrier(cmd: QuoteConfirmCommand): Promise<void> {
+  await reportProgress(cmd.id, 'courrier_open');
+  // Find the Devis-moto "Envoyer par..." control on the edition page; its
+  // onclick is mdiWindNet.window('listerModeleLettreAutorise.do?PAGE=0000501000
+  // &FORWARD=/preparerLettre.do?ligneSelected=DR', null, 'id:impressionDR;…').
+  let url = `${COURRIER_POPUP_URL_PATH}?PAGE=0000501000&FORWARD=/preparerLettre.do?ligneSelected=DR`;
+  let opts = 'id:impressionDR; title: Courrier; width: 700; height: 750;';
+  const ctrl = Array.from(document.querySelectorAll<HTMLElement>('[onclick]')).find((el) => {
+    const oc = el.getAttribute('onclick') ?? '';
+    return /impressionDR/.test(oc) && /ligneSelected=DR\b/.test(oc);
   });
-  await reportProgress(cmd.id, 'courrier_popup_ready_fallback');
-}
-
-/**
- * Fill the mail composer inside the Courrier iframe. The composer
- * appears AFTER the operator picks a template from the popup's template
- * list. We auto-pick the "Devis" template using heuristic match.
- *
- * Returns once both Adresse + Objet are filled. The final Envoyer click
- * is left to the caller (gated on dryRun).
- */
-async function fillMailComposer(cmd: QuoteConfirmCommand, devisNumber: string): Promise<void> {
-  const { subscriber } = cmd;
-  await reportProgress(cmd.id, 'mail_template_select');
-
-  // Step 1: pick the "Devis" template from the popup's template list.
-  // The template list is rendered as a table of rows in the iframe;
-  // each row's link/button has the template name as text.
-  const templateLink = await waitForIframeElement<HTMLElement>(
-    COURRIER_POPUP_IFRAME_ID,
-    (doc) => {
-      const links = Array.from(doc.querySelectorAll<HTMLElement>('a, td, tr, button'));
-      return links.find((l) => /devis\s+moto|devis$/i.test((l.textContent ?? '').trim())) ?? null;
-    },
-    { timeoutMs: 15_000, label: 'devis_template_link' },
-  );
-  templateLink.click();
-  await sleep(SETTLE_MS);
-
-  // Step 2: wait for the mail-composer form inside the iframe. The
-  // composer has fields named "adresse" / "destinataire" / "email" /
-  // similar — try in order. Same for "objet" / "sujet".
-  await reportProgress(cmd.id, 'mail_composer_fill');
-
-  // Adresse / recipient field.
-  const adresseInput = await waitForIframeElement<HTMLInputElement>(
-    COURRIER_POPUP_IFRAME_ID,
-    (doc) =>
-      doc.querySelector<HTMLInputElement>(
-        'input[name*="adresse" i], input[name*="destinataire" i], input[name*="email" i]',
-      ),
-    { timeoutMs: 15_000, label: 'mail_composer_adresse' },
-  );
-  setInputValue(adresseInput, subscriber.email);
-
-  // Objet / subject field.
-  const objetInput = iframeQuerySelector<HTMLInputElement>(
-    COURRIER_POPUP_IFRAME_ID,
-    'input[name*="objet" i], input[name*="sujet" i], input[name*="subject" i]',
-  );
-  if (objetInput) {
-    setInputValue(objetInput, `Votre devis trottinette Assuryal - ${devisNumber}`);
+  if (ctrl) {
+    const oc = ctrl.getAttribute('onclick') ?? '';
+    const m = /mdiWindNet\.window\(\s*'([^']+)'\s*,\s*[^,]+,\s*'([^']*)'/.exec(oc);
+    if (m?.[1]) {
+      url = m[1];
+      opts = m[2] ?? opts;
+    }
   }
+  await openMdiWindowMainWorld(url, opts);
+  await waitForMailToolbar(20_000);
+  await reportProgress(cmd.id, 'courrier_mail_toolbar_ready');
 }
 
-/**
- * Set an input's value via the native setter so framework (jQuery)
- * trackers stay consistent. Fires input + change + blur.
- */
+/** True if any same-origin frame (from `doc` down) has the Mail toolbar. */
+function hasMailToolbar(doc: Document | null | undefined, depth: number): boolean {
+  if (!doc || depth > 5) return false;
+  if (doc.querySelector('input[name="mailAdresse"]')) return true;
+  for (const f of Array.from(doc.querySelectorAll('iframe, frame'))) {
+    try {
+      if (hasMailToolbar((f as HTMLIFrameElement).contentDocument, depth + 1)) return true;
+    } catch {
+      /* cross-origin — skip */
+    }
+  }
+  return false;
+}
+
+/** Poll for the Courrier Mail toolbar (`input[name=mailAdresse]`) to render. */
+async function waitForMailToolbar(timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (hasMailToolbar(document, 0)) return;
+    await sleep(400);
+  }
+  throw new Error('maxance_courrier_mail_toolbar_timeout');
+}
+
 function setInputValue(input: HTMLInputElement | HTMLTextAreaElement, value: string): void {
   input.focus();
   const desc = Object.getOwnPropertyDescriptor(
@@ -504,33 +474,6 @@ function setInputValue(input: HTMLInputElement | HTMLTextAreaElement, value: str
   input.dispatchEvent(new Event('input', { bubbles: true }));
   input.dispatchEvent(new Event('change', { bubbles: true }));
   input.dispatchEvent(new Event('blur', { bubbles: true }));
-}
-
-/**
- * Click the Envoyer button inside the mail composer. Used only when
- * dryRun=false. Defensive: tries an input[type=submit] with "Envoyer"
- * value first, then a button with that text.
- */
-async function clickEnvoyerInComposer(cmd: QuoteConfirmCommand): Promise<void> {
-  await reportProgress(cmd.id, 'mail_envoyer_click');
-  const btn = await waitForIframeElement<HTMLElement>(
-    COURRIER_POPUP_IFRAME_ID,
-    (doc) => {
-      // Prefer <input type=submit> labelled "Envoyer" (not "Envoyer + Imprimer").
-      const submits = Array.from(
-        doc.querySelectorAll<HTMLInputElement>('input[type=submit], button'),
-      );
-      // Exact "Envoyer" or "Envoyer" as first word, NOT "Envoyer + Imprimer".
-      return (
-        submits.find((s) => {
-          const t = (s.value ?? s.textContent ?? '').trim();
-          return /^envoyer\b/i.test(t) && !/imprimer/i.test(t);
-        }) ?? null
-      );
-    },
-    { timeoutMs: 10_000, label: 'mail_envoyer_button' },
-  );
-  btn.click();
 }
 
 /** Fill the Devis tab once the Valider devis click has settled.
@@ -922,15 +865,26 @@ export async function runQuoteConfirm(cmd: QuoteConfirmCommand): Promise<Respons
           // still being reverse-engineered — keep normal dryRun fast).
           let courrierDryRunStatus = 'skipped';
           if (cmd.exerciseCourrier) {
-            // Option B discovery: probe the edition page for the real devis
-            // PDF mechanism (read-only, no popup). Replaces the abandoned
-            // Courrier-email-popup exercise.
+            // Phase-2i: exercise the CORRECT send path — open the Devis-moto
+            // "Envoyer par…" Courrier popup, fill the Mail toolbar (To/Objet),
+            // and STOP before Envoyer (send:false). Verifies the fill works
+            // without sending an email. Best-effort: devis already created.
             courrierDryRunStatus = 'not_attempted';
             try {
-              await reportProgress(cmd.id, 'email_composer_probe', await probeEmailComposer(cmd));
-              courrierDryRunStatus = 'email_composer_probed';
+              await openDevisMotoCourrier(cmd);
+              await shoot('courrier_opened');
+              const res = await courrierFillAndSend({
+                to: cmd.subscriber.email,
+                objet: `Votre devis assurance trottinette Assuryal - ${devisNumber}`,
+                send: false, // dryRun: fill + STOP before Envoyer
+              });
+              await reportProgress(cmd.id, 'courrier_fill_result', JSON.stringify(res));
+              await shoot('courrier_filled');
+              courrierDryRunStatus = res.filledFrame
+                ? `filled_no_send (${res.log.join(',')})`
+                : `fill_no_frame (${res.log.join(',')})`;
             } catch (e) {
-              courrierDryRunStatus = `probe_failed:${(e instanceof Error ? e.message : String(e)).slice(0, 160)}`;
+              courrierDryRunStatus = `courrier_failed:${(e instanceof Error ? e.message : String(e)).slice(0, 160)}`;
             }
             await reportProgress(cmd.id, 'dryrun_courrier_status', courrierDryRunStatus);
           }
@@ -947,16 +901,25 @@ export async function runQuoteConfirm(cmd: QuoteConfirmCommand): Promise<Respons
           });
         }
 
-        // 6+7. Open Courrier popup (same-origin iframe — stays in this content script).
-        await openCourrierPopup(cmd, devisNumber);
-        await shoot('courrier_popup_open');
-
-        // 8. Fill mail composer.
-        await fillMailComposer(cmd, devisNumber);
-        await shoot('mail_composer_filled');
-
-        // 9. Send (dryRun=false here — clicks Envoyer).
-        await clickEnvoyerInComposer(cmd);
+        // 6. Open the Devis-moto "Envoyer par…" Courrier popup (devis PDF
+        //    auto-attached + Mail toolbar). 7. Fill To/Objet. 8. Envoyer.
+        await openDevisMotoCourrier(cmd);
+        await shoot('courrier_opened');
+        const sendRes = await courrierFillAndSend({
+          to: cmd.subscriber.email,
+          objet: `Votre devis assurance trottinette Assuryal - ${devisNumber}`,
+          send: true, // real-mode: fill + click Envoyer (checkMail)
+        });
+        await reportProgress(cmd.id, 'courrier_send_result', JSON.stringify(sendRes));
+        if (!sendRes.ok || !sendRes.filledFrame || !sendRes.sent) {
+          return ErrorResponseSchema.parse({
+            id: cmd.id,
+            kind: 'error',
+            errorCode: 'maxance_courrier_send_failed',
+            detail: `courrier fill/send incomplete: ${JSON.stringify(sendRes).slice(0, 200)}`,
+            screenshots,
+          });
+        }
         await sleep(2_500);
         await shoot('post_envoyer');
 
