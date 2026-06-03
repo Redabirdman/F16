@@ -105,14 +105,20 @@ async function forwardToContent(command: Command): Promise<Response> {
   // own URL-wait logic baked in.
   if (command.kind === 'quote.preview' || command.kind === 'quote.confirm') {
     const resp = await orchestrateNavigatingFlow(tabId, command);
-    // Autonomous self-healing (phase-2j, Ridaa 2026-06-03): a failed flow
-    // leaves the Maxance wizard mid-state (partial vehicle/devis fill,
-    // stuck popup, error alert) which poisons the NEXT run. Reset the tab
-    // to a clean Proximéo home on error so a re-run starts fresh. The
-    // error response (with its detail + screenshots) is built BEFORE we
-    // navigate, so diagnostics aren't lost. No reset on success — confirm
-    // needs preview's Garanties state to carry over.
-    if (resp.kind === 'error') {
+    // Autonomous self-healing (phase-2j, Ridaa 2026-06-03). A flow that
+    // ends anywhere other than a clean Proximéo home poisons the NEXT run
+    // (partial wizard fill / stuck popup / error alert on failure; the
+    // Edition-à-imprimer page after a successful confirm). Reset the tab
+    // to accueil.do so the next quote starts fresh, with NO manual refresh:
+    //   - ANY error  → reset (clean slate for a retry).
+    //   - quote.confirm SUCCESS → reset (the quote is done; it ended on the
+    //     edition page — the next preview needs the home/picker).
+    //   - quote.preview SUCCESS → do NOT reset (it left the Garanties tab,
+    //     which the immediately-following confirm needs).
+    // The response (devisNumber / detail / screenshots) is built before the
+    // navigate, so nothing is lost.
+    const shouldReset = resp.kind === 'error' || command.kind === 'quote.confirm';
+    if (shouldReset) {
       await resetMaxanceTabToHome(tabId).catch(() => undefined);
     }
     return resp;
