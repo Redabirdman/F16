@@ -41,6 +41,10 @@ import type {
 /** Backend WS endpoint. Hard-coded for V1 — production = same machine. */
 const BACKEND_WS_URL = 'ws://127.0.0.1:9223';
 
+/** Clean Proximéo home — used to RESET the tab after a flow error so the
+ *  next run starts from a known-good state (autonomous self-healing). */
+const MAXANCE_HOME_URL = 'https://www.maxance.com/Proximeo/accueil.do';
+
 /** Reconnect backoff schedule. Caps at 30s after attempt #5. */
 const BACKOFF_MS = [1_000, 2_000, 5_000, 10_000, 15_000, 30_000] as const;
 
@@ -100,7 +104,18 @@ async function forwardToContent(command: Command): Promise<Response> {
   // use the single-shot path because they're intra-page or have their
   // own URL-wait logic baked in.
   if (command.kind === 'quote.preview' || command.kind === 'quote.confirm') {
-    return orchestrateNavigatingFlow(tabId, command);
+    const resp = await orchestrateNavigatingFlow(tabId, command);
+    // Autonomous self-healing (phase-2j, Ridaa 2026-06-03): a failed flow
+    // leaves the Maxance wizard mid-state (partial vehicle/devis fill,
+    // stuck popup, error alert) which poisons the NEXT run. Reset the tab
+    // to a clean Proximéo home on error so a re-run starts fresh. The
+    // error response (with its detail + screenshots) is built BEFORE we
+    // navigate, so diagnostics aren't lost. No reset on success — confirm
+    // needs preview's Garanties state to carry over.
+    if (resp.kind === 'error') {
+      await resetMaxanceTabToHome(tabId).catch(() => undefined);
+    }
+    return resp;
   }
 
   // `ping` is handled directly by the SW (never reaches forwardToContent),
@@ -282,6 +297,26 @@ function waitForNavigationComplete(tabId: number, timeoutMs: number): Promise<vo
     }, timeoutMs);
     chrome.webNavigation.onCompleted.addListener(listener);
   });
+}
+
+/**
+ * Autonomous self-healing reset (phase-2j): navigate the Maxance tab to a
+ * clean Proximéo home so the NEXT flow run starts from a known-good state.
+ * Called after a quote.preview / quote.confirm error — a failed run leaves
+ * the wizard mid-state (partial fill, stuck Courrier popup, error alert)
+ * that would otherwise poison subsequent runs. If the session expired,
+ * accueil.do re-triggers SSO (silent if the Auth0 cookie is still valid).
+ * Best-effort: swallows nav timeouts (the next run's screen detection +
+ * its own SSO-transient handling will cope).
+ */
+async function resetMaxanceTabToHome(tabId: number): Promise<void> {
+  try {
+    await chrome.tabs.update(tabId, { url: MAXANCE_HOME_URL });
+  } catch {
+    return; // tab gone — nothing to reset
+  }
+  await waitForNavigationComplete(tabId, 20_000).catch(() => undefined);
+  await sleep(1_000); // settle so the home's bootstrap scripts render
 }
 
 /**
