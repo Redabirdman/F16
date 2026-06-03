@@ -35,51 +35,18 @@ import { logger } from '../../logger.js';
 import { customers, leads } from '../../db/schema/index.js';
 import { decryptPII } from '../../db/crypto.js';
 import { listTurns } from '../../db/repositories/conversation-turns.js';
-import { callClaudeWithTools } from '../../llm/tool-loop.js';
-import { buildSalesAgentSystemPrompt, type SalesAgentTurnContext } from './prompts/index.js';
 import { sendViaChannel } from '../../channels/send.js';
 import type { ChannelId, ContactRef } from '../../channels/types.js';
 import { checkComplianceFor } from '../../compliance/index.js';
 import * as humanActions from '../../db/repositories/human-actions.js';
 import { sendMessage } from '../../messaging/dispatcher.js';
 import { appendAudit } from '../../db/repositories/audit-log.js';
-// Importing the tools barrel registers all built-in tools at module load
-// (side-effect registration). The Sales Agent is the first user of the
-// tool-use loop, so this is the natural boot point until a dedicated tool
-// bootstrap module is needed (post M6).
-import { listTools } from '../../tools/index.js';
-import { recallCustomerFacts, recordCustomerFact } from '../../memory/index.js';
+import { recordCustomerFact } from '../../memory/index.js';
+// M10 — the customer-message reply pipeline (resolution → LLM → compliance)
+// lives in `reply-core.ts` so the voice route and this agent share one brain.
+import { generateSalesReply, resolveSalesContext } from './reply-core.js';
 
 const MAX_HISTORY_TURNS = 10;
-const MAX_REPLY_CHARS = 1500;
-const REPLY_TOKEN_BUDGET = 400;
-
-/**
- * Curated allow-list of tools the Sales Agent is permitted to invoke. Other
- * agent roles (Service, Quote) will declare their own list against the same
- * registry. The tool-loop trusts this list — it does not enforce.
- */
-const SALES_AGENT_TOOL_NAMES = [
-  'customer.read_profile',
-  'customer.update_profile',
-  'customer.remember_fact',
-  'knowledge.search',
-  'human.escalate',
-  // M8.T8 Option A: trottinette quote kickoff. Tool builds the
-  // QUOTE.REQUESTED payload + writes the canonical quotes row + emits
-  // to the maxance-operator queue. Sales Agent calls this once it has
-  // gathered the full trottinette qualification field set.
-  'quote.request',
-] as const;
-
-/**
- * Cosine-distance ceiling for facts recalled into the prompt. Conservative —
- * we'd rather omit a marginally-relevant fact than splice noise into the
- * model's context. Tune as we observe real recall quality.
- */
-const RECALL_DISTANCE_CEILING = 0.6;
-const RECALL_LIMIT = 5;
-const RECALL_MIN_CONFIDENCE = 0.3;
 
 export class SalesAgent extends BaseAgent {
   protected async onMessage(envelope: AgentMessageEnvelope): Promise<MessageHandlerResult> {
@@ -322,213 +289,73 @@ export class SalesAgent extends BaseAgent {
       );
       return { ok: false, error: 'no leadId available' };
     }
-    const { customer, lead, contactRef } = await this.resolveCustomerAndContact(
-      leadId,
-      payload.channel,
-    );
-    if (!contactRef) {
-      logger.warn(
-        { leadId, channel: payload.channel, instanceId: this.instanceId },
-        'sales-agent: no contact address for channel',
-      );
-      return { ok: true, result: { skipped: 'no-contact-address' } };
-    }
 
-    // Build context — pull last N turns across any channel, oldest first.
-    const recentTurnsDesc = await listTurns(this.db, {
-      customerId: customer.id,
-      limit: MAX_HISTORY_TURNS,
-    });
-    const recentTurns = [...recentTurnsDesc].reverse();
-    const fullName = decryptPII(customer.fullName);
-
-    // Mem0 recall — embed the customer's current message, kNN over
-    // `customer_facts.embedding` bounded to this customer, splice the hits
-    // into the system prompt's per-turn fragment. Wrapped in try/catch:
-    // if embeddings are down the customer reply is more important than
-    // perfect memory, so we degrade silently.
-    let recalledFacts: string[] = [];
-    try {
-      const hits = await recallCustomerFacts(this.db, customer.id, payload.content, {
-        limit: RECALL_LIMIT,
-        minConfidence: RECALL_MIN_CONFIDENCE,
-      });
-      recalledFacts = hits
-        .filter((f) => f.distance < RECALL_DISTANCE_CEILING)
-        .map((f) => `[${f.factType}, conf ${f.confidence.toFixed(2)}] ${f.content}`);
-    } catch (err) {
-      logger.warn(
-        { err, leadId: lead.id, instanceId: this.instanceId },
-        'sales-agent: fact recall failed; continuing without recalled facts',
-      );
-    }
-
-    const ctx: SalesAgentTurnContext = {
-      customer: {
-        id: customer.id,
-        fullName,
-        civility: customer.civility ?? null,
-        productLine: (lead.productLine ?? 'car') as 'scooter' | 'car',
-        vehicleSummary: summarizeJson(customer.vehicle),
-        driverSummary: summarizeJson(customer.driver),
-      },
-      lead: {
-        id: lead.id,
-        source: lead.source as SalesAgentTurnContext['lead']['source'],
-        status: lead.status,
-        score: lead.score,
-        // M9 will plumb actual quote state from the quotes repo; for now
-        // every Sales Agent turn assumes no live quote.
-        quoteState: 'none',
-      },
-      recentTurns: recentTurns.map((t) => ({
-        direction: t.direction,
-        channel: t.channel,
-        content: t.content,
-        at: t.occurredAt,
-      })),
-      ...(recalledFacts.length > 0 ? { recalledFacts } : {}),
-      channel: payload.channel,
-    };
-
-    // Call Claude — Sonnet for sales conversation. The system fragments
-    // (M6.T2) include the cached prefix + per-turn context; userPrompt is
-    // ONLY the customer's current message. The tool-loop (M6.T5) lets the
-    // model invoke registered tools mid-turn (customer profile read/update,
-    // knowledge search, human escalation) and only returns once the response
-    // is text-only.
-    const tools = listTools({ allowed: SALES_AGENT_TOOL_NAMES });
-    const llmResult = await callClaudeWithTools({
-      tier: 'sonnet',
-      systemFragments: buildSalesAgentSystemPrompt(ctx),
-      userPrompt: payload.content,
-      tools,
-      toolContext: {
-        db: this.db,
-        agentRole: this.role,
-        agentInstance: this.instanceId,
-        correlationId: lead.id,
-      },
-      maxTokens: REPLY_TOKEN_BUDGET,
-      logContext: { agent: 'sales-agent', instanceId: this.instanceId, leadId },
-    });
-    const draft = cleanLLMReply(llmResult.text);
-
-    logger.info(
-      {
-        leadId: lead.id,
-        instanceId: this.instanceId,
-        iterations: llmResult.iterations,
-        toolCalls: llmResult.toolCalls.length,
-        inputTokens: llmResult.usage.inputTokens,
-        outputTokens: llmResult.usage.outputTokens,
-        stopReason: llmResult.stopReason,
-      },
-      'sales-agent: claude turn completed',
-    );
-
-    if (!draft || draft.length === 0) {
-      logger.warn(
-        { leadId, instanceId: this.instanceId },
-        'sales-agent: LLM returned empty after cleaning',
-      );
-      return { ok: false, error: 'empty-llm-reply' };
-    }
-    if (draft.length > MAX_REPLY_CHARS) {
-      logger.warn(
-        { leadId, instanceId: this.instanceId, length: draft.length },
-        'sales-agent: LLM reply exceeds max chars',
-      );
-      return { ok: false, error: `reply-too-long (${draft.length} chars)` };
-    }
-
-    // M6.T4 — Compliance Sentry. Two-layer check (server rules + Haiku LLM)
-    // synchronously gates the send. Fail-closed: any block routes the draft
-    // to a human action and emits COMPLIANCE.BLOCKED instead of sending.
-    const compliance = await checkComplianceFor(this.db, {
-      draft,
-      ctx: {
-        customerId: customer.id,
-        channel: payload.channel,
-        productLine: (lead.productLine ?? 'car') as 'scooter' | 'car',
-        leadStatus: lead.status,
-        lastInboundContent: payload.content,
-      },
-    });
-
-    if (compliance.verdict === 'block') {
-      logger.warn(
-        {
-          leadId: lead.id,
-          instanceId: this.instanceId,
-          reasons: compliance.reasons,
-          ruleHits: compliance.ruleHits,
-          durationMs: compliance.durationMs,
-        },
-        'sales-agent: compliance blocked draft, escalating to human',
-      );
-
-      // Persist the human action — severity 2 = standard (yellow).
-      const action = await humanActions.createAction(this.db, {
-        createdByAgent: `${this.role}#${this.instanceId}`,
-        correlationId: lead.id,
-        intent: 'COMPLIANCE_BLOCKED',
-        severity: 2,
-        summary: `Sales Agent draft bloqué (${compliance.ruleHits.join(', ') || 'LLM'}). Raisons : ${compliance.reasons.join(' ; ')}`,
-        options: [
-          { id: 'send_as_is', label: 'Envoyer quand même', kind: 'approve' },
-          { id: 'reject_send', label: "Refuser l'envoi", kind: 'reject' },
-          { id: 'revise', label: 'Demander une révision', kind: 'revise' },
-        ],
-      });
-
-      // Emit COMPLIANCE.BLOCKED to the audit trail.
-      await sendMessage(
-        { db: this.db },
-        {
-          fromRole: this.role,
-          fromInstance: this.instanceId,
-          toRole: 'supervisor',
-          intent: 'COMPLIANCE.BLOCKED',
-          payload: { messageId: action.id, reasons: compliance.reasons },
-          correlationId: lead.id,
-          requiresHuman: true,
-          priority: 2,
-        },
-      );
-
-      return {
-        ok: true,
-        result: {
-          intent: envelope.intent,
-          sent: false,
-          blocked: true,
-          reasons: compliance.reasons,
-          humanActionId: action.id,
-        },
-      };
-    }
-
-    const send = await sendViaChannel({
+    // M10 — shared reply core. `generateSalesReply` reproduces the resolution
+    // → LLM → clean → guard → compliance pipeline and RETURNS a result; the
+    // voice route (`POST /v1/voice/turn`) calls the same function. Here we map
+    // its outcome back to the historical MessageHandlerResult shapes, and on a
+    // clean reply we send via the channel exactly as before.
+    const reply = await generateSalesReply({
       db: this.db,
-      customerId: customer.id,
-      leadId: lead.id,
-      to: contactRef,
-      body: [{ type: 'text', text: draft }],
+      leadId,
+      channel: payload.channel,
+      content: payload.content,
       agentRole: this.role,
       agentInstance: this.instanceId,
-      correlationId: lead.id,
     });
-    return {
-      ok: true,
-      result: {
-        intent: envelope.intent,
-        sent: true,
-        channel: payload.channel,
-        externalId: send.receipt.externalId,
-        length: draft.length,
-      },
-    };
+
+    switch (reply.outcome) {
+      case 'skip':
+        // 'empty-inbound' is handled above (returns before this call), so the
+        // only soft-skip reaching here is 'no-contact-address'.
+        return { ok: true, result: { skipped: reply.reason } };
+      case 'error':
+        return { ok: false, error: reply.error };
+      case 'blocked':
+        return {
+          ok: true,
+          result: {
+            intent: envelope.intent,
+            sent: false,
+            blocked: true,
+            reasons: reply.reasons,
+            humanActionId: reply.humanActionId,
+          },
+        };
+      case 'reply': {
+        // Re-resolve the ContactRef for the send. `generateSalesReply` already
+        // proved a contact address exists (else it would have returned a
+        // 'skip'); guard the null anyway in case it vanished between calls.
+        const { contactRef } = await this.resolveCustomerAndContact(leadId, payload.channel);
+        if (!contactRef) {
+          logger.warn(
+            { leadId, instanceId: this.instanceId },
+            'sales-agent: contact address disappeared before send',
+          );
+          return { ok: true, result: { skipped: 'no-contact-address' } };
+        }
+        const send = await sendViaChannel({
+          db: this.db,
+          customerId: reply.customerId,
+          leadId: reply.leadId,
+          to: contactRef,
+          body: [{ type: 'text', text: reply.replyText }],
+          agentRole: this.role,
+          agentInstance: this.instanceId,
+          correlationId: reply.leadId,
+        });
+        return {
+          ok: true,
+          result: {
+            intent: envelope.intent,
+            sent: true,
+            channel: payload.channel,
+            externalId: send.receipt.externalId,
+            length: reply.replyText.length,
+          },
+        };
+      }
+    }
   }
 
   /**
@@ -873,35 +700,9 @@ export class SalesAgent extends BaseAgent {
     lead: typeof leads.$inferSelect;
     contactRef: ContactRef | null;
   }> {
-    const [lead] = await this.db.select().from(leads).where(eq(leads.id, leadId)).limit(1);
-    if (!lead) throw new Error(`Lead ${leadId} not found`);
-    if (!lead.customerId) throw new Error(`Lead ${leadId} has no customer_id`);
-    const [customer] = await this.db
-      .select()
-      .from(customers)
-      .where(eq(customers.id, lead.customerId))
-      .limit(1);
-    if (!customer) throw new Error(`Customer ${lead.customerId} not found`);
-
-    let address: string | null = null;
-    switch (channel) {
-      case 'whatsapp':
-      case 'sms':
-      case 'voice':
-        address = decryptPII(customer.phone);
-        break;
-      case 'email':
-        address = decryptPII(customer.email);
-        break;
-    }
-    if (!address) return { customer, lead, contactRef: null };
-    const fullName = decryptPII(customer.fullName);
-    const contactRef: ContactRef = {
-      channel,
-      address,
-      ...(fullName ? { displayName: fullName } : {}),
-    };
-    return { customer, lead, contactRef };
+    // M10 — delegates to the shared free helper so the voice route and the
+    // agent resolve customer/lead/contact through ONE code path.
+    return resolveSalesContext(this.db, leadId, channel);
   }
 }
 
@@ -1001,44 +802,7 @@ function formatEur(value: number): string {
   return `${value.toFixed(2).replace('.', ',')} €`;
 }
 
-/**
- * Format a plaintext JSONB column (vehicle / driver) into a single-line
- * summary string for the prompt context. Skips null/empty values so the
- * prompt stays terse.
- */
-export function summarizeJson(value: unknown): string | null {
-  if (!value || typeof value !== 'object') return null;
-  const entries = Object.entries(value as Record<string, unknown>).filter(
-    ([, v]) => v !== null && v !== undefined && v !== '',
-  );
-  if (entries.length === 0) return null;
-  return entries
-    .map(([k, v]) => `${k}=${typeof v === 'object' ? JSON.stringify(v) : String(v)}`)
-    .join(', ');
-}
-
-/**
- * Strip common LLM wrapping artifacts from a draft reply so the customer
- * doesn't see them. Handles: fenced code blocks, leading "Réponse :" /
- * "Voici :" labels (French + English), wrapping straight or French guillemet
- * quotes. Pure / deterministic — covered by unit tests.
- */
-export function cleanLLMReply(raw: string): string {
-  let s = raw.trim();
-  // Strip ```...``` fences (with optional language tag) wrapping the message.
-  s = s
-    .replace(/^```(?:\w+)?\s*\n?/, '')
-    .replace(/\n?```$/, '')
-    .trim();
-  // Strip a leading "Réponse :" / "Voici :" / "Message :" label (FR + EN).
-  s = s.replace(/^(R[ée]ponse|Voici|Message|Reply|Response)\s*[:.]\s*/i, '').trim();
-  // Strip wrapping straight quotes or French guillemets when both ends match.
-  if (
-    (s.startsWith('"') && s.endsWith('"')) ||
-    (s.startsWith('«') && s.endsWith('»')) ||
-    (s.startsWith('“') && s.endsWith('”'))
-  ) {
-    s = s.slice(1, -1).trim();
-  }
-  return s;
-}
+// `summarizeJson` + `cleanLLMReply` moved to `text-utils.ts` (M10) to break the
+// agent.ts ↔ reply-core.ts import cycle. Re-exported here so existing importers
+// (tests + callers using `from './agent.js'`) are unaffected.
+export { summarizeJson, cleanLLMReply } from './text-utils.js';

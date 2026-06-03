@@ -8,6 +8,7 @@ import { logger } from './logger.js';
 import type { Database } from './db/index.js';
 import { buildWhatsAppWebhook, parseAuthorisedResolvers } from './channels/whatsapp/webhook.js';
 import { buildLeadIntakeRouter } from './leads/intake-http.js';
+import { buildVoiceRouter } from './http/voice.js';
 import { buildAdminLeadsRouter } from './admin/leads-list.js';
 import { buildAdminLeadDetailRouter } from './admin/lead-detail.js';
 import { buildAdminHumanActionsRouter } from './admin/human-actions.js';
@@ -101,6 +102,16 @@ export function buildApp(opts: BuildAppOptions = {}): Hono {
       ...(opts.leadIntakeHmacSecret ? { hmacSecret: opts.leadIntakeHmacSecret } : {}),
     });
     app.route('/', leadIntakeApp);
+
+    // M10 — synchronous voice turn webhook (`POST /v1/voice/turn`). Pipecat
+    // POSTs a transcript and gets the Sales Agent's reply text back to speak.
+    // Protected service-to-service with the SAME shared webhook secret as
+    // `/v1/leads` (NOT the admin bearer) — it's a machine-to-machine call.
+    const voiceApp = buildVoiceRouter({
+      db: opts.db,
+      ...(opts.leadIntakeHmacSecret ? { hmacSecret: opts.leadIntakeHmacSecret } : {}),
+    });
+    app.route('/', voiceApp);
 
     // M14 V1 + V2 — admin surface. Auth middleware reads
     // ADMIN_BEARER_TOKEN; when unset (dev), it's a no-op. Mount BEFORE the

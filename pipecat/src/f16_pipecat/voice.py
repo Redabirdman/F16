@@ -19,21 +19,24 @@ SIP audio through a Pipecat pipeline:
 Brain is SHARED with the WhatsApp Sales Agent. Pipecat is intentionally
 thin — STT/TTS + HTTP shuttle.
 
-V0 scope (this file): the FastAPI surface so the backend + admin can
-exercise the contract without real SIP/Deepgram/Azure credentials.
-Endpoints accept structured stubs that mirror what the live pipeline
-will eventually feed in. The pipeline orchestration itself, the SIP
-trunk wiring, the Deepgram + Azure adapters, and the backend's
-`/v1/voice/turn` consumer all land in M10.
+M10 scope (this file): the FastAPI surface PLUS the real backend bridge.
+`/voice/turn` no longer echoes — it POSTs the transcript to the F16
+backend's frozen `/v1/voice/turn` and returns the Sales Agent's reply.
+The Deepgram STT/TTS + SIP transport wiring lives in `pipeline.py`.
+
+The HTTP client to the backend is dependency-injected via FastAPI's
+`Depends`, so tests mock it with `httpx.MockTransport` and assert the
+backend is called (no live network).
 """
 
 from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+from f16_pipecat.backend import BackendTurnError, F16BackendClient
 from f16_pipecat.logging import logger
 
 # Module-scope ephemeral session store. Real V1 will replace this with
@@ -43,6 +46,24 @@ from f16_pipecat.logging import logger
 _SESSIONS: dict[str, dict[str, str | int]] = {}
 
 router = APIRouter(prefix="/voice", tags=["voice"])
+
+# Injectable backend client. FastAPI resolves `get_backend_client` via
+# `Depends`; tests override `app.dependency_overrides[get_backend_client]`
+# to supply a client wired to an httpx.MockTransport. A lazy module-level
+# singleton avoids opening a real AsyncClient at import time (which would
+# need creds / DNS) and means each test override is honored cleanly.
+_backend_client: F16BackendClient | None = None
+
+
+def get_backend_client() -> F16BackendClient:
+    """Default dependency: lazily construct the env-configured backend client.
+
+    Overridden in tests via `app.dependency_overrides`.
+    """
+    global _backend_client
+    if _backend_client is None:
+        _backend_client = F16BackendClient.from_env()
+    return _backend_client
 
 
 class StartCallRequest(BaseModel):
@@ -102,32 +123,48 @@ def start_call(body: StartCallRequest) -> StartCallResponse:
 
 
 @router.post("/turn", response_model=VoiceTurnResponse)
-def voice_turn(body: VoiceTurnRequest) -> VoiceTurnResponse:
-    """Process one customer utterance.
+async def voice_turn(
+    body: VoiceTurnRequest,
+    backend: F16BackendClient = Depends(get_backend_client),  # noqa: B008 — FastAPI DI idiom
+) -> VoiceTurnResponse:
+    """Process one customer utterance by relaying it to the backend brain.
 
-    V0 echoes the transcript back with a fixed French acknowledgement —
-    enough to validate the round-trip end-to-end without the backend's
-    Sales Agent endpoint being live. M10 replaces the echo with an HTTP
-    call to F16 backend's /v1/voice/turn, which dispatches a
-    CUSTOMER.MESSAGE_RECEIVED to the same Sales Agent the WhatsApp
-    channel uses.
+    Flow: STT (Deepgram) hands us a French transcript → we POST it to F16
+    backend's `/v1/voice/turn` with the session's lead/customer ids → the
+    shared Sales Agent decides the reply → we return it for TTS to speak.
+
+    No business logic lives here: Pipecat is a thin shuttle. The session's
+    `lead_id`/`customer_id` were captured at `/voice/sessions/new` time.
     """
     session = _SESSIONS.get(body.session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="session_not_found")
 
-    # Bump turn counter — useful for admin observability when the real
-    # Pipecat pipeline is live.
+    # Bump turn counter — useful for admin observability.
     turns = int(session.get("turns", 0)) + 1
     session["turns"] = turns
     logger.info(
         f"voice: session={body.session_id} turn={turns} transcript_chars={len(body.transcript)}"
     )
 
-    # V0 reply: simple echo + acknowledgement so the SIP path can be
-    # exercised end-to-end without the backend bridge.
-    reply = f"J'ai bien entendu : {body.transcript}. Un instant, je transmets ça à votre agent."
-    return VoiceTurnResponse(reply_text=reply, session_state="live")
+    try:
+        result = await backend.turn(
+            session_id=body.session_id,
+            lead_id=str(session.get("lead_id", "")),
+            customer_id=str(session.get("customer_id", "")),
+            transcript=body.transcript,
+        )
+    except BackendTurnError as exc:
+        # Backend unreachable / errored. Surface as 502 so the caller (the
+        # Pipecat pipeline) can decide to retry or play a fallback line; we
+        # do NOT invent a reply here (no business logic in the bridge).
+        logger.error(f"voice: backend turn failed session={body.session_id}: {exc}")
+        raise HTTPException(status_code=502, detail="backend_turn_failed") from exc
+
+    return VoiceTurnResponse(
+        reply_text=result.reply_text,
+        session_state=result.session_state,
+    )
 
 
 @router.post("/sessions/{session_id}/end", status_code=204)

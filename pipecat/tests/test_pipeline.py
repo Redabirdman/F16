@@ -1,0 +1,201 @@
+"""Tests for the cascaded voice pipeline assembly (M10).
+
+These exercise the pure orchestration seams — config selection and the
+BackendTurnProcessor — WITHOUT any live SIP/Deepgram/Azure connection. The
+backend is a mocked-transport httpx client; the transport is a mock object.
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+
+import httpx
+import pytest
+
+# Real pipecat frame/direction types are importable in this env (1.3.0).
+from pipecat.frames.frames import TextFrame, TranscriptionFrame
+from pipecat.processors.frame_processor import FrameDirection
+
+from f16_pipecat.backend import BackendConfig, BackendTurnError, F16BackendClient
+from f16_pipecat.pipeline import (
+    AZURE_TTS_VOICE_FR,
+    DEEPGRAM_STT_MODEL_FR,
+    DEEPGRAM_TTS_MODEL_FR,
+    BackendTurnProcessor,
+    TtsProvider,
+    VoicePipelineConfig,
+    build_stt_service,
+    build_tts_service,
+)
+
+# --------------------------------------------------------------------------
+# Helpers
+# --------------------------------------------------------------------------
+
+
+def _backend(handler: httpx.MockTransport) -> F16BackendClient:
+    return F16BackendClient(
+        config=BackendConfig(
+            base_url="http://backend:3001",
+            secret="s",
+            sig_header="x-f16-signature",
+        ),
+        http=httpx.AsyncClient(transport=handler),
+    )
+
+
+# --------------------------------------------------------------------------
+# Config selection: deepgram default vs azure fallback
+# --------------------------------------------------------------------------
+
+
+def test_config_defaults_to_deepgram_tts(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("TTS_PROVIDER", raising=False)
+    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-key")
+    config = VoicePipelineConfig.from_env()
+    assert config.tts_provider is TtsProvider.DEEPGRAM
+    assert config.uses_azure_fallback is False
+    # STT is always Deepgram Nova-3 FR.
+    assert config.stt_model == DEEPGRAM_STT_MODEL_FR == "nova-3"
+    assert config.deepgram_tts_model == DEEPGRAM_TTS_MODEL_FR
+    assert config.language == "fr"
+    assert config.deepgram_api_key == "dg-key"
+
+
+def test_config_selects_azure_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TTS_PROVIDER", "azure")
+    monkeypatch.setenv("AZURE_SPEECH_KEY", "az-key")
+    monkeypatch.setenv("AZURE_SPEECH_REGION", "francecentral")
+    config = VoicePipelineConfig.from_env()
+    assert config.tts_provider is TtsProvider.AZURE
+    assert config.uses_azure_fallback is True
+    assert config.azure_tts_voice == AZURE_TTS_VOICE_FR
+    assert config.azure_speech_key == "az-key"
+    assert config.azure_speech_region == "francecentral"
+
+
+def test_config_unknown_provider_falls_back_to_deepgram(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TTS_PROVIDER", "elevenlabs")
+    config = VoicePipelineConfig.from_env()
+    assert config.tts_provider is TtsProvider.DEEPGRAM
+
+
+def test_build_services_are_creds_gated_todo_seams() -> None:
+    """STT/TTS builders are TODO(creds) seams — they raise NotImplementedError
+    until real keys + plugins attach, so config selection stays test-safe."""
+    config = VoicePipelineConfig(tts_provider=TtsProvider.DEEPGRAM)
+    with pytest.raises(NotImplementedError):
+        build_stt_service(config)
+    with pytest.raises(NotImplementedError):
+        build_tts_service(config)
+    with pytest.raises(NotImplementedError):
+        build_tts_service(VoicePipelineConfig(tts_provider=TtsProvider.AZURE))
+
+
+# --------------------------------------------------------------------------
+# BackendTurnProcessor: transcript → backend → TextFrame, via mock transport
+# --------------------------------------------------------------------------
+
+
+class _CapturingProcessor(BackendTurnProcessor):
+    """Subclass that records frames it pushes downstream (instead of needing
+    a fully linked Pipeline). Keeps the test focused on the bridge logic."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.pushed: list[Any] = []
+
+    async def push_frame(
+        self, frame: Any, direction: FrameDirection = FrameDirection.DOWNSTREAM
+    ) -> None:
+        self.pushed.append(frame)
+
+
+async def test_processor_relays_transcription_to_backend_as_textframe() -> None:
+    record: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        record["url"] = str(request.url)
+        record["raw"] = bytes(request.content)
+        record["body"] = json.loads(request.content)
+        record["signature"] = request.headers.get("x-f16-signature")
+        return httpx.Response(
+            200, json={"replyText": "Très bien, je note.", "sessionState": "live"}
+        )
+
+    proc = _CapturingProcessor(
+        backend=_backend(httpx.MockTransport(handler)),
+        session_id="sess-1",
+        lead_id="lead-1",
+        customer_id="cust-1",
+    )
+
+    frame = TranscriptionFrame(
+        text="Je veux assurer ma trottinette.",
+        user_id="cust-1",
+        timestamp="2026-06-03T10:00:00Z",
+        finalized=True,
+    )
+    await proc.process_frame(frame, FrameDirection.DOWNSTREAM)
+
+    # Backend was called with the frozen contract + session ids.
+    assert record["url"] == "http://backend:3001/v1/voice/turn"
+    # HMAC-SHA256 of the raw body with the shared secret, in x-f16-signature.
+    import hashlib
+    import hmac
+
+    expected_sig = hmac.new(b"s", record["raw"], hashlib.sha256).hexdigest()
+    assert record["signature"] == expected_sig
+    assert record["body"]["sessionId"] == "sess-1"
+    assert record["body"]["leadId"] == "lead-1"
+    assert record["body"]["customerId"] == "cust-1"
+    assert record["body"]["transcript"] == "Je veux assurer ma trottinette."
+
+    # The brain's reply was pushed downstream as a TextFrame for TTS.
+    text_frames = [f for f in proc.pushed if isinstance(f, TextFrame)]
+    assert len(text_frames) == 1
+    assert text_frames[0].text == "Très bien, je note."
+
+
+async def test_processor_ignores_interim_transcripts() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover
+        raise AssertionError("backend must not be called for interim frames")
+
+    proc = _CapturingProcessor(
+        backend=_backend(httpx.MockTransport(handler)),
+        session_id="sess-1",
+        lead_id="lead-1",
+        customer_id="cust-1",
+    )
+    interim = TranscriptionFrame(
+        text="Je veux...",
+        user_id="cust-1",
+        timestamp="2026-06-03T10:00:00Z",
+        finalized=False,
+    )
+    await proc.process_frame(interim, FrameDirection.DOWNSTREAM)
+    # Interim frame passed through, no TextFrame reply produced.
+    assert proc.pushed == [interim]
+
+
+async def test_processor_propagates_backend_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, json={"error": "down"})
+
+    proc = _CapturingProcessor(
+        backend=_backend(httpx.MockTransport(handler)),
+        session_id="sess-1",
+        lead_id="lead-1",
+        customer_id="cust-1",
+    )
+    frame = TranscriptionFrame(
+        text="Allô ?",
+        user_id="cust-1",
+        timestamp="2026-06-03T10:00:00Z",
+        finalized=True,
+    )
+    with pytest.raises(BackendTurnError):
+        await proc.process_frame(frame, FrameDirection.DOWNSTREAM)

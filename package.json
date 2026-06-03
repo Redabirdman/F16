@@ -27,8 +27,8 @@
       "prettier --write"
     ],
     "pipecat/**/*.py": [
-      "ruff check --fix",
-      "ruff format"
+      "uv run --project pipecat ruff check --fix",
+      "uv run --project pipecat ruff format"
     ]
   },
   "pnpm": {
