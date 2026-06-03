@@ -914,76 +914,131 @@ chrome.runtime.onMessage.addListener(
         return false;
       }
       const payloadJson = JSON.stringify(message.payload);
-      void chrome.scripting
-        .executeScript({
-          target: { tabId, allFrames: true },
-          world: 'MAIN',
-          func: (pj: string): { matched: boolean; log: string[]; sent: boolean } => {
-            const p = JSON.parse(pj) as { to: string; objet: string; cc?: string; send: boolean };
-            const out: string[] = [];
-            const adr = document.querySelector(
-              'input[name="mailAdresse"]',
-            ) as HTMLInputElement | null;
-            if (!adr) return { matched: false, log: [], sent: false };
-            const fire = (el: Element, t: string) =>
-              el.dispatchEvent(new Event(t, { bubbles: true }));
-            const set = (name: string, val: string): boolean => {
-              const el = document.querySelector(`[name="${name}"]`) as HTMLInputElement | null;
-              if (!el) return false;
-              el.focus();
-              const d = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
-              d?.set?.call(el, val);
-              fire(el, 'input');
-              fire(el, 'change');
-              fire(el, 'blur');
-              return true;
-            };
-            out.push('to=' + set('mailAdresse', p.to));
-            out.push('objet=' + set('mailObjet', p.objet));
-            if (p.cc) out.push('cc=' + set('mailAdresseCC', p.cc));
-            if (p.send) {
-              const w = window as unknown as {
-                checkMail?: (a: string, b: string) => void;
+      void (async () => {
+        const log: string[] = [];
+        try {
+          // Phase 1: fill mailAdresse/mailObjet/[cc] + (if send) click Envoyer
+          // = checkMail('mail','MAIL'). NOTE: checkMail only ADVANCES the popup
+          // to a "Valider / Annuler" confirmation — it does NOT send yet.
+          const r1 = await chrome.scripting.executeScript({
+            target: { tabId, allFrames: true },
+            world: 'MAIN',
+            func: (pj: string): { matched: boolean; log: string[] } => {
+              const p = JSON.parse(pj) as { to: string; objet: string; cc?: string; send: boolean };
+              const out: string[] = [];
+              const adr = document.querySelector(
+                'input[name="mailAdresse"]',
+              ) as HTMLInputElement | null;
+              if (!adr) return { matched: false, log: [] };
+              const fire = (el: Element, t: string) =>
+                el.dispatchEvent(new Event(t, { bubbles: true }));
+              const set = (name: string, val: string): boolean => {
+                const el = document.querySelector(`[name="${name}"]`) as HTMLInputElement | null;
+                if (!el) return false;
+                el.focus();
+                const d = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+                d?.set?.call(el, val);
+                fire(el, 'input');
+                fire(el, 'change');
+                fire(el, 'blur');
+                return true;
               };
-              if (typeof w.checkMail === 'function') {
-                w.checkMail('mail', 'MAIL');
-                out.push('envoyer=checkMail_called');
-                return { matched: true, log: out, sent: true };
+              out.push('to=' + set('mailAdresse', p.to));
+              out.push('objet=' + set('mailObjet', p.objet));
+              if (p.cc) out.push('cc=' + set('mailAdresseCC', p.cc));
+              if (p.send) {
+                const w = window as unknown as { checkMail?: (a: string, b: string) => void };
+                if (typeof w.checkMail === 'function') {
+                  w.checkMail('mail', 'MAIL');
+                  out.push('envoyer=checkMail_called');
+                } else {
+                  out.push('envoyer=checkMail_unavailable');
+                }
+              } else {
+                out.push('stopped_before_envoyer');
               }
-              out.push('envoyer=checkMail_unavailable');
-              return { matched: true, log: out, sent: false };
-            }
-            out.push('stopped_before_envoyer');
-            return { matched: true, log: out, sent: false };
-          },
-          args: [payloadJson],
-        })
-        .then((results) => {
-          const hit = results
-            .map((r) => r.result as { matched: boolean; log: string[]; sent: boolean } | undefined)
+              return { matched: true, log: out };
+            },
+            args: [payloadJson],
+          });
+          const hit1 = r1
+            .map((r) => r.result as { matched: boolean; log: string[] } | undefined)
             .find((r) => r?.matched);
-          if (hit) {
-            sendResponse({
-              kind: 'courrier.ok',
-              log: hit.log,
-              filledFrame: true,
-              sent: hit.sent,
-            });
-          } else {
+          if (!hit1) {
             sendResponse({
               kind: 'courrier.ok',
               log: ['no_mailAdresse_frame'],
               filledFrame: false,
               sent: false,
             });
+            return;
           }
-        })
-        .catch((err: unknown) => {
+          log.push(...hit1.log);
+          if (!message.payload.send) {
+            sendResponse({ kind: 'courrier.ok', log, filledFrame: true, sent: false });
+            return;
+          }
+
+          // Phase 2 (send only): wait for the "Valider / Annuler" confirmation
+          // to render, then click VALIDER — that's the step that actually
+          // sends the email (per Ridaa's screenshot: checkMail → Valider).
+          await new Promise((res) => setTimeout(res, 3000));
+          const r2 = await chrome.scripting.executeScript({
+            target: { tabId, allFrames: true },
+            world: 'MAIN',
+            func: (): { here: boolean; clicked: boolean; seen: string[] } => {
+              const norm = (s: string | null) => (s ?? '').replace(/\s+/g, ' ').trim();
+              const cands = Array.from(
+                document.querySelectorAll<HTMLElement>(
+                  'a, button, input[type=submit], input[type=button], .buttonMiddle, table, [onclick]',
+                ),
+              );
+              const seen = cands
+                .map((el) => norm(el.textContent))
+                .filter((t) => t && t.length < 24)
+                .slice(0, 16);
+              // exact "Valider" (NOT "Valider devis"/"Annuler"); prefer a
+              // .buttonMiddle, else the element itself.
+              const valider = cands.find((el) => norm(el.textContent) === 'Valider');
+              if (!valider) return { here: false, clicked: false, seen };
+              const target =
+                (valider.querySelector('.buttonMiddle') as HTMLElement | null) ?? valider;
+              const rect = target.getBoundingClientRect();
+              const init = {
+                bubbles: true,
+                cancelable: true,
+                view: window,
+                button: 0,
+                buttons: 1,
+                clientX: rect.left + rect.width / 2,
+                clientY: rect.top + rect.height / 2,
+              } as const;
+              for (const k of ['mousedown', 'mouseup', 'click'] as const) {
+                target.dispatchEvent(new MouseEvent(k, init));
+              }
+              return { here: true, clicked: true, seen };
+            },
+          });
+          const hit2 = r2
+            .map((r) => r.result as { here: boolean; clicked: boolean; seen: string[] } | undefined)
+            .find((r) => r?.here);
+          if (hit2?.clicked) {
+            log.push('valider=clicked', 'buttons=[' + hit2.seen.join('|') + ']');
+            sendResponse({ kind: 'courrier.ok', log, filledFrame: true, sent: true });
+          } else {
+            const anySeen = r2
+              .map((r) => r.result as { seen: string[] } | undefined)
+              .find((r) => r?.seen?.length);
+            log.push('valider=not_found', 'buttons=[' + (anySeen?.seen ?? []).join('|') + ']');
+            sendResponse({ kind: 'courrier.ok', log, filledFrame: true, sent: false });
+          }
+        } catch (err) {
           sendResponse({
             kind: 'courrier.err',
             error: err instanceof Error ? err.message : String(err),
           });
-        });
+        }
+      })();
       return true;
     }
     return false;
