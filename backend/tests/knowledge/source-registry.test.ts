@@ -82,19 +82,20 @@ describe('source-registry', () => {
     expect(a.id).toBe('react-source');
   });
 
-  it('test 7: bootstrap registers both known sources, idempotent on second call', () => {
+  it('test 7: bootstrap registers all known sources, idempotent on second call', () => {
     bootstrapKnowledgeSources();
     const names1 = listKnowledgeSources()
       .map((s) => s.name)
       .sort();
     expect(names1).toContain('assuryal_knowledge_md');
     expect(names1).toContain('assuryal_website_source');
-    expect(names1).toHaveLength(2);
+    expect(names1).toContain('maxance_product_catalog');
+    expect(names1).toHaveLength(3);
 
     // Second call must NOT throw (despite duplicate-name guard inside register)
     // because the once-flag short-circuits.
     expect(() => bootstrapKnowledgeSources()).not.toThrow();
-    expect(listKnowledgeSources()).toHaveLength(2);
+    expect(listKnowledgeSources()).toHaveLength(3);
 
     const md = getKnowledgeSource('assuryal_knowledge_md');
     expect(md?.adapter).toBe('markdown-file');
@@ -102,5 +103,11 @@ describe('source-registry', () => {
     const site = getKnowledgeSource('assuryal_website_source');
     expect(site?.adapter).toBe('react-source');
     expect(site?.intervalHours).toBe(6);
+
+    // M9 — Maxance product catalogue, ingested via the markdown adapter.
+    const catalog = getKnowledgeSource('maxance_product_catalog');
+    expect(catalog?.adapter).toBe('markdown-file');
+    expect(catalog?.intervalHours).toBe(24);
+    expect(catalog?.scheduled).toBe(true);
   });
 });

@@ -9,6 +9,7 @@
  * so a deployed VPS doesn't have to match the local dev layout:
  *   - F16_KNOWLEDGE_MD_PATH    — the Assuryal markdown knowledge base
  *   - F16_WEBSITE_SOURCE_PATH  — the conversion-machine React source tree
+ *   - F16_MAXANCE_CATALOG_PATH — the Maxance product-fiche catalogue (M9)
  */
 import { registerKnowledgeSource } from './source-registry.js';
 
@@ -31,6 +32,19 @@ export function bootstrapKnowledgeSources(): void {
     adapter: 'react-source',
     path: process.env['F16_WEBSITE_SOURCE_PATH'] ?? '../../conversion-machine-main/src',
     intervalHours: 6,
+    scheduled: true,
+  });
+
+  // M9 — Maxance product catalogue (15 product fiches curated into one
+  // markdown file, one H2 per product). Gives the Sales Agent RAG knowledge
+  // of every Maxance product even though only the trottinette/NVEI is
+  // auto-quotable today. Product fiches are stable, so a daily re-ingest is
+  // plenty (re-curate the MD when Maxance updates a fiche).
+  registerKnowledgeSource({
+    name: 'maxance_product_catalog',
+    adapter: 'markdown-file',
+    path: process.env['F16_MAXANCE_CATALOG_PATH'] ?? '../MAXANCE catalogue produits agent.md',
+    intervalHours: 24,
     scheduled: true,
   });
 }

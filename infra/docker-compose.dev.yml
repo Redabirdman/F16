@@ -21,8 +21,11 @@ services:
       POSTGRES_USER: f16
       POSTGRES_PASSWORD: f16
       POSTGRES_DB: f16
+    # Host 5435 (not 5433) — 5433 collides with another project's DB on this
+    # machine, and backend/.env's DATABASE_URL points at 5435. Container port
+    # stays 5432.
     ports:
-      - '5433:5432'
+      - '5435:5432'
     volumes:
       - f16_postgres_data:/var/lib/postgresql/data
       - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
