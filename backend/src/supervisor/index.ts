@@ -31,6 +31,7 @@ import { HubSpotClient, startHubSpotSyncWorker } from '../integrations/hubspot/i
 import { spawn } from '../agents/registry.js';
 import { registerMaxanceOperatorClass } from '../agents/maxance-operator/index.js';
 import { registerReporterAgentClass } from '../agents/reporter-agent/index.js';
+import { registerVoiceOperatorClass } from '../agents/voice-operator/index.js';
 import {
   registerEngagementAgentClass,
   startEngagementScheduler,
@@ -78,6 +79,7 @@ export interface StartWorkersOptions {
     salesSpawn?: boolean;
     reporter?: boolean;
     maxanceOperator?: boolean;
+    voiceOperator?: boolean;
     knowledgeCurator?: boolean;
     engagementAgent?: boolean;
     supervisorAgent?: boolean;
@@ -98,6 +100,10 @@ export async function startWorkers(opts: StartWorkersOptions): Promise<WorkerSet
       opts.flags?.reporter ??
       Boolean(process.env.HUMAN_ACTION_GROUP_CHAT_ID && process.env.WAHA_BASE_URL),
     maxanceOperator: opts.flags?.maxanceOperator ?? Boolean(process.env.MAXANCE_DRIVER),
+    // Voice origination — env-gated on the jambonz config (VOICE_WS_URL is the
+    // sentinel; the agent itself re-checks the full env and disables cleanly
+    // when incomplete). Off on a dev box without the voice stack.
+    voiceOperator: opts.flags?.voiceOperator ?? Boolean(process.env.VOICE_WS_URL),
     knowledgeCurator: opts.flags?.knowledgeCurator ?? true,
     engagementAgent: opts.flags?.engagementAgent ?? true,
     supervisorAgent: opts.flags?.supervisorAgent ?? true,
@@ -197,6 +203,31 @@ export async function startWorkers(opts: StartWorkersOptions): Promise<WorkerSet
     }
   } else {
     logger.info('supervisor: maxance-operator SKIPPED (no MAXANCE_DRIVER set)');
+  }
+
+  // 5b. voice-operator singleton (M10). Consumes VOICE.CALL_SCHEDULED and
+  //     originates outbound calls via jambonz (OVH SIP trunk → Pipecat WS).
+  //     Env-gated on VOICE_WS_URL; the agent re-validates the full JAMBONZ_*
+  //     env on first use and fails a call cleanly (VOICE.CALL_FAILED) when
+  //     incomplete, so a partial config never crashes the process.
+  if (flags.voiceOperator) {
+    try {
+      registerVoiceOperatorClass();
+      const agent = await spawn({
+        role: 'voice-operator',
+        instanceId: 'singleton',
+        db: opts.db,
+      });
+      agents.push(agent);
+      logger.info('supervisor: voice-operator singleton started');
+    } catch (err) {
+      logger.error(
+        { err: err instanceof Error ? err.message : String(err) },
+        'supervisor: voice-operator failed to start',
+      );
+    }
+  } else {
+    logger.info('supervisor: voice-operator SKIPPED (no VOICE_WS_URL set)');
   }
 
   // 6. knowledge-curator (option B). Consumes KNOWLEDGE.REINDEX_REQUESTED

@@ -9,6 +9,7 @@ import type { Database } from './db/index.js';
 import { buildWhatsAppWebhook, parseAuthorisedResolvers } from './channels/whatsapp/webhook.js';
 import { buildLeadIntakeRouter } from './leads/intake-http.js';
 import { buildVoiceRouter } from './http/voice.js';
+import { buildJambonzCallHookRouter } from './http/jambonz-call-hook.js';
 import { buildAdminLeadsRouter } from './admin/leads-list.js';
 import { buildAdminLeadDetailRouter } from './admin/lead-detail.js';
 import { buildAdminHumanActionsRouter } from './admin/human-actions.js';
@@ -112,6 +113,23 @@ export function buildApp(opts: BuildAppOptions = {}): Hono {
       ...(opts.leadIntakeHmacSecret ? { hmacSecret: opts.leadIntakeHmacSecret } : {}),
     });
     app.route('/', voiceApp);
+
+    // M10 — jambonz call-control webhook (`POST /v1/voice/jambonz/call-hook/:token`).
+    // jambonz fetches this when an outbound call answers; it returns the
+    // `listen` verb that bridges the call audio bidirectionally to Pipecat.
+    // Gated by a shared path token (jambonz can't HMAC its body) — VOICE_WS_URL
+    // + VOICE_CALL_HOOK_TOKEN come from env; mounted only when VOICE_WS_URL is
+    // configured so dev boxes without the voice stack don't expose a dead route.
+    const voiceWsUrl = process.env.VOICE_WS_URL;
+    if (voiceWsUrl) {
+      const callHookApp = buildJambonzCallHookRouter({
+        voiceWsUrl,
+        ...(process.env.VOICE_CALL_HOOK_TOKEN
+          ? { callHookToken: process.env.VOICE_CALL_HOOK_TOKEN }
+          : {}),
+      });
+      app.route('/', callHookApp);
+    }
 
     // M14 V1 + V2 — admin surface. Auth middleware reads
     // ADMIN_BEARER_TOKEN; when unset (dev), it's a no-op. Mount BEFORE the
