@@ -21,10 +21,11 @@ Design rules for this module:
     conversational decision is made by the backend brain.
   * The TRANSPORT is abstract/injectable (`VoiceTransport`) so tests run
     against a mock with no live SIP/WebSocket connection.
-  * The STT/TTS provider PLUGINS are attached lazily behind TODO(creds)
-    seams: importing them at module load needs API keys (and the
-    deepgram-sdk pinned here cannot import the STT plugin), so we never do
-    it at import time. `build_pipeline()` is where real creds wire in.
+  * The STT/TTS provider PLUGINS are constructed lazily inside the
+    `build_*_service()` builders — the speech SDKs (deepgram-sdk, azure) are
+    imported INSIDE the builders, so importing this module never drags them in.
+    The builders read API keys from config and instantiate the real Pipecat
+    services (construction is offline; no socket opens until the pipeline runs).
 
 ENV (see .env.template):
   DEEPGRAM_API_KEY  — powers BOTH Deepgram STT and Deepgram TTS.
@@ -67,7 +68,11 @@ class TtsProvider(StrEnum):
 
 # Locked French model identifiers (per project_voice_stack memory).
 DEEPGRAM_STT_MODEL_FR = "nova-3"
-DEEPGRAM_TTS_MODEL_FR = "aura-2-thalia-fr"  # Aura-2 French voice
+# Deepgram Aura-2 French female voice. Per Deepgram's TTS model catalog the
+# only Aura-2 FRENCH voices are `aura-2-agathe-fr` (female) and
+# `aura-2-hector-fr` (male); Agathe is the natural-female default we speak with.
+# (The older "aura-2-thalia-fr" id is invalid — Thalia is an English-only voice.)
+DEEPGRAM_TTS_MODEL_FR = "aura-2-agathe-fr"
 AZURE_TTS_VOICE_FR = "fr-FR-DeniseNeural"
 PIPELINE_LANGUAGE = "fr"
 
@@ -203,50 +208,56 @@ class BackendTurnProcessor(FrameProcessor):
 def build_stt_service(config: VoicePipelineConfig) -> FrameProcessor:
     """Construct the Deepgram Nova-3 FR STT processor.
 
-    TODO(creds): wire the real plugin once DEEPGRAM_API_KEY is provisioned
-    AND deepgram-sdk is aligned with pipecat's STT client. The currently
-    pinned deepgram-sdk cannot import `DeepgramSTTService`
-    (missing `AsyncDeepgramClient`), so this import is intentionally lazy
-    and guarded — it MUST NOT run at module import time or in tests.
+    Returns a live `DeepgramSTTService` configured for French Nova-3. The API
+    key is read from config (never hardcoded); model + language are passed via
+    pipecat's `Settings` object (the canonical API in 1.3.0).
 
-        from pipecat.services.deepgram.stt import DeepgramSTTService
-        from pipecat.transcriptions.language import Language
-        return DeepgramSTTService(
-            api_key=config.deepgram_api_key,
-            model=config.stt_model,          # nova-3
-            language=Language.FR,
-        )
+    Imports stay LAZY (inside the function) so importing this module never
+    requires the speech SDKs — only constructing a service does. Construction
+    itself stores config and does NOT open any network connection.
     """
-    raise NotImplementedError(
-        "TODO(creds): attach DeepgramSTTService once DEEPGRAM_API_KEY + "
-        "deepgram-sdk alignment are in place. See build_stt_service docstring."
+    from pipecat.services.deepgram.stt import DeepgramSTTService
+    from pipecat.transcriptions.language import Language
+
+    return DeepgramSTTService(
+        api_key=config.deepgram_api_key,
+        settings=DeepgramSTTService.Settings(
+            model=config.stt_model,  # nova-3
+            language=Language.FR,
+        ),
     )
 
 
 def build_tts_service(config: VoicePipelineConfig) -> FrameProcessor:
     """Construct the TTS processor for the configured provider.
 
-    TODO(creds): both branches need live keys. Imports are lazy so config
-    selection (the part under test) never requires credentials.
+    Deepgram (default): `DeepgramTTSService` speaking the Aura-2 French voice
+    (`DEEPGRAM_TTS_MODEL_FR` = aura-2-agathe-fr). Azure (fallback, when
+    TTS_PROVIDER=azure): `AzureTTSService` with fr-FR-DeniseNeural in the
+    configured region.
 
-    Deepgram (default):
-        from pipecat.services.deepgram.tts import DeepgramTTSService
-        return DeepgramTTSService(
-            api_key=config.deepgram_api_key,
-            voice=config.deepgram_tts_model,   # aura-2 FR
-        )
-
-    Azure (fallback, TTS_PROVIDER=azure):
+    API keys are read from config (never hardcoded). Imports stay LAZY so the
+    module imports without the speech SDKs; construction stores config only and
+    performs no network I/O.
+    """
+    if config.tts_provider is TtsProvider.AZURE:
         from pipecat.services.azure.tts import AzureTTSService
+
         return AzureTTSService(
             api_key=config.azure_speech_key,
             region=config.azure_speech_region,
-            voice=config.azure_tts_voice,      # fr-FR-DeniseNeural
+            settings=AzureTTSService.Settings(
+                voice=config.azure_tts_voice,  # fr-FR-DeniseNeural
+            ),
         )
-    """
-    raise NotImplementedError(
-        f"TODO(creds): attach {config.tts_provider.value} TTS service. "
-        "See build_tts_service docstring for the exact constructor."
+
+    from pipecat.services.deepgram.tts import DeepgramTTSService
+
+    return DeepgramTTSService(
+        api_key=config.deepgram_api_key,
+        settings=DeepgramTTSService.Settings(
+            voice=config.deepgram_tts_model,  # aura-2-agathe-fr
+        ),
     )
 
 
@@ -264,9 +275,9 @@ def build_pipeline(
         transport.input → STT → BackendTurnProcessor → TTS → transport.output
 
     The transport + backend are injected (tests pass mocks). STT/TTS are
-    real Pipecat services attached behind TODO(creds) seams. The processor
-    chain shape itself is fully exercised in tests; only the live provider
-    plugins require credentials to instantiate.
+    real Pipecat services built by the `build_*_service()` helpers; they read
+    API keys from `config` and construct offline (no socket until the pipeline
+    runs). The processor chain shape is fully exercised in tests.
     """
     from pipecat.pipeline.pipeline import Pipeline
 
@@ -278,9 +289,9 @@ def build_pipeline(
     )
     stages: list[FrameProcessor] = [
         transport.input(),
-        build_stt_service(config),  # TODO(creds)
+        build_stt_service(config),  # Deepgram Nova-3 FR
         turn_processor,
-        build_tts_service(config),  # TODO(creds)
+        build_tts_service(config),  # Deepgram Aura-2 FR | Azure Neural FR
         transport.output(),
     ]
     return Pipeline(stages)

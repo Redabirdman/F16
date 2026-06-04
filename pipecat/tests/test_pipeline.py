@@ -83,16 +83,46 @@ def test_config_unknown_provider_falls_back_to_deepgram(
     assert config.tts_provider is TtsProvider.DEEPGRAM
 
 
-def test_build_services_are_creds_gated_todo_seams() -> None:
-    """STT/TTS builders are TODO(creds) seams — they raise NotImplementedError
-    until real keys + plugins attach, so config selection stays test-safe."""
-    config = VoicePipelineConfig(tts_provider=TtsProvider.DEEPGRAM)
-    with pytest.raises(NotImplementedError):
-        build_stt_service(config)
-    with pytest.raises(NotImplementedError):
-        build_tts_service(config)
-    with pytest.raises(NotImplementedError):
-        build_tts_service(VoicePipelineConfig(tts_provider=TtsProvider.AZURE))
+def test_build_stt_service_constructs_deepgram_nova3_fr() -> None:
+    """STT builder returns a live Deepgram Nova-3 FR service. Construction stores
+    the (dummy) key and config only — no network I/O — so this is test-safe."""
+    from pipecat.services.deepgram.stt import DeepgramSTTService
+
+    svc = build_stt_service(
+        VoicePipelineConfig(tts_provider=TtsProvider.DEEPGRAM, deepgram_api_key="dg-dummy")
+    )
+    assert isinstance(svc, DeepgramSTTService)
+
+
+def test_build_tts_service_constructs_deepgram_aura2_fr() -> None:
+    """Default (deepgram) TTS builder returns a Deepgram Aura-2 FR service."""
+    from pipecat.services.deepgram.tts import DeepgramTTSService
+
+    svc = build_tts_service(
+        VoicePipelineConfig(tts_provider=TtsProvider.DEEPGRAM, deepgram_api_key="dg-dummy")
+    )
+    assert isinstance(svc, DeepgramTTSService)
+
+
+def test_build_tts_service_constructs_azure_fallback() -> None:
+    """Azure fallback (TTS_PROVIDER=azure) TTS builder returns an Azure service."""
+    from pipecat.services.azure.tts import AzureTTSService
+
+    svc = build_tts_service(
+        VoicePipelineConfig(
+            tts_provider=TtsProvider.AZURE,
+            azure_speech_key="az-dummy",
+            azure_speech_region="francecentral",
+        )
+    )
+    assert isinstance(svc, AzureTTSService)
+
+
+def test_aura2_voice_id_is_a_valid_french_voice() -> None:
+    """Guard the locked Aura-2 voice id: must be the French Agathe voice
+    (aura-2-<name>-fr), not the invalid English-only id used previously."""
+    assert DEEPGRAM_TTS_MODEL_FR == "aura-2-agathe-fr"
+    assert DEEPGRAM_TTS_MODEL_FR.endswith("-fr")
 
 
 # --------------------------------------------------------------------------

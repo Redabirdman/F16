@@ -3,15 +3,6 @@ revision = 3
 requires-python = "==3.12.*"
 
 [[package]]
-name = "aenum"
-version = "3.1.17"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/07/e9/8b283567c1fef7c24d1f390b37daede8b61593d8cdaffb8e95d571699e83/aenum-3.1.17.tar.gz", hash = "sha256:a969a4516b194895de72c875ece355f17c0d272146f7fda346ef74f93cf4d5ba", size = 137648, upload-time = "2026-03-20T20:43:29.846Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/48/8d/1fe30c6fd8999b9d462547c4a1bb6690bda24af38f2913c4bec7decb81f2/aenum-3.1.17-py3-none-any.whl", hash = "sha256:8b883a37a04e74cc838ac442bdd28c266eae5bbf13e1342c7ef123ed25230139", size = 165560, upload-time = "2026-03-20T20:43:27.681Z" },
-]
-
-[[package]]
 name = "aiofiles"
 version = "25.1.0"
 source = { registry = "https://pypi.org/simple" }
@@ -203,47 +194,19 @@ wheels = [
 ]
 
 [[package]]
-name = "dataclasses-json"
-version = "0.6.7"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "marshmallow" },
-    { name = "typing-inspect" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/64/a4/f71d9cf3a5ac257c993b5ca3f93df5f7fb395c725e7f1e6479d2514173c3/dataclasses_json-0.6.7.tar.gz", hash = "sha256:b6b3e528266ea45b9535223bc53ca645f5208833c29229e847b3f26a1cc55fc0", size = 32227, upload-time = "2024-06-09T16:20:19.103Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/c3/be/d0d44e092656fe7a06b55e6103cbce807cdbdee17884a5367c68c9860853/dataclasses_json-0.6.7-py3-none-any.whl", hash = "sha256:0dbf33f26c8d5305befd61b39d2b3414e8a407bedc2834dea9b8d642666fb40a", size = 28686, upload-time = "2024-06-09T16:20:16.715Z" },
-]
-
-[[package]]
 name = "deepgram-sdk"
-version = "3.11.0"
+version = "7.3.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "aenum" },
-    { name = "aiofiles" },
-    { name = "aiohttp" },
-    { name = "dataclasses-json" },
-    { name = "deprecation" },
     { name = "httpx" },
+    { name = "pydantic" },
+    { name = "pydantic-core" },
     { name = "typing-extensions" },
     { name = "websockets" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/45/e8/7eb68bfd1b18ec9141d13cf448c257d601a12139f4afe11e4e24553ade49/deepgram_sdk-3.11.0.tar.gz", hash = "sha256:d929149ae7ded113e5736e87a5102523bae6e88203d5bfc308ebb01e78a2a032", size = 93007, upload-time = "2025-04-14T16:08:56.031Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/1e/f4/72418cc556fbf08216a1cdd66b11affb4077bbd749c1d6b0e77043b87fd2/deepgram_sdk-7.3.1.tar.gz", hash = "sha256:eaade4ea4bead9f009490cf20dcec09a0abd184af112e8a5ddb50cc82b7f98b9", size = 208270, upload-time = "2026-06-03T12:53:03.314Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/3a/17/277a46505d320dfdf3069e21af98463cded0b593321b33e3ea4a05675cb9/deepgram_sdk-3.11.0-py3-none-any.whl", hash = "sha256:b3bd83f3b7485643fc86761773d9d408a1f861698d228d0b7afa5a7054528a14", size = 153071, upload-time = "2025-04-14T16:08:54.815Z" },
-]
-
-[[package]]
-name = "deprecation"
-version = "2.1.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "packaging" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/5a/d3/8ae2869247df154b64c1884d7346d412fed0c49df84db635aab2d1c40e62/deprecation-2.1.0.tar.gz", hash = "sha256:72b3bde64e5d778694b0cf68178aed03d15e15477116add3fb773e581f9518ff", size = 173788, upload-time = "2020-04-20T14:23:38.738Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/02/c3/253a89ee03fc9b9682f1541728eb66db7db22148cd94f89ab22528cd1e1b/deprecation-2.1.0-py2.py3-none-any.whl", hash = "sha256:a10811591210e1fb0e768a8c25517cabeabcba6f0bf96564f8ff45189f90b14a", size = 11178, upload-time = "2020-04-20T14:23:36.581Z" },
+    { url = "https://files.pythonhosted.org/packages/a2/25/12535afe1c5e70988bc385109d2161f35d5e125ef52bef4bff25e018ca56/deepgram_sdk-7.3.1-py3-none-any.whl", hash = "sha256:57b01059240ee8193116773a7b1cec7d36802cee8c26d69939601c2497d1aafa", size = 559927, upload-time = "2026-06-03T12:53:01.712Z" },
 ]
 
 [[package]]
@@ -269,12 +232,10 @@ name = "f16-pipecat"
 version = "0.0.1"
 source = { editable = "." }
 dependencies = [
-    { name = "azure-cognitiveservices-speech" },
-    { name = "deepgram-sdk" },
     { name = "fastapi" },
     { name = "httpx" },
     { name = "loguru" },
-    { name = "pipecat-ai" },
+    { name = "pipecat-ai", extra = ["azure", "deepgram"] },
     { name = "pydantic" },
     { name = "python-dotenv" },
     { name = "uvicorn", extra = ["standard"] },
@@ -290,13 +251,11 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "azure-cognitiveservices-speech", specifier = ">=1.40.0,<2.0" },
-    { name = "deepgram-sdk", specifier = ">=3.7.0,<4.0" },
     { name = "fastapi", specifier = ">=0.115.0,<1.0" },
     { name = "httpx", specifier = ">=0.27.0,<1.0" },
     { name = "loguru", specifier = ">=0.7.0,<1.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.11.0,<2.0" },
-    { name = "pipecat-ai", specifier = ">=0.0.50" },
+    { name = "pipecat-ai", extras = ["deepgram", "azure"], specifier = ">=1.3.0,<1.4" },
     { name = "pydantic", specifier = ">=2.0,<3.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0,<9.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24.0,<1.0" },
@@ -516,18 +475,6 @@ wheels = [
 ]
 
 [[package]]
-name = "marshmallow"
-version = "3.26.2"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "packaging" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/55/79/de6c16cc902f4fc372236926b0ce2ab7845268dcc30fb2fbb7f71b418631/marshmallow-3.26.2.tar.gz", hash = "sha256:bbe2adb5a03e6e3571b573f42527c6fe926e17467833660bebd11593ab8dfd57", size = 222095, upload-time = "2025-12-22T06:53:53.309Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/be/2f/5108cb3ee4ba6501748c4908b908e55f42a5b66245b4cfe0c99326e1ef6e/marshmallow-3.26.2-py3-none-any.whl", hash = "sha256:013fa8a3c4c276c24d26d84ce934dc964e2aa794345a0f8c7e5a7191482c8a73", size = 50964, upload-time = "2025-12-22T06:53:51.801Z" },
-]
-
-[[package]]
 name = "mpmath"
 version = "1.3.0"
 source = { registry = "https://pypi.org/simple" }
@@ -744,6 +691,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/92/cc/8352e30c47ee4fd075b9a0f3d91183294582578f07289180a30fc8228409/pipecat_ai-1.3.0.tar.gz", hash = "sha256:abeb9d95b1df2f35b855334cda1899fc603124d5448967c82ba08a94c604318f", size = 11260868, upload-time = "2026-05-29T01:03:00.532Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b6/73/fff17b48cd254ad1c358d612ce92fcc342838e0fc43cc235aca3c70527fb/pipecat_ai-1.3.0-py3-none-any.whl", hash = "sha256:59d4950a61a0a201cf551354d8cdec038c1bdf457df080cd41d29d7ff53e0b2e", size = 10905336, upload-time = "2026-05-29T01:02:57.764Z" },
+]
+
+[package.optional-dependencies]
+azure = [
+    { name = "azure-cognitiveservices-speech" },
+]
+deepgram = [
+    { name = "deepgram-sdk" },
+    { name = "websockets" },
 ]
 
 [[package]]
@@ -1085,19 +1041,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/72/94/1a15dd82efb362ac84269196e94cf00f187f7ed21c242792a923cdb1c61f/typing_extensions-4.15.0.tar.gz", hash = "sha256:0cea48d173cc12fa28ecabc3b837ea3cf6f38c6d1136f85cbaaf598984861466", size = 109391, upload-time = "2025-08-25T13:49:26.313Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/18/67/36e9267722cc04a6b9f15c7f3441c2363321a3ea07da7ae0c0707beb2a9c/typing_extensions-4.15.0-py3-none-any.whl", hash = "sha256:f0fa19c6845758ab08074a0cfa8b7aecb71c999ca73d62883bc25cc018c4e548", size = 44614, upload-time = "2025-08-25T13:49:24.86Z" },
-]
-
-[[package]]
-name = "typing-inspect"
-version = "0.9.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "mypy-extensions" },
-    { name = "typing-extensions" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/dc/74/1789779d91f1961fa9438e9a8710cdae6bd138c80d7303996933d117264a/typing_inspect-0.9.0.tar.gz", hash = "sha256:b23fc42ff6f6ef6954e4852c1fb512cdd18dbea03134f91f856a95ccc9461f78", size = 13825, upload-time = "2023-05-24T20:25:47.612Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/65/f3/107a22063bf27bdccf2024833d3445f4eea42b2e598abfbd46f6a63b6cb0/typing_inspect-0.9.0-py3-none-any.whl", hash = "sha256:9ee6fc59062311ef8547596ab6b955e1b8aa46242d854bfc78f4f6b0eff35f9f", size = 8827, upload-time = "2023-05-24T20:25:45.287Z" },
 ]
 
 [[package]]
