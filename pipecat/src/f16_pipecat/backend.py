@@ -43,7 +43,10 @@ from f16_pipecat.logging import logger
 _DEFAULT_SIG_HEADER = "x-f16-signature"
 _DEFAULT_BASE_URL = "http://backend:3001"
 _TURN_PATH = "/v1/voice/turn"
+_SESSION_PATH = "/v1/voice/session"
 _DEFAULT_TIMEOUT_S = 10.0
+# Header carrying the shared-secret that authenticates the session-lookup GET.
+_SESSION_SECRET_HEADER = "x-f16-internal-secret"
 
 
 class BackendTurnResult(BaseModel):
@@ -53,6 +56,13 @@ class BackendTurnResult(BaseModel):
     session_state: str = Field(description="live | ended | escalated.")
 
 
+class BackendSession(BaseModel):
+    """Parsed `/v1/voice/session/{id}` response — the call's F16 identity."""
+
+    lead_id: str = Field(description="F16 lead id this voice session belongs to.")
+    customer_id: str = Field(description="F16 customer id matched on phone.")
+
+
 @dataclass(slots=True)
 class BackendConfig:
     """Resolved connection settings for the F16 backend voice endpoint."""
@@ -60,6 +70,7 @@ class BackendConfig:
     base_url: str
     secret: str
     sig_header: str
+    session_secret: str = ""
     timeout_s: float = _DEFAULT_TIMEOUT_S
 
     @classmethod
@@ -70,16 +81,22 @@ class BackendConfig:
           F16_BACKEND_BASE_URL  — backend origin (no trailing /v1/voice/turn)
           F16_WEBHOOK_SECRET    — HMAC secret (must equal backend HMAC_WEBHOOK_SECRET)
           F16_WEBHOOK_SECRET_HEADER — optional signature header-name override
+          F16_SESSION_LOOKUP_SECRET — shared secret for GET /v1/voice/session/{id}
         """
         return cls(
             base_url=os.environ.get("F16_BACKEND_BASE_URL", _DEFAULT_BASE_URL).rstrip("/"),
             secret=os.environ.get("F16_WEBHOOK_SECRET", ""),
             sig_header=os.environ.get("F16_WEBHOOK_SECRET_HEADER", _DEFAULT_SIG_HEADER),
+            session_secret=os.environ.get("F16_SESSION_LOOKUP_SECRET", ""),
         )
 
 
 class BackendTurnError(RuntimeError):
     """Raised when the backend turn call fails (non-2xx or malformed body)."""
+
+
+class BackendSessionError(RuntimeError):
+    """Raised when the session lookup fails (non-2xx, malformed, or unreachable)."""
 
 
 class F16BackendClient:
@@ -156,9 +173,48 @@ class F16BackendClient:
 
         return BackendTurnResult(reply_text=reply_text, session_state=session_state)
 
+    async def get_session(self, session_id: str) -> BackendSession:
+        """Look up a voice session's F16 identity (leadId + customerId).
+
+        Asterisk's AudioSocket leg carries only the call UUID (== sessionId); the
+        backend created the session at call-setup time and holds the lead/customer
+        mapping. We GET it here so the runner can stamp each `/v1/voice/turn`.
+
+        Authenticated with a shared secret in `x-f16-internal-secret` (NOT the
+        HMAC scheme — this is a GET with no body to sign). Raises
+        `BackendSessionError` on transport failure, non-2xx, or a body that does
+        not match the contract.
+        """
+        url = f"{self._config.base_url}{_SESSION_PATH}/{session_id}"
+        headers = {_SESSION_SECRET_HEADER: self._config.session_secret}
+        try:
+            resp = await self._http.get(url, headers=headers)
+        except httpx.HTTPError as exc:
+            logger.error(f"voice: session lookup transport error session={session_id}: {exc}")
+            raise BackendSessionError(f"backend_unreachable: {exc}") from exc
+
+        if resp.status_code >= 400:
+            logger.error(
+                f"voice: session lookup http {resp.status_code} session={session_id} "
+                f"body={resp.text[:200]}"
+            )
+            raise BackendSessionError(f"backend_status_{resp.status_code}")
+
+        try:
+            data = resp.json()
+            lead_id = str(data["leadId"])
+            customer_id = str(data["customerId"])
+        except (ValueError, KeyError, TypeError) as exc:
+            logger.error(f"voice: session lookup malformed body session={session_id}: {exc}")
+            raise BackendSessionError("backend_malformed_response") from exc
+
+        return BackendSession(lead_id=lead_id, customer_id=customer_id)
+
 
 __all__ = [
     "BackendConfig",
+    "BackendSession",
+    "BackendSessionError",
     "BackendTurnError",
     "BackendTurnResult",
     "F16BackendClient",

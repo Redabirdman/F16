@@ -1,18 +1,19 @@
 /**
- * Voice Operator Agent tests (M10).
+ * Voice Operator Agent tests (Asterisk ARI).
  *
  * DB-gated (TEST_DATABASE_URL + PII_ENCRYPTION_KEY) and Redis-gated
  * (TEST_REDIS_URL) — the agent's `send()` emits VOICE.CALL_STARTED /
- * VOICE.CALL_FAILED through the dispatcher, which writes the durable
- * `agent_messages` row AND enqueues a BullMQ job, so Redis is required.
+ * VOICE.CALL_FAILED through the dispatcher (durable agent_messages row + BullMQ
+ * enqueue) AND putSession() writes the session registry to Redis.
  *
  * We exercise `onMessage` directly via a Testable subclass (same seam as the
- * Engagement Agent suite) with a FAKE jambonz client injected — no network.
+ * Engagement Agent suite) with a FAKE Asterisk client injected — no network.
  * Covers:
- *   - VOICE.CALL_SCHEDULED → originateCall called with the resolved phone →
- *     VOICE.CALL_STARTED emitted + audit row written
+ *   - VOICE.CALL_SCHEDULED → originateCall called with the resolved phone +
+ *     sessionId → VOICE.CALL_STARTED {callId, channelId} emitted + audit row +
+ *     session stored in Redis (getSession resolves it)
  *   - originateCall throws → VOICE.CALL_FAILED emitted (with reason)
- *   - jambonz client disabled (null) → VOICE.CALL_FAILED, no audit
+ *   - Asterisk client disabled (null) → VOICE.CALL_FAILED, no audit
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { randomBytes } from 'node:crypto';
@@ -20,13 +21,14 @@ import { sql } from 'drizzle-orm';
 import { createDb, type Database } from '../../src/db/index.js';
 import { agentMessages, auditLog } from '../../src/db/schema/index.js';
 import { insertCustomer } from '../../src/db/repositories/customers.js';
-import { __resetForTests, shutdownQueues } from '../../src/queue/index.js';
+import { __resetForTests, getRedis, shutdownQueues } from '../../src/queue/index.js';
 import { VoiceOperatorAgent } from '../../src/agents/voice-operator/agent.js';
+import { getSession, type RedisLike } from '../../src/voice/session-store.js';
 import type { AgentMessageEnvelope, MessageHandlerResult } from '../../src/messaging/dispatcher.js';
-import type { JambonzClient, OriginateCallInput } from '../../src/voice/jambonz-client.js';
+import type { AsteriskAriClient, OriginateCallInput } from '../../src/voice/asterisk-client.js';
 
 const pgUrl = process.env.TEST_DATABASE_URL;
-// The whole suite needs Redis (send() → BullMQ). Gate on BOTH.
+// The whole suite needs Redis (send() → BullMQ + putSession). Gate on BOTH.
 const d = describe.skipIf(!pgUrl || !process.env.TEST_REDIS_URL);
 
 let savedPiiKey: string | undefined;
@@ -43,18 +45,15 @@ afterAll(() => {
   else process.env.PII_ENCRYPTION_KEY = savedPiiKey;
 });
 
-/** Fake jambonz client capturing originate calls + a programmable outcome. */
-class FakeJambonzClient {
+/** Fake Asterisk client capturing originate calls + a programmable outcome. */
+class FakeAsteriskClient {
   public calls: OriginateCallInput[] = [];
-  public nextSid = 'jb-call-sid-1';
+  public nextChannelId = 'chan-1234.5';
   public throwReason: string | null = null;
-  async originateCall(input: OriginateCallInput): Promise<{ callSid: string }> {
+  async originateCall(input: OriginateCallInput): Promise<{ channelId: string }> {
     this.calls.push(input);
     if (this.throwReason) throw new Error(this.throwReason);
-    return { callSid: this.nextSid };
-  }
-  get voiceWsUrl(): string {
-    return 'ws://pipecat/voice/ws';
+    return { channelId: this.nextChannelId };
   }
 }
 
@@ -118,14 +117,14 @@ d('VoiceOperatorAgent.onMessage', () => {
     await db.execute(sql`TRUNCATE TABLE agent_messages RESTART IDENTITY CASCADE`).catch(() => {});
   });
 
-  function newAgent(client: FakeJambonzClient | null): TestableVoiceOperator {
+  function newAgent(client: FakeAsteriskClient | null): TestableVoiceOperator {
     return new TestableVoiceOperator({
       role: 'voice-operator',
       instanceId: 'singleton',
       model: 'sonnet',
       queues: ['voice'],
       db,
-      jambonzClient: client as unknown as JambonzClient | null,
+      asteriskClient: client as unknown as AsteriskAriClient | null,
     });
   }
 
@@ -140,40 +139,46 @@ d('VoiceOperatorAgent.onMessage', () => {
     return c.id;
   }
 
-  it('originates a call and emits VOICE.CALL_STARTED + audit on success', async () => {
+  it('originates a call and emits VOICE.CALL_STARTED + audit + session on success', async () => {
     const customerId = await seedCustomer('+33611223344');
-    const fake = new FakeJambonzClient();
+    const fake = new FakeAsteriskClient();
     const agent = newAgent(fake);
 
     const result = await agent.handle(envelope(CALL_ID, customerId, '+33600000000'));
     expect(result).toMatchObject({ ok: true, result: { started: true } });
 
-    // Resolved the DB phone (not the stale intent toNumber).
+    // Resolved the DB phone (not the stale intent toNumber) + passed a sessionId.
     expect(fake.calls).toHaveLength(1);
     expect(fake.calls[0]!.to).toBe('+33611223344');
-    expect(fake.calls[0]!.metadata.callId).toBe(CALL_ID);
-    expect(fake.calls[0]!.metadata.customerId).toBe(customerId);
+    const sessionId = fake.calls[0]!.sessionId;
+    expect(sessionId).toBeTruthy();
 
-    // VOICE.CALL_STARTED emitted.
+    // Session registry written — Pipecat resolves leadId/customerId from it.
+    // leadId = the call's correlationId (CALL_ID here); customerId = the seed.
+    const stored = await getSession(sessionId, getRedis() as unknown as RedisLike);
+    expect(stored).toEqual({ leadId: CALL_ID, customerId });
+
+    // VOICE.CALL_STARTED emitted with the channelId.
     const msgs = await db.select().from(agentMessages);
     const started = msgs.find((m) => m.intent === 'VOICE.CALL_STARTED');
     expect(started).toBeDefined();
     expect(started?.correlationId).toBe(CALL_ID);
-    expect((started?.payload as { customerId: string }).customerId).toBe(customerId);
+    expect((started?.payload as { channelId: string }).channelId).toBe('chan-1234.5');
+    expect((started?.payload as { callId: string }).callId).toBe(CALL_ID);
 
     // Audit row written — records the customerId, never the phone.
     const audits = await db.select().from(auditLog);
     const row = audits.find((a) => a.action === 'voice.call.originated');
     expect(row).toBeDefined();
     expect(row?.targetId).toBe(customerId);
-    expect((row?.after as { jambonzCallSid: string }).jambonzCallSid).toBe('jb-call-sid-1');
+    expect((row?.after as { channelId: string }).channelId).toBe('chan-1234.5');
     // PII guard: the audit must not contain the phone number anywhere.
     expect(JSON.stringify(row)).not.toContain('+33611223344');
   });
 
   it('falls back to the intent toNumber when the customer has no DB phone', async () => {
     const customerId = await seedCustomer(null);
-    const fake = new FakeJambonzClient();
+    const fake = new FakeAsteriskClient();
     const agent = newAgent(fake);
 
     const result = await agent.handle(envelope(CALL_ID, customerId, '+33655555555'));
@@ -183,8 +188,8 @@ d('VoiceOperatorAgent.onMessage', () => {
 
   it('emits VOICE.CALL_FAILED with the reason when originateCall throws', async () => {
     const customerId = await seedCustomer('+33611223344');
-    const fake = new FakeJambonzClient();
-    fake.throwReason = 'jambonz_create_call_failed_503';
+    const fake = new FakeAsteriskClient();
+    fake.throwReason = 'asterisk_originate_failed_503';
     const agent = newAgent(fake);
 
     const result = await agent.handle(envelope(CALL_ID, customerId, '+33600000000'));
@@ -194,20 +199,20 @@ d('VoiceOperatorAgent.onMessage', () => {
     const msgs = await db.select().from(agentMessages);
     const failed = msgs.find((m) => m.intent === 'VOICE.CALL_FAILED');
     expect(failed).toBeDefined();
-    expect((failed?.payload as { reason: string }).reason).toBe('jambonz_create_call_failed_503');
+    expect((failed?.payload as { reason: string }).reason).toBe('asterisk_originate_failed_503');
 
     const audits = await db.select().from(auditLog);
     expect(audits.find((a) => a.action === 'voice.call.failed')).toBeDefined();
   });
 
-  it('emits VOICE.CALL_FAILED (no audit) when the jambonz client is disabled', async () => {
+  it('emits VOICE.CALL_FAILED (no audit) when the Asterisk client is disabled', async () => {
     const customerId = await seedCustomer('+33611223344');
     const agent = newAgent(null); // injected null = origination disabled
 
     const result = await agent.handle(envelope(CALL_ID, customerId, '+33600000000'));
     expect(result).toMatchObject({
       ok: true,
-      result: { failed: true, reason: 'jambonz_disabled_no_env' },
+      result: { failed: true, reason: 'asterisk_disabled_no_env' },
     });
 
     const msgs = await db.select().from(agentMessages);
@@ -218,7 +223,7 @@ d('VoiceOperatorAgent.onMessage', () => {
   });
 
   it('ignores non-VOICE.CALL_SCHEDULED intents', async () => {
-    const agent = newAgent(new FakeJambonzClient());
+    const agent = newAgent(new FakeAsteriskClient());
     const env = {
       ...envelope(CALL_ID, '22222222-2222-4222-b222-222222222222', '+33600000000'),
       intent: 'VOICE.CALL_STARTED',

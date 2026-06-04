@@ -31,10 +31,9 @@ backend is called (no live network).
 
 from __future__ import annotations
 
-import contextlib
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, WebSocket
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from f16_pipecat.backend import BackendTurnError, F16BackendClient
@@ -178,66 +177,11 @@ def end_call(session_id: str) -> None:
     return None
 
 
-# --------------------------------------------------------------------------
-# Jambonz bidirectional-audio WebSocket (M10 real transport)
-# --------------------------------------------------------------------------
-
-# WebSocket close code for a policy violation (RFC 6455 §7.4.1). We use it to
-# reject a jambonz connection whose first frame lacks the required call
-# identity (sessionId/leadId/customerId).
-_WS_POLICY_VIOLATION = 1008
-
-
-@router.websocket("/ws")
-async def voice_ws(websocket: WebSocket) -> None:
-    """jambonz bidirectional-audio socket → cascaded Pipecat pipeline.
-
-    jambonz (driven by the backend's `listen` verb) connects here and streams
-    the call's audio. We:
-      1. accept the socket,
-      2. read jambonz's first text frame (call metadata: sessionId/leadId/
-         customerId + negotiated sampleRate),
-      3. reject (close 1008) if that identity is missing/malformed,
-      4. otherwise hand the live socket to `run_voice_call`, which builds the
-         transport + pipeline and runs the call to completion.
-
-    All conversational logic is in the backend brain; this route is pure I/O
-    wiring. Heavy pipecat imports stay inside `runner` (lazy) so importing this
-    module at app boot remains cheap.
-    """
-    # Imported lazily: keeps `f16_pipecat.voice` import-light and lets tests
-    # that never touch the WS path avoid pulling pipecat transports.
-    from f16_pipecat.runner import (
-        MissingCallMetadataError,
-        read_call_metadata,
-        run_voice_call,
-    )
-
-    await websocket.accept()
-    try:
-        meta = await read_call_metadata(websocket)
-    except MissingCallMetadataError as exc:
-        logger.warning(f"voice-ws: rejecting call — {exc}")
-        await websocket.close(code=_WS_POLICY_VIOLATION)
-        return
-
-    logger.info(
-        f"voice-ws: accepted call session={meta.session_id} "
-        f"lead={meta.lead_id} rate={meta.sample_rate}"
-    )
-    try:
-        await run_voice_call(
-            websocket,
-            session_id=meta.session_id,
-            lead_id=meta.lead_id,
-            customer_id=meta.customer_id,
-            metadata=meta,
-        )
-    except Exception as exc:  # noqa: BLE001 — last-ditch guard so one bad call
-        # never takes down the worker; log + ensure the socket is closed.
-        logger.error(f"voice-ws: call failed session={meta.session_id}: {exc}")
-        with contextlib.suppress(Exception):  # socket may already be gone
-            await websocket.close()
+# The real-time call audio no longer flows through FastAPI: the OVH SIP →
+# Asterisk leg streams raw audio over a plain TCP AudioSocket connection
+# (Asterisk dials OUT to our TCP server in `f16_pipecat.audiosocket`). This
+# router keeps only the HTTP session-management surface (sessions/new, turn,
+# sessions/{id}/end). The former jambonz `/voice/ws` WebSocket route is gone.
 
 
 def _reset_sessions_for_tests() -> None:

@@ -1,28 +1,32 @@
 /**
- * Voice Operator Agent (M10) — outbound-call origination.
+ * Voice Operator Agent — outbound-call origination (Asterisk ARI).
  *
  * Consumes a single intent: `VOICE.CALL_SCHEDULED` {callId, customerId,
- * toNumber, scheduledAt}. When the system decides to phone a customer (e.g.
- * the Engagement Agent for a WhatsApp-silent lead), it emits this intent; the
- * Voice Operator turns it into a live call:
+ * toNumber, scheduledAt}. When the system decides to phone a customer (e.g. the
+ * Engagement Agent for a WhatsApp-silent lead), it emits this intent; the Voice
+ * Operator turns it into a live call:
  *
- *   1. Resolve the customer's phone (prefer the verified DB phone over the raw
+ *   1. Generate a sessionId (uuid v4) — this becomes the Asterisk AudioSocket
+ *      AS_UUID and correlates the call ↔ Pipecat ↔ our VOICE.* intents ↔ audit.
+ *   2. Resolve the customer's phone (prefer the verified DB phone over the raw
  *      toNumber on the intent — the intent's number may be stale).
- *   2. Generate a sessionId (correlates the jambonz call ↔ Pipecat WS ↔ our
- *      VOICE.* intents ↔ audit).
- *   3. jambonzClient.originateCall(...) → jambonz dials over the OVH trunk and,
- *      on answer, fetches our call-hook which bridges audio to Pipecat.
- *   4. Emit VOICE.CALL_STARTED on success; VOICE.CALL_FAILED on any error.
- *   5. Write a maxance-style audit row either way.
+ *   3. putSession(sessionId, {leadId, customerId}) so Pipecat can resolve the
+ *      lead/customer from the AudioSocket UUID via GET /v1/voice/session/:id.
+ *   4. asteriskClient.originateCall({ to, sessionId }) → Asterisk dials over the
+ *      OVH PJSIP trunk and, on answer, the f16-dial dialplan bridges audio to
+ *      AudioSocket → Pipecat. No call-control webhook (the dialplan owns it).
+ *   5. Emit VOICE.CALL_STARTED {callId, channelId} on success; VOICE.CALL_FAILED
+ *      {callId, reason} on any error.
+ *   6. Write an audit row either way.
  *
  * Mirrors the maxance-operator pattern: a BaseAgent singleton, env-gated on the
- * jambonz config (a process without JAMBONZ_* env can't originate, so a stray
+ * Asterisk config (a process without ASTERISK_* env can't originate, so a stray
  * VOICE.CALL_SCHEDULED resolves to a tagged VOICE.CALL_FAILED rather than a
- * crash). The jambonz client is injectable for tests.
+ * crash). The Asterisk client is injectable for tests.
  *
  * PII discipline: the destination phone is PII — it is NEVER logged or written
- * into an audit/intent payload. We log only callId + sessionId + the jambonz
- * call sid; the audit row records the customerId, not the number.
+ * into an audit/intent payload. We log only callId + sessionId + the Asterisk
+ * channelId; the audit row records the customerId, not the number.
  */
 import { randomUUID } from 'node:crypto';
 import { BaseAgent, type BaseAgentConfig } from '../base.js';
@@ -30,18 +34,15 @@ import type { AgentMessageEnvelope, MessageHandlerResult } from '../../messaging
 import { logger } from '../../logger.js';
 import { appendAudit } from '../../db/repositories/audit-log.js';
 import { getCustomerById } from '../../db/repositories/customers.js';
-import {
-  JambonzClient,
-  jambonzClientFromEnv,
-  type CallMetadata,
-} from '../../voice/jambonz-client.js';
+import { AsteriskAriClient, asteriskClientFromEnv } from '../../voice/asterisk-client.js';
+import { putSession } from '../../voice/session-store.js';
 
 export interface VoiceOperatorConfig extends BaseAgentConfig {
   /**
-   * Injectable jambonz client. When omitted, the agent lazily builds one from
-   * env on first use (`jambonzClientFromEnv`). Tests pass a fake.
+   * Injectable Asterisk ARI client. When omitted, the agent lazily builds one
+   * from env on first use (`asteriskClientFromEnv`). Tests pass a fake.
    */
-  jambonzClient?: JambonzClient | null;
+  asteriskClient?: AsteriskAriClient | null;
 }
 
 /** Shape of the VOICE.CALL_SCHEDULED payload (validated upstream by the registry). */
@@ -54,13 +55,13 @@ interface CallScheduledPayload {
 
 export class VoiceOperatorAgent extends BaseAgent {
   /** null = "not yet resolved"; set lazily from env on first handler call. */
-  private client: JambonzClient | null;
+  private client: AsteriskAriClient | null;
   private readonly clientInjected: boolean;
 
   constructor(cfg: VoiceOperatorConfig) {
     super(cfg);
-    this.client = cfg.jambonzClient ?? null;
-    this.clientInjected = cfg.jambonzClient !== undefined;
+    this.client = cfg.asteriskClient ?? null;
+    this.clientInjected = cfg.asteriskClient !== undefined;
   }
 
   protected async onMessage(envelope: AgentMessageEnvelope): Promise<MessageHandlerResult> {
@@ -79,14 +80,14 @@ export class VoiceOperatorAgent extends BaseAgent {
   }
 
   /**
-   * Resolve the jambonz client. If one was injected (tests / explicit wiring)
+   * Resolve the Asterisk client. If one was injected (tests / explicit wiring)
    * use it; otherwise build from env once and cache. A null result means the
    * env is incomplete → origination is disabled for this process.
    */
-  private resolveClient(): JambonzClient | null {
+  private resolveClient(): AsteriskAriClient | null {
     if (this.clientInjected) return this.client;
     if (this.client) return this.client;
-    this.client = jambonzClientFromEnv();
+    this.client = asteriskClientFromEnv();
     return this.client;
   }
 
@@ -99,7 +100,7 @@ export class VoiceOperatorAgent extends BaseAgent {
       return this.fail({
         callId,
         customerId,
-        reason: 'jambonz_disabled_no_env',
+        reason: 'asterisk_disabled_no_env',
         audit: false, // config gap, not a call attempt — skip the audit noise
       });
     }
@@ -126,22 +127,29 @@ export class VoiceOperatorAgent extends BaseAgent {
       return this.fail({ callId, customerId, reason: 'no_phone_for_customer' });
     }
 
-    const sessionId = `voice-${callId}-${randomUUID().slice(0, 8)}`;
-    const metadata: CallMetadata = {
-      sessionId,
-      // Pipecat's `leadId` slot — VOICE.* intents carry customerId, and the
-      // call-hook/Pipecat contract calls it leadId. We thread the customerId
-      // through as the lead correlation key (V1: one active lead per customer
-      // on the voice channel). callId remains the authoritative correlation id.
-      leadId: customerId,
-      customerId,
-      callId,
-    };
+    // sessionId = the Asterisk AudioSocket AS_UUID. uuid v4 — opaque + unique.
+    const sessionId = randomUUID();
+    // leadId correlation key: the call's correlationId carries the lead context
+    // when set; otherwise we fall back to the customerId (V1: one active lead
+    // per customer on the voice channel). callId stays the authoritative id.
+    const leadId = envelope.correlationId ?? customerId;
 
-    let callSid: string;
+    // Register the session BEFORE originating so Pipecat can resolve it the
+    // moment the AudioSocket connects (the lookup races call setup).
     try {
-      const res = await client.originateCall({ to: toNumber, metadata });
-      callSid = res.callSid;
+      await putSession(sessionId, { leadId, customerId });
+    } catch (err) {
+      logger.error(
+        { callId, customerId, sessionId, err: err instanceof Error ? err.message : String(err) },
+        'voice-operator: session registry write failed',
+      );
+      return this.fail({ callId, customerId, reason: 'session_store_failed' });
+    }
+
+    let channelId: string;
+    try {
+      const res = await client.originateCall({ to: toNumber, sessionId });
+      channelId = res.channelId;
     } catch (err) {
       const reason = err instanceof Error ? err.message : 'originate_failed';
       logger.error(
@@ -159,7 +167,7 @@ export class VoiceOperatorAgent extends BaseAgent {
         action: 'voice.call.originated',
         targetType: 'customer',
         targetId: customerId,
-        after: { callId, sessionId, jambonzCallSid: callSid },
+        after: { callId, sessionId, channelId },
         meta: { intent: 'VOICE.CALL_SCHEDULED' },
       });
     } catch (err) {
@@ -174,16 +182,18 @@ export class VoiceOperatorAgent extends BaseAgent {
     await this.send({
       toRole: 'sales-agent',
       intent: 'VOICE.CALL_STARTED',
-      payload: { callId, customerId },
+      // channelId is the new Asterisk ARI identifier; customerId is retained so
+      // downstream consumers (sales-agent) keep the lead correlation they had.
+      payload: { callId, customerId, channelId },
       correlationId: callId,
     });
 
     logger.info(
-      { callId, customerId, sessionId, jambonzCallSid: callSid, instanceId: this.instanceId },
+      { callId, customerId, sessionId, channelId, instanceId: this.instanceId },
       'voice-operator: outbound call started',
     );
 
-    return { ok: true, result: { started: true, sessionId, jambonzCallSid: callSid } };
+    return { ok: true, result: { started: true, sessionId, channelId } };
   }
 
   /**

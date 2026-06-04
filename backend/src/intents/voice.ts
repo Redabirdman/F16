@@ -16,6 +16,9 @@ export const VoiceCallStartedPayload = registerIntent(
   z.object({
     callId: z.string().uuid(),
     customerId: z.string().uuid(),
+    // Asterisk ARI channel id of the originated call. Optional for back-compat
+    // with any emitter that doesn't have it; the Asterisk voice-operator sets it.
+    channelId: z.string().optional(),
   }),
 );
 

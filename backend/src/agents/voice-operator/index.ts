@@ -2,7 +2,7 @@
  * Voice Operator Agent barrel (M10).
  *
  * Public surface used by the supervisor + tests. The agent consumes
- * VOICE.CALL_SCHEDULED and originates outbound calls via jambonz.
+ * VOICE.CALL_SCHEDULED and originates outbound calls via Asterisk ARI.
  */
 export { VoiceOperatorAgent, type VoiceOperatorConfig } from './agent.js';
 export {
