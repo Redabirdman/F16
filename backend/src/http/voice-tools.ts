@@ -141,7 +141,27 @@ export const VOICE_TOOLS = [
       "Récupérer le profil du client (nom, véhicule connu) pour personnaliser l'accueil d'un client existant.",
     parameters: { type: 'object', properties: {} },
   },
+  {
+    type: 'function',
+    name: 'terminer_appel',
+    description:
+      "Raccrocher l'appel. À appeler (1) si tu détectes une MESSAGERIE VOCALE / un répondeur (ex: 'laissez un message après le bip', 'votre correspondant n'est pas disponible', 'boîte vocale') — n'engage alors PAS de conversation ; (2) quand l'échange est terminé et que tu as dit au revoir.",
+    parameters: {
+      type: 'object',
+      properties: {
+        raison: {
+          type: 'string',
+          enum: ['messagerie_vocale', 'echange_termine', 'autre'],
+          description: 'Pourquoi tu raccroches.',
+        },
+      },
+      required: ['raison'],
+    },
+  },
 ] as const;
+
+/** Tool names that openai-sip handles itself (need call/WS control, not a builtin). */
+export const VOICE_TRANSPORT_TOOLS = new Set(['terminer_appel']);
 
 /** Build the registry ToolContext for this call. */
 function toolCtx(db: Database, ctx: VoiceToolCtx) {

@@ -44,7 +44,7 @@ import { getSession } from '../voice/session-store.js';
 import { insertTurn } from '../db/repositories/conversation-turns.js';
 import { appendAudit } from '../db/repositories/audit-log.js';
 import { ASSURYAL_VOICE_INSTRUCTIONS } from './voice-persona.js';
-import { VOICE_TOOLS, handleVoiceTool } from './voice-tools.js';
+import { VOICE_TOOLS, VOICE_TRANSPORT_TOOLS, handleVoiceTool } from './voice-tools.js';
 
 const OPENAI_API = 'https://api.openai.com/v1';
 const OPENAI_WS = 'wss://api.openai.com/v1/realtime';
@@ -241,7 +241,7 @@ function openControlSocket(ctx: CallContext, apiKey: string, db: Database): void
         response: {
           input: [],
           instructions:
-            "Présente-toi brièvement comme l'assistante d'Assuryal et demande chaleureusement en quoi tu peux aider, en une phrase.",
+            "Salue chaleureusement, présente-toi comme l'assistante d'Assuryal, glisse en une demi-phrase que l'appel peut être enregistré pour la qualité du service, puis demande en quoi tu peux aider — le tout en une à deux phrases courtes.",
         },
       }),
     );
@@ -271,7 +271,7 @@ function openControlSocket(ctx: CallContext, apiKey: string, db: Database): void
         // The model called our tool. Run it server-side, return the result,
         // then let the model continue. evt.call_id is the FUNCTION call id
         // (distinct from the SIP call_id) — it must echo back in the output.
-        void handleFunctionCall(ws, db, ctx, evt).catch((err: unknown) =>
+        void handleFunctionCall(ws, db, ctx, evt, apiKey).catch((err: unknown) =>
           logger.warn(
             { callId, err: err instanceof Error ? err.message : String(err) },
             'openai-sip: function call handler threw',
@@ -325,6 +325,7 @@ async function handleFunctionCall(
   db: Database,
   ctx: CallContext,
   evt: RealtimeEvent,
+  apiKey: string,
 ): Promise<void> {
   const callId = ctx.sipCallId;
   if (!evt.name || !evt.call_id) {
@@ -332,6 +333,32 @@ async function handleFunctionCall(
     return;
   }
   logger.info({ callId, tool: evt.name }, 'openai-sip: tool call');
+
+  // Transport tools (hangup) are handled here — they need the call + API key,
+  // not a backend builtin. terminer_appel: voicemail or graceful end-of-call.
+  if (VOICE_TRANSPORT_TOOLS.has(evt.name)) {
+    let reason = 'echange_termine';
+    try {
+      reason = (JSON.parse(evt.arguments ?? '{}') as { raison?: string }).raison ?? reason;
+    } catch {
+      /* keep default */
+    }
+    ws.send(
+      JSON.stringify({
+        type: 'conversation.item.create',
+        item: {
+          type: 'function_call_output',
+          call_id: evt.call_id,
+          output: JSON.stringify({ statut: 'au_revoir' }),
+        },
+      }),
+    );
+    logger.info({ callId, reason }, 'openai-sip: terminer_appel → hanging up');
+    // Voicemail → hang up immediately; graceful end → let a one-line goodbye play.
+    const delayMs = reason === 'messagerie_vocale' ? 250 : 3500;
+    setTimeout(() => void hangupCall(callId, apiKey), delayMs);
+    return;
+  }
 
   const output = await handleVoiceTool(
     db,
@@ -352,6 +379,21 @@ async function handleFunctionCall(
     }),
   );
   ws.send(JSON.stringify({ type: 'response.create' }));
+}
+
+/** Hang up an OpenAI realtime SIP call (voicemail detected or call finished). */
+async function hangupCall(callId: string, apiKey: string): Promise<void> {
+  try {
+    await fetch(`${OPENAI_API}/realtime/calls/${callId}/hangup`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${apiKey}` },
+    });
+  } catch (err) {
+    logger.warn(
+      { callId, err: err instanceof Error ? err.message : String(err) },
+      'openai-sip: hangup failed',
+    );
+  }
 }
 
 /**
