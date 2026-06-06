@@ -299,7 +299,7 @@ async def test_run_audiosocket_call_resolves_identity_and_runs(
 
     ran = {"completed": False}
 
-    async def fake_run_to_completion(pipeline: Any, call_ended: Any) -> None:
+    async def fake_run_to_completion(pipeline: Any, call_ended: Any, **_k: Any) -> None:
         ran["completed"] = True
 
     monkeypatch.setattr(runner_mod, "build_audiosocket_transport", fake_build_transport)
@@ -353,7 +353,7 @@ async def test_run_audiosocket_call_uses_explicit_ids_without_lookup(
 
     monkeypatch.setattr(pipeline_mod, "build_pipeline", fake_build_pipeline)
 
-    async def fake_run_to_completion(pipeline: Any, call_ended: Any) -> None: ...
+    async def fake_run_to_completion(pipeline: Any, call_ended: Any, **_k: Any) -> None: ...
 
     monkeypatch.setattr(runner_mod, "_run_pipeline_to_completion", fake_run_to_completion)
 
@@ -415,3 +415,86 @@ async def test_run_audiosocket_call_raises_when_lookup_fails() -> None:
             backend=backend,
         )
     await backend.aclose()
+
+
+@pytest.mark.asyncio
+async def test_run_pipeline_to_completion_pins_8k_sample_rate_and_greets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The worker StartFrame must carry the 8 kHz AudioSocket rate (the silent-
+    audio root cause), and a non-empty greeting must register on_pipeline_started.
+
+    Regression guard: building PipelineWorker WITHOUT params let the StartFrame
+    default to 16 kHz in / 24 kHz out, so Deepgram STT opened at 16 kHz while the
+    transport fed 8 kHz audio → no transcript → silence.
+    """
+    import pipecat.pipeline.worker as worker_mod
+    import pipecat.workers.runner as wrunner_mod
+
+    from f16_pipecat.audiosocket import AUDIOSOCKET_SAMPLE_RATE
+
+    captured: dict[str, Any] = {}
+
+    class _FakeWorker:
+        def __init__(self, pipeline: Any, *, params: Any) -> None:
+            captured["params"] = params
+            captured["handlers"] = []
+
+        def event_handler(self, name: str) -> Any:
+            def deco(fn: Any) -> Any:
+                captured["handlers"].append(name)
+                return fn
+
+            return deco
+
+    class _FakeRunner:
+        def __init__(self, *_a: Any, **_k: Any) -> None: ...
+        async def add_workers(self, *_w: Any) -> None: ...
+        async def run(self) -> None:
+            return None
+
+    monkeypatch.setattr(worker_mod, "PipelineWorker", _FakeWorker)
+    monkeypatch.setattr(wrunner_mod, "WorkerRunner", _FakeRunner)
+
+    call_ended = asyncio.Event()
+    call_ended.set()  # make the run() race resolve immediately
+    await runner_mod._run_pipeline_to_completion(object(), call_ended, greeting_text="Bonjour")
+
+    assert captured["params"].audio_in_sample_rate == AUDIOSOCKET_SAMPLE_RATE == 8000
+    assert captured["params"].audio_out_sample_rate == AUDIOSOCKET_SAMPLE_RATE == 8000
+    assert "on_pipeline_started" in captured["handlers"]
+
+
+@pytest.mark.asyncio
+async def test_run_pipeline_to_completion_skips_greeting_when_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty greeting must NOT register the on_pipeline_started handler."""
+    import pipecat.pipeline.worker as worker_mod
+    import pipecat.workers.runner as wrunner_mod
+
+    captured: dict[str, Any] = {"handlers": []}
+
+    class _FakeWorker:
+        def __init__(self, pipeline: Any, *, params: Any) -> None: ...
+        def event_handler(self, name: str) -> Any:
+            def deco(fn: Any) -> Any:
+                captured["handlers"].append(name)
+                return fn
+
+            return deco
+
+    class _FakeRunner:
+        def __init__(self, *_a: Any, **_k: Any) -> None: ...
+        async def add_workers(self, *_w: Any) -> None: ...
+        async def run(self) -> None:
+            return None
+
+    monkeypatch.setattr(worker_mod, "PipelineWorker", _FakeWorker)
+    monkeypatch.setattr(wrunner_mod, "WorkerRunner", _FakeRunner)
+
+    call_ended = asyncio.Event()
+    call_ended.set()
+    await runner_mod._run_pipeline_to_completion(object(), call_ended, greeting_text="")
+
+    assert "on_pipeline_started" not in captured["handlers"]

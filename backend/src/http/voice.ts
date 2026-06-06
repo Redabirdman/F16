@@ -26,6 +26,7 @@ import { z } from 'zod';
 import type { Database } from '../db/index.js';
 import { logger } from '../logger.js';
 import { generateSalesReply } from '../agents/sales-agent/reply-core.js';
+import { insertTurn } from '../db/repositories/conversation-turns.js';
 
 /** Reply spoken when compliance blocks the draft — caller is being escalated. */
 const ESCALATED_REPLY =
@@ -94,9 +95,13 @@ export function buildVoiceRouter(opts: VoiceRouterOptions): Hono {
         agentInstance: `voice-${parsed.sessionId}`,
       });
 
+      let replyText: string;
+      let sessionState: 'live' | 'escalated';
       switch (reply.outcome) {
         case 'reply':
-          return c.json({ replyText: reply.replyText, sessionState: 'live' as const }, 200);
+          replyText = reply.replyText;
+          sessionState = 'live';
+          break;
         case 'blocked':
           // Compliance already created the human action + emitted
           // COMPLIANCE.BLOCKED inside generateSalesReply. We tell the caller a
@@ -105,7 +110,9 @@ export function buildVoiceRouter(opts: VoiceRouterOptions): Hono {
             { sessionId: parsed.sessionId, humanActionId: reply.humanActionId },
             'voice turn: compliance blocked → escalating session',
           );
-          return c.json({ replyText: ESCALATED_REPLY, sessionState: 'escalated' as const }, 200);
+          replyText = ESCALATED_REPLY;
+          sessionState = 'escalated';
+          break;
         case 'skip':
         case 'error':
           // Soft no-op or guard tripped — ask the caller to repeat rather than
@@ -118,8 +125,49 @@ export function buildVoiceRouter(opts: VoiceRouterOptions): Hono {
             },
             'voice turn: no usable reply → asking caller to repeat',
           );
-          return c.json({ replyText: REPEAT_REPLY, sessionState: 'live' as const }, 200);
+          replyText = REPEAT_REPLY;
+          sessionState = 'live';
+          break;
       }
+
+      // Persist the exchange so the NEXT turn has conversation history. Without
+      // this, `generateSalesReply` loads zero prior turns every time and the
+      // brain re-greets each utterance (no memory of the call). We persist AFTER
+      // generating the reply so the current message is NOT double-counted in
+      // this turn's own history. `generateSalesReply` already resolved the
+      // customer here, so the conversation_turns FK is safe. Failures are
+      // non-blocking — a logging blip must not drop a live call.
+      try {
+        const inboundAt = new Date();
+        await insertTurn(opts.db, {
+          customerId: parsed.customerId,
+          leadId: parsed.leadId,
+          channel: 'voice',
+          direction: 'inbound',
+          content: parsed.transcript,
+          occurredAt: inboundAt,
+        });
+        await insertTurn(opts.db, {
+          customerId: parsed.customerId,
+          leadId: parsed.leadId,
+          channel: 'voice',
+          direction: 'outbound',
+          agentRole: 'sales-agent',
+          agentInstance: `voice-${parsed.sessionId}`,
+          content: replyText,
+          occurredAt: new Date(inboundAt.getTime() + 1),
+        });
+      } catch (persistErr) {
+        logger.warn(
+          {
+            sessionId: parsed.sessionId,
+            err: persistErr instanceof Error ? persistErr.message : 'persist error',
+          },
+          'voice turn: failed to persist conversation turns (non-blocking)',
+        );
+      }
+
+      return c.json({ replyText, sessionState }, 200);
     } catch (err) {
       // generateSalesReply throws only on hard resolution failures (lead /
       // customer not found). Keep the line alive with the repeat prompt; log a

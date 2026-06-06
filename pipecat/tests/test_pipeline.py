@@ -14,7 +14,11 @@ import httpx
 import pytest
 
 # Real pipecat frame/direction types are importable in this env (1.3.0).
-from pipecat.frames.frames import TextFrame, TranscriptionFrame
+from pipecat.frames.frames import (
+    InterimTranscriptionFrame,
+    TranscriptionFrame,
+    TTSSpeakFrame,
+)
 from pipecat.processors.frame_processor import FrameDirection
 
 from f16_pipecat.backend import BackendConfig, BackendTurnError, F16BackendClient
@@ -144,7 +148,7 @@ class _CapturingProcessor(BackendTurnProcessor):
         self.pushed.append(frame)
 
 
-async def test_processor_relays_transcription_to_backend_as_textframe() -> None:
+async def test_processor_relays_transcription_to_backend_as_ttsspeakframe() -> None:
     record: dict[str, Any] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -184,10 +188,12 @@ async def test_processor_relays_transcription_to_backend_as_textframe() -> None:
     assert record["body"]["customerId"] == "cust-1"
     assert record["body"]["transcript"] == "Je veux assurer ma trottinette."
 
-    # The brain's reply was pushed downstream as a TextFrame for TTS.
-    text_frames = [f for f in proc.pushed if isinstance(f, TextFrame)]
-    assert len(text_frames) == 1
-    assert text_frames[0].text == "Très bien, je note."
+    # The brain's reply was pushed downstream as a TTSSpeakFrame (forces the TTS
+    # service to synthesize immediately; a bare TextFrame would be buffered by
+    # the sentence aggregator and never spoken).
+    speak_frames = [f for f in proc.pushed if isinstance(f, TTSSpeakFrame)]
+    assert len(speak_frames) == 1
+    assert speak_frames[0].text == "Très bien, je note."
 
 
 async def test_processor_ignores_interim_transcripts() -> None:
@@ -200,14 +206,16 @@ async def test_processor_ignores_interim_transcripts() -> None:
         lead_id="lead-1",
         customer_id="cust-1",
     )
-    interim = TranscriptionFrame(
+    # Interims arrive as InterimTranscriptionFrame (a distinct class) — the
+    # processor must pass them through WITHOUT invoking the brain. A final
+    # transcript is a TranscriptionFrame, which is always acted on.
+    interim = InterimTranscriptionFrame(
         text="Je veux...",
         user_id="cust-1",
         timestamp="2026-06-03T10:00:00Z",
-        finalized=False,
     )
     await proc.process_frame(interim, FrameDirection.DOWNSTREAM)
-    # Interim frame passed through, no TextFrame reply produced.
+    # Interim frame passed through, no reply produced.
     assert proc.pushed == [interim]
 
 

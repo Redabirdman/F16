@@ -256,6 +256,7 @@ async function llmSentryCheck(
 export async function checkComplianceFor(
   _db: Database,
   input: ComplianceCheckInput,
+  options: { rulesOnly?: boolean } = {},
 ): Promise<ComplianceCheckOutput> {
   const t0 = Date.now();
   const { hardHits, softHits } = runServerRules(input.draft);
@@ -266,6 +267,18 @@ export async function checkComplianceFor(
       verdict: 'block',
       reasons: hardHits.map((r) => r.reason),
       ruleHits: hardHits.map((r) => r.name),
+      durationMs: Date.now() - t0,
+    };
+  }
+
+  // Rules-only mode (live VOICE calls): the hard server rules above already
+  // fail-closed; skip the LLM sentry round-trip that would add seconds of dead
+  // air mid-call. Soft hits are reported as ruleHits but not LLM-adjudicated.
+  if (options.rulesOnly) {
+    return {
+      verdict: 'pass',
+      reasons: [],
+      ruleHits: softHits.map((r) => r.name),
       durationMs: Date.now() - t0,
     };
   }

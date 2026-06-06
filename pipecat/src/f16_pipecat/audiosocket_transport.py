@@ -22,6 +22,9 @@ already-accepted ``asyncio`` reader/writer pair):
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import os
+import struct
 
 from pipecat.frames.frames import (
     CancelFrame,
@@ -63,6 +66,17 @@ class AudioSocketInputTransport(BaseInputTransport):
         self._reader = reader
         self._read_task: asyncio.Task[None] | None = None
         self._started = False
+        self._audio_frames_in = 0
+        # Optional raw-PCM capture of the inbound slin stream for offline STT
+        # debugging. Set F16_VOICE_DUMP_PCM=<path> to enable; default off.
+        self._pcm_dump: object | None = None
+        dump_path = os.environ.get("F16_VOICE_DUMP_PCM")
+        if dump_path:
+            try:
+                self._pcm_dump = open(dump_path, "wb")  # noqa: SIM115
+                logger.info(f"audiosocket: dumping inbound PCM to {dump_path}")
+            except OSError as exc:
+                logger.warning(f"audiosocket: could not open PCM dump: {exc}")
 
     async def start(self, frame: StartFrame) -> None:
         await super().start(frame)
@@ -72,6 +86,9 @@ class AudioSocketInputTransport(BaseInputTransport):
         # set_transport_ready() spins up the base audio queue/task.
         await self.set_transport_ready(frame)
         if self._read_task is None:
+            logger.info(
+                f"audiosocket: input start, spawning read loop (in_rate={self.sample_rate} Hz)"
+            )
             self._read_task = self.create_task(self._read_loop())
 
     async def stop(self, frame: EndFrame) -> None:
@@ -104,6 +121,22 @@ class AudioSocketInputTransport(BaseInputTransport):
                 frame_type, payload = result
                 if frame_type == TYPE_AUDIO:
                     if payload:
+                        self._audio_frames_in += 1
+                        if self._pcm_dump is not None:
+                            self._pcm_dump.write(payload)  # type: ignore[attr-defined]
+                        # Log the first inbound audio frame + every ~5s (250
+                        # frames @ 20ms) so we can confirm Asterisk is actually
+                        # streaming media and STT is being fed, without spamming.
+                        # `peak` = max |sample| (slin 16-bit LE): ~0 ⇒ silence
+                        # (one-way audio / no inbound RTP), thousands ⇒ real voice.
+                        if self._audio_frames_in == 1 or self._audio_frames_in % 250 == 0:
+                            n = (len(payload) // 2) * 2
+                            samples = struct.unpack(f"<{n // 2}h", payload[:n]) if n else ()
+                            peak = max((abs(s) for s in samples), default=0)
+                            logger.info(
+                                f"audiosocket: inbound audio frames={self._audio_frames_in} "
+                                f"peak={peak} (payload={len(payload)} B)"
+                            )
                         await self.push_audio_frame(
                             InputAudioRawFrame(
                                 audio=payload,
@@ -131,6 +164,13 @@ class AudioSocketInputTransport(BaseInputTransport):
         except Exception as exc:  # noqa: BLE001 — last-ditch guard for the read loop
             logger.error(f"audiosocket: read loop failed: {exc}")
         finally:
+            if self._pcm_dump is not None:
+                with contextlib.suppress(OSError):
+                    self._pcm_dump.flush()  # type: ignore[attr-defined]
+                    self._pcm_dump.close()  # type: ignore[attr-defined]
+            logger.info(
+                f"audiosocket: read loop ended, total inbound audio frames={self._audio_frames_in}"
+            )
             # Signal the transport so the runner can end the pipeline.
             self._as_transport.signal_call_ended()
 
@@ -149,6 +189,25 @@ class AudioSocketOutputTransport(BaseOutputTransport):
         self._as_transport = transport
         self._writer = writer
         self._closed = False
+        self._started = False
+        self._audio_frames_out = 0
+
+    async def start(self, frame: StartFrame) -> None:
+        """Mark the output transport ready so TTS audio is actually written.
+
+        ``BaseOutputTransport.start()`` only computes the sample rate / chunk
+        size; it does NOT call ``set_transport_ready()``. That method is what
+        registers the default (``None``) MediaSender. Without it, every
+        downstream ``OutputAudioRawFrame`` is dropped at the base class with
+        "destination [None] not registered" and ``write_audio_frame`` is never
+        reached — i.e. total outbound silence. Our socket is already accepted, so
+        we are ready immediately (mirrors ``AudioSocketInputTransport.start``).
+        """
+        await super().start(frame)
+        if self._started:
+            return
+        self._started = True
+        await self.set_transport_ready(frame)
 
     async def cleanup(self) -> None:
         # pipecat's BaseObject.cleanup is untyped; these calls are correct.
@@ -167,6 +226,12 @@ class AudioSocketOutputTransport(BaseOutputTransport):
         try:
             self._writer.write(encode_audio_frame(bytes(frame.audio)))
             await self._writer.drain()
+            self._audio_frames_out += 1
+            if self._audio_frames_out == 1 or self._audio_frames_out % 250 == 0:
+                logger.info(
+                    f"audiosocket: outbound audio frames={self._audio_frames_out} "
+                    f"(last payload={len(frame.audio)} B)"
+                )
         except (ConnectionError, RuntimeError) as exc:
             logger.warning(f"audiosocket: write failed, ending output: {exc}")
             self._closed = True

@@ -83,7 +83,22 @@ export function buildTurnContextFragment(ctx: SalesAgentTurnContext): SystemFrag
     lines.push('');
   }
   lines.push(`## Canal de cette réponse`);
-  lines.push(`Le client est joint sur **${ctx.channel}**. Adapte la longueur en conséquence.`);
+  if (ctx.channel === 'voice') {
+    // The caller is on a live phone line waiting in silence; long replies feel
+    // slow + robotic and take many seconds to speak. Force a single short,
+    // natural spoken sentence with at most one question.
+    lines.push(
+      'Le client est AU TÉLÉPHONE, en direct (synthèse vocale). Règle ABSOLUE : réponds ' +
+        'en UNE phrase TRÈS courte, parlée, de 12 mots MAXIMUM. Pose UNE seule question ' +
+        'directe, rien d’autre. PAS de préambule ("Parfait, merci", "D’accord"...), PAS ' +
+        'de reformulation de ce que le client vient de dire, PAS de listes. Chaque mot ' +
+        'compte : le client attend en silence et toute parole en trop ralentit l’appel. ' +
+        'Exemple de bon ton : « Et à quelle date l’avez-vous achetée ? ». Pour un prix, ' +
+        'donne juste le chiffre clé.',
+    );
+  } else {
+    lines.push(`Le client est joint sur **${ctx.channel}**. Adapte la longueur en conséquence.`);
+  }
   lines.push('');
   lines.push('## Ta tâche pour ce tour');
   lines.push(

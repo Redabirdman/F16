@@ -37,6 +37,8 @@ import { cleanLLMReply, summarizeJson } from './text-utils.js';
 const MAX_HISTORY_TURNS = 10;
 const MAX_REPLY_CHARS = 1500;
 const REPLY_TOKEN_BUDGET = 400;
+/** Tighter cap for the voice channel — one short spoken sentence. */
+const VOICE_REPLY_TOKEN_BUDGET = 150;
 
 /**
  * Curated allow-list of tools the Sales Agent is permitted to invoke. Kept in
@@ -177,20 +179,28 @@ export async function generateSalesReply(
   // if embeddings are down the customer reply is more important than perfect
   // memory, so we degrade silently.
   let recalledFacts: string[] = [];
-  try {
-    const hits = await recallCustomerFacts(db, customer.id, content, {
-      limit: RECALL_LIMIT,
-      minConfidence: RECALL_MIN_CONFIDENCE,
-    });
-    recalledFacts = hits
-      .filter((f) => f.distance < RECALL_DISTANCE_CEILING)
-      .map((f) => `[${f.factType}, conf ${f.confidence.toFixed(2)}] ${f.content}`);
-  } catch (err) {
-    logger.warn(
-      { err, leadId: lead.id, instanceId: agentInstance },
-      'sales-agent: fact recall failed; continuing without recalled facts',
-    );
+  const _tRecall0 = Date.now();
+  // Voice is a live call: skip the Mem0 fact recall. It embeds the message via
+  // an external API (OpenRouter) + a kNN query — ~0.9 s of serial latency per
+  // turn measured live — and the recentTurns history already gives the qualifying
+  // conversation enough context. WhatsApp keeps full recall.
+  if (channel !== 'voice') {
+    try {
+      const hits = await recallCustomerFacts(db, customer.id, content, {
+        limit: RECALL_LIMIT,
+        minConfidence: RECALL_MIN_CONFIDENCE,
+      });
+      recalledFacts = hits
+        .filter((f) => f.distance < RECALL_DISTANCE_CEILING)
+        .map((f) => `[${f.factType}, conf ${f.confidence.toFixed(2)}] ${f.content}`);
+    } catch (err) {
+      logger.warn(
+        { err, leadId: lead.id, instanceId: agentInstance },
+        'sales-agent: fact recall failed; continuing without recalled facts',
+      );
+    }
   }
+  const _recallMs = Date.now() - _tRecall0;
 
   const ctx: SalesAgentTurnContext = {
     customer: {
@@ -218,13 +228,23 @@ export async function generateSalesReply(
     channel,
   };
 
-  // Call Claude — Sonnet for sales conversation. The system fragments include
-  // the cached prefix + per-turn context; userPrompt is ONLY the customer's
-  // current message. The tool-loop lets the model invoke registered tools
-  // mid-turn and only returns once the response is text-only.
-  const tools = listTools({ allowed: SALES_AGENT_TOOL_NAMES });
+  // Call Claude. Text/chat channels use Sonnet for sales quality; the VOICE
+  // channel uses Haiku — on a live phone call latency dominates UX (the caller
+  // is waiting in silence), and Haiku's ~sub-second replies keep the
+  // conversation natural where Sonnet's multi-second turns felt laggy. The
+  // system fragments include the cached prefix + per-turn context; userPrompt is
+  // ONLY the customer's current message. The tool-loop lets the model invoke
+  // registered tools mid-turn and only returns once the response is text-only.
+  // Voice is a LIVE phone call — the caller waits in silence, so latency
+  // dominates UX. Skip the tool-loop entirely on voice: each tool round-trip
+  // (knowledge.search etc.) is another Haiku call + a vector query, stacking
+  // several seconds onto every utterance. The qualifying conversation needs
+  // only the context already in the prompt (history + recalled facts), so voice
+  // runs a single-shot Haiku call. WhatsApp keeps the full toolset.
+  const tools = channel === 'voice' ? [] : listTools({ allowed: SALES_AGENT_TOOL_NAMES });
+  const _tLlm0 = Date.now();
   const llmResult = await callClaudeWithTools({
-    tier: 'sonnet',
+    tier: channel === 'voice' ? 'haiku' : 'sonnet',
     systemFragments: buildSalesAgentSystemPrompt(ctx),
     userPrompt: content,
     tools,
@@ -234,20 +254,27 @@ export async function generateSalesReply(
       agentInstance,
       correlationId: lead.id,
     },
-    maxTokens: REPLY_TOKEN_BUDGET,
+    // Voice replies must be ONE short spoken sentence (see the voice channel
+    // instruction in the system prompt) — a tighter cap is a backstop so a
+    // runaway reply can't turn into a multi-second TTS monologue on the call.
+    maxTokens: channel === 'voice' ? VOICE_REPLY_TOKEN_BUDGET : REPLY_TOKEN_BUDGET,
     logContext: { agent: 'sales-agent', instanceId: agentInstance, leadId },
   });
+  const _llmMs = Date.now() - _tLlm0;
   const draft = cleanLLMReply(llmResult.text);
 
   logger.info(
     {
       leadId: lead.id,
       instanceId: agentInstance,
+      channel,
       iterations: llmResult.iterations,
       toolCalls: llmResult.toolCalls.length,
       inputTokens: llmResult.usage.inputTokens,
       outputTokens: llmResult.usage.outputTokens,
       stopReason: llmResult.stopReason,
+      recallMs: _recallMs,
+      llmMs: _llmMs,
     },
     'sales-agent: claude turn completed',
   );
@@ -270,16 +297,23 @@ export async function generateSalesReply(
   // Compliance Sentry — two-layer check (server rules + Haiku LLM)
   // synchronously gates the send. Fail-closed: any block routes the draft to a
   // human action and emits COMPLIANCE.BLOCKED instead of returning a 'reply'.
-  const compliance = await checkComplianceFor(db, {
-    draft,
-    ctx: {
-      customerId: customer.id,
-      channel,
-      productLine: (lead.productLine ?? 'car') as 'scooter' | 'car',
-      leadStatus: lead.status,
-      lastInboundContent: content,
+  const compliance = await checkComplianceFor(
+    db,
+    {
+      draft,
+      ctx: {
+        customerId: customer.id,
+        channel,
+        productLine: (lead.productLine ?? 'car') as 'scooter' | 'car',
+        leadStatus: lead.status,
+        lastInboundContent: content,
+      },
     },
-  });
+    // Voice = live call: run rules-only compliance (hard server rules still
+    // fail-closed) and skip the LLM sentry round-trip, which would add multiple
+    // seconds of dead air per turn. WhatsApp keeps the full two-layer check.
+    { rulesOnly: channel === 'voice' },
+  );
 
   if (compliance.verdict === 'block') {
     logger.warn(
