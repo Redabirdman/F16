@@ -67,6 +67,14 @@ export interface AsteriskAriConfig {
   audioSocketPort: string;
   /** Dial timeout in seconds before Asterisk gives up. Defaults to 30. */
   timeout?: number;
+  /**
+   * When true, the voice-operator originates via the OpenAI Realtime NATIVE SIP
+   * bridge (`originateNativeSip`) instead of the Pipecat/AudioSocket cascade
+   * (`originateCall`). Default false → cascade. Env: `F16_VOICE_NATIVE_SIP`.
+   */
+  nativeSip?: boolean;
+  /** Dialplan context for the native-SIP bridge. Defaults to `f16-openai-bridge`. */
+  openAiContext?: string;
   /** Injectable HTTP client (defaults to global fetch). */
   fetchImpl?: FetchLike;
 }
@@ -112,10 +120,17 @@ export class AsteriskAriClient {
       audioSocketHost: cfg.audioSocketHost,
       audioSocketPort: cfg.audioSocketPort,
       timeout: cfg.timeout ?? 30,
+      nativeSip: cfg.nativeSip ?? false,
+      openAiContext: cfg.openAiContext ?? 'f16-openai-bridge',
     };
     this.fetchImpl = cfg.fetchImpl ?? (globalThis.fetch as unknown as FetchLike);
     this.authHeader =
       'Basic ' + Buffer.from(`${cfg.ariUser}:${cfg.ariPassword}`).toString('base64');
+  }
+
+  /** True when this client originates via the OpenAI native-SIP bridge. */
+  get nativeSip(): boolean {
+    return this.cfg.nativeSip;
   }
 
   /**
@@ -145,6 +160,68 @@ export class AsteriskAriClient {
       },
     };
 
+    return this.sendOriginate(url, body, input.sessionId);
+  }
+
+  /**
+   * Originate via the OpenAI Realtime NATIVE SIP bridge. Asterisk dials `to`
+   * over the OVH trunk and, on answer, the `f16-openai-bridge` dialplan bridges
+   * the leg to OpenAI's SIP endpoint (OpenAI handles all media). The per-call
+   * lead identity travels as the `X-F16-Session` SIP header, stamped by the
+   * dialplan from the channel's `AS_UUID` (master-channel) with the Asterisk
+   * global `F16SESSION` as fallback — so we set that global here first.
+   *
+   * Same failure contract as originateCall (tagged errors → VOICE.CALL_FAILED).
+   */
+  async originateNativeSip(input: OriginateCallInput): Promise<OriginateCallResult> {
+    if (!input.to) throw new Error('asterisk_originate_missing_to');
+    if (!input.sessionId) throw new Error('asterisk_originate_missing_session');
+
+    // 1. Set the global the bridge dialplan stamps onto the OpenAI INVITE
+    //    (fallback; the bridge prefers the per-call MASTER_CHANNEL(AS_UUID)).
+    const gvUrl = `${this.cfg.ariUrl}/asterisk/variable?variable=F16SESSION&value=${encodeURIComponent(input.sessionId)}`;
+    try {
+      const gv = await this.fetchImpl(gvUrl, {
+        method: 'POST',
+        headers: { authorization: this.authHeader, 'content-type': 'application/json' },
+        body: '',
+      });
+      if (!gv.ok || gv.status >= 300) {
+        logger.error(
+          { sessionId: input.sessionId, status: gv.status },
+          'asterisk: set F16SESSION global non-2xx',
+        );
+        throw new Error(`asterisk_setglobal_failed_${gv.status}`);
+      }
+    } catch (err) {
+      if (err instanceof Error && err.message.startsWith('asterisk_setglobal_failed_')) throw err;
+      logger.error(
+        { sessionId: input.sessionId, err: err instanceof Error ? err.message : String(err) },
+        'asterisk: set F16SESSION global transport error',
+      );
+      throw new Error('asterisk_setglobal_transport_error');
+    }
+
+    // 2. Originate into the OpenAI bridge context (no AudioSocket vars needed).
+    const url = `${this.cfg.ariUrl}/channels`;
+    const body = {
+      endpoint: `PJSIP/${input.to}@${this.cfg.trunk}`,
+      extension: 's',
+      context: this.cfg.openAiContext,
+      priority: 1,
+      callerId: this.cfg.callerId,
+      timeout: this.cfg.timeout,
+      variables: { AS_UUID: input.sessionId },
+    };
+    return this.sendOriginate(url, body, input.sessionId);
+  }
+
+  /** Shared POST /channels → parse channel id. Tagged errors, PII-safe logs. */
+  private async sendOriginate(
+    url: string,
+    body: unknown,
+    sessionId: string,
+  ): Promise<OriginateCallResult> {
     let res: Awaited<ReturnType<FetchLike>>;
     try {
       res = await this.fetchImpl(url, {
@@ -158,10 +235,7 @@ export class AsteriskAriClient {
     } catch (err) {
       // Network-level failure — never include `to`/endpoint (PII) in the error.
       logger.error(
-        {
-          sessionId: input.sessionId,
-          err: err instanceof Error ? err.message : String(err),
-        },
+        { sessionId, err: err instanceof Error ? err.message : String(err) },
         'asterisk: ARI originate transport error',
       );
       throw new Error('asterisk_originate_transport_error');
@@ -170,10 +244,7 @@ export class AsteriskAriClient {
     const text = await res.text();
     if (!res.ok || res.status >= 300) {
       // Body may echo the endpoint (PII) — do NOT log it.
-      logger.error(
-        { sessionId: input.sessionId, status: res.status },
-        'asterisk: ARI originate non-2xx',
-      );
+      logger.error({ sessionId, status: res.status }, 'asterisk: ARI originate non-2xx');
       throw new Error(`asterisk_originate_failed_${res.status}`);
     }
 
@@ -187,10 +258,7 @@ export class AsteriskAriClient {
       throw new Error('asterisk_originate_no_channel_id');
     }
 
-    logger.info(
-      { sessionId: input.sessionId, channelId: parsed.id },
-      'asterisk: outbound call originated',
-    );
+    logger.info({ sessionId, channelId: parsed.id }, 'asterisk: outbound call originated');
     return { channelId: parsed.id };
   }
 }
@@ -210,6 +278,8 @@ export class AsteriskAriClient {
  *   VOICE_CALLER_ID         (e.g. +33184162750)
  *   AUDIOSOCKET_HOST        (default 127.0.0.1)
  *   AUDIOSOCKET_PORT        (default 9092)
+ *   F16_VOICE_NATIVE_SIP    ('1'/'true' → OpenAI native-SIP bridge; default ON)
+ *   ASTERISK_OPENAI_CONTEXT (default f16-openai-bridge)
  */
 export function asteriskClientFromEnv(fetchImpl?: FetchLike): AsteriskAriClient | null {
   const ariUrl = process.env.ASTERISK_ARI_URL ?? 'http://localhost:8088/ari';
@@ -220,6 +290,10 @@ export function asteriskClientFromEnv(fetchImpl?: FetchLike): AsteriskAriClient 
   const callerId = process.env.VOICE_CALLER_ID;
   const audioSocketHost = process.env.AUDIOSOCKET_HOST ?? '127.0.0.1';
   const audioSocketPort = process.env.AUDIOSOCKET_PORT ?? '9092';
+  // Native SIP is the V1 voice path; default ON unless explicitly disabled.
+  const nativeSipEnv = (process.env.F16_VOICE_NATIVE_SIP ?? '1').toLowerCase();
+  const nativeSip = nativeSipEnv === '1' || nativeSipEnv === 'true';
+  const openAiContext = process.env.ASTERISK_OPENAI_CONTEXT ?? 'f16-openai-bridge';
 
   // ariUrl/ariUser/host/port all have safe defaults. The truly required,
   // no-default values are the password + trunk + context + callerId.
@@ -236,6 +310,8 @@ export function asteriskClientFromEnv(fetchImpl?: FetchLike): AsteriskAriClient 
     callerId,
     audioSocketHost,
     audioSocketPort,
+    nativeSip,
+    openAiContext,
     ...(fetchImpl ? { fetchImpl } : {}),
   });
 }

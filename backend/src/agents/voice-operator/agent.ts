@@ -148,7 +148,11 @@ export class VoiceOperatorAgent extends BaseAgent {
 
     let channelId: string;
     try {
-      const res = await client.originateCall({ to: toNumber, sessionId });
+      // Native SIP (V1 default) → OpenAI Realtime bridge; else the legacy
+      // Pipecat/AudioSocket cascade. The client decides via its env flag.
+      const res = client.nativeSip
+        ? await client.originateNativeSip({ to: toNumber, sessionId })
+        : await client.originateCall({ to: toNumber, sessionId });
       channelId = res.channelId;
     } catch (err) {
       const reason = err instanceof Error ? err.message : 'originate_failed';
