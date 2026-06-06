@@ -9,6 +9,7 @@ import type { Database } from './db/index.js';
 import { buildWhatsAppWebhook, parseAuthorisedResolvers } from './channels/whatsapp/webhook.js';
 import { buildLeadIntakeRouter } from './leads/intake-http.js';
 import { buildVoiceRouter } from './http/voice.js';
+import { buildOpenAiSipRouter } from './http/openai-sip.js';
 import { buildSessionLookupRouter } from './http/session-lookup.js';
 import { buildAdminLeadsRouter } from './admin/leads-list.js';
 import { buildAdminLeadDetailRouter } from './admin/lead-detail.js';
@@ -127,6 +128,25 @@ export function buildApp(opts: BuildAppOptions = {}): Hono {
         : {}),
     });
     app.route('/', sessionLookupApp);
+
+    // M10 V2 — OpenAI Realtime NATIVE SIP webhook (`POST /v1/voice/openai-webhook`).
+    // OpenAI is the SIP endpoint and handles ALL call audio; this route accepts
+    // the incoming-call webhook with the French Assuryal session config and
+    // drives the conversation over a control WebSocket. Env-gated on
+    // OPENAI_API_KEY (returns null → not mounted when absent). The signing
+    // secret (OPENAI_WEBHOOK_SECRET, whsec_…) enables signature verification.
+    const openAiSipApp = buildOpenAiSipRouter({
+      apiKey: process.env.OPENAI_API_KEY ?? '',
+      ...(process.env.OPENAI_WEBHOOK_SECRET
+        ? { webhookSecret: process.env.OPENAI_WEBHOOK_SECRET }
+        : {}),
+      ...(process.env.OPENAI_REALTIME_MODEL ? { model: process.env.OPENAI_REALTIME_MODEL } : {}),
+      ...(process.env.OPENAI_REALTIME_VOICE ? { voice: process.env.OPENAI_REALTIME_VOICE } : {}),
+    });
+    if (openAiSipApp) {
+      app.route('/', openAiSipApp);
+      logger.info({}, 'OpenAI Realtime SIP webhook mounted at /v1/voice/openai-webhook');
+    }
 
     // M14 V1 + V2 — admin surface. Auth middleware reads
     // ADMIN_BEARER_TOKEN; when unset (dev), it's a no-op. Mount BEFORE the

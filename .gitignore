@@ -46,3 +46,6 @@ stagehand/data/
 .idea/
 *.swp
 *.swo
+
+# Local tooling (cloudflared tunnel binary for OpenAI SIP webhook — M10 V2)
+.tools/
