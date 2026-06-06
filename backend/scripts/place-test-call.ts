@@ -144,8 +144,62 @@ async function originate(sessionId: string): Promise<string> {
   return (JSON.parse(text) as { id?: string }).id ?? '(unknown)';
 }
 
+/**
+ * OpenAI Realtime NATIVE SIP path (M10 V2). Calls the customer via OVH and
+ * bridges the answered leg to OpenAI's SIP endpoint (context f16-openai-bridge).
+ * OpenAI handles ALL media; our backend webhook resolves this call's lead via
+ * the X-F16-Session SIP header, which the dialplan stamps from the Asterisk
+ * GLOBAL `F16SESSION`. We set that global over ARI right before originating.
+ *
+ * NOTE: the global is process-wide → safe for ONE call at a time (our test
+ * cadence). Concurrent calls need a per-call header (follow-up); see the ruflo
+ * native-SIP handoff.
+ */
+async function originateOpenai(sessionId: string): Promise<string> {
+  const dial = process.env.TEST_DIAL_NUMBER;
+  const ariUrl = (process.env.ASTERISK_ARI_URL ?? 'http://localhost:8088/ari').replace(/\/+$/, '');
+  const ariUser = process.env.ASTERISK_ARI_USER ?? 'f16';
+  const ariPassword = process.env.ASTERISK_ARI_PASSWORD;
+  const trunk = process.env.ASTERISK_OVH_TRUNK ?? 'ovh-trunk';
+  const callerId = process.env.VOICE_CALLER_ID ?? '+33184162750';
+
+  if (!dial) throw new Error('TEST_DIAL_NUMBER not set (pipecat/.env)');
+  if (!ariPassword) throw new Error('ASTERISK_ARI_PASSWORD not set (backend/.env)');
+  const auth = 'Basic ' + Buffer.from(`${ariUser}:${ariPassword}`).toString('base64');
+
+  // 1. Set the global the dialplan stamps onto the OpenAI INVITE header.
+  const gv = await fetch(
+    `${ariUrl}/asterisk/variable?variable=F16SESSION&value=${encodeURIComponent(sessionId)}`,
+    { method: 'POST', headers: { authorization: auth } },
+  );
+  if (!gv.ok) throw new Error(`ARI set global failed status=${gv.status}`);
+
+  // 2. Originate to the customer; the bridge context dials OpenAI on answer.
+  const body = {
+    endpoint: `PJSIP/${dial}@${trunk}`,
+    context: 'f16-openai-bridge',
+    extension: 's',
+    priority: 1,
+    callerId,
+    timeout: 90,
+    variables: { AS_UUID: sessionId },
+  };
+  const res = await fetch(`${ariUrl}/channels`, {
+    method: 'POST',
+    headers: { authorization: auth, 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const text = await res.text();
+  if (!res.ok) throw new Error(`ARI originate failed status=${res.status} body=${text}`);
+  return (JSON.parse(text) as { id?: string }).id ?? '(unknown)';
+}
+
 async function main(): Promise<void> {
-  const arg = (process.argv[2] ?? '').toLowerCase();
+  // Args: `openai [reda|achraf]` → native-SIP path; else `[reda|achraf|seed]`
+  // → cascade path (legacy). The OpenAI path is the V1 voice channel.
+  const rawArgs = process.argv.slice(2).map((s) => s.toLowerCase());
+  const useOpenai = rawArgs[0] === 'openai';
+  const arg = (useOpenai ? rawArgs[1] : rawArgs[0]) ?? '';
   const db = createDb(process.env.DATABASE_URL ?? '');
 
   // Register-only mode: seed both real leads, no call.
@@ -167,10 +221,19 @@ async function main(): Promise<void> {
 
   const sessionId = randomUUID();
   await putSession(sessionId, ids);
-  const channelId = await originate(sessionId);
+  const channelId = useOpenai ? await originateOpenai(sessionId) : await originate(sessionId);
 
   // No PII (the dialed number) is printed.
-  console.log(JSON.stringify({ ok: true, lead: arg || 'random', sessionId, channelId, ...ids }));
+  console.log(
+    JSON.stringify({
+      ok: true,
+      path: useOpenai ? 'openai-native-sip' : 'cascade',
+      lead: arg || 'random',
+      sessionId,
+      channelId,
+      ...ids,
+    }),
+  );
 }
 
 main()

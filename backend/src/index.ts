@@ -136,6 +136,7 @@ export function buildApp(opts: BuildAppOptions = {}): Hono {
     // OPENAI_API_KEY (returns null → not mounted when absent). The signing
     // secret (OPENAI_WEBHOOK_SECRET, whsec_…) enables signature verification.
     const openAiSipApp = buildOpenAiSipRouter({
+      db: opts.db,
       apiKey: process.env.OPENAI_API_KEY ?? '',
       ...(process.env.OPENAI_WEBHOOK_SECRET
         ? { webhookSecret: process.env.OPENAI_WEBHOOK_SECRET }
