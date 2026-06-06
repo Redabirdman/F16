@@ -43,6 +43,8 @@ import { logger } from '../logger.js';
 import { getSession } from '../voice/session-store.js';
 import { insertTurn } from '../db/repositories/conversation-turns.js';
 import { appendAudit } from '../db/repositories/audit-log.js';
+import { ASSURYAL_VOICE_INSTRUCTIONS } from './voice-persona.js';
+import { VOICE_TOOLS, handleVoiceTool } from './voice-tools.js';
 
 const OPENAI_API = 'https://api.openai.com/v1';
 const OPENAI_WS = 'wss://api.openai.com/v1/realtime';
@@ -52,43 +54,6 @@ const MAX_WEBHOOK_AGE_S = 300;
 
 /** Custom SIP header our outbound dialplan stamps with the F16 sessionId. */
 const SESSION_SIP_HEADER = 'x-f16-session';
-
-/**
- * French Assuryal sales persona for the voice channel. Kept concise and
- * spoken-style: short sentences, one question at a time, natural phone French.
- * Assuryal is the consumer brand the agent speaks as (see brand memory).
- */
-const ASSURYAL_VOICE_INSTRUCTIONS = `Tu es l'assistante téléphonique d'Assuryal, un courtier en assurances en France.
-Tu parles UNIQUEMENT en français, d'une voix chaleureuse, naturelle et professionnelle, au téléphone.
-Ton rôle: accueillir l'appelant, comprendre son besoin d'assurance (par exemple assurance trottinette, scooter, moto), et le qualifier.
-Style de parole OBLIGATOIRE: des phrases COURTES, parlées, comme une vraie conseillère. UNE seule question à la fois. Jamais de listes, jamais de longs paragraphes. Reste concise.
-Commence par te présenter brièvement et demander en quoi tu peux aider.
-Dès que tu as recueilli des informations de qualification (le produit, le type de véhicule, l'usage, la vitesse, l'état d'achat), appelle DISCRÈTEMENT la fonction enregistrer_qualification en arrière-plan, puis continue la conversation normalement sans le mentionner.
-Ne donne jamais de prix ferme ni de conseil réglementaire toi-même: si on te le demande, dis que tu fais établir un devis précis par un conseiller. Reste rassurante et efficace.`;
-
-/** The single async tool the model can call. Logic runs server-side. */
-const QUALIFICATION_TOOL = {
-  type: 'function',
-  name: 'enregistrer_qualification',
-  description:
-    "Enregistre les informations de qualification du prospect dès qu'elles sont connues. À appeler en arrière-plan; continue la conversation normalement.",
-  parameters: {
-    type: 'object',
-    properties: {
-      produit: {
-        type: 'string',
-        description: "Type d'assurance demandé: trottinette, scooter, moto, ou autre",
-      },
-      type_vehicule: { type: 'string', description: 'électrique ou mécanique, si pertinent' },
-      usage: { type: 'string', description: 'quotidien ou occasionnel' },
-      vitesse_max_kmh: { type: 'number', description: 'vitesse maximale en km/h, si connue' },
-      etat_achat: { type: 'string', description: 'neuf ou occasion' },
-      date_achat: { type: 'string', description: "date d'achat approximative, si fournie" },
-      notes: { type: 'string', description: 'tout autre détail utile pour le conseiller' },
-    },
-    required: ['produit'],
-  },
-} as const;
 
 export interface OpenAiSipRouterOptions {
   /** Database handle — used for transcript persistence + the qualification audit row. */
@@ -190,7 +155,7 @@ export function buildOpenAiSipRouter(opts: OpenAiSipRouterOptions): Hono | null 
       type: 'realtime',
       model,
       instructions,
-      tools: [QUALIFICATION_TOOL],
+      tools: VOICE_TOOLS,
       audio: {
         output: { voice },
         input: {
@@ -350,9 +315,10 @@ interface RealtimeEvent {
 
 /**
  * Run a model tool call inside our backend (brain stays server-side), then send
- * the result back over the WS and trigger the model to continue. Today the
- * qualification is appended to the audit log (ACPR forensic, non-PII vehicle
- * facts); lead/Maxance wiring layers on later without touching this contract.
+ * the result back over the WS and trigger the model to continue. Dispatch maps
+ * each voice tool onto an existing builtin (knowledge.search / quote.request /
+ * human.escalate / customer.read_profile); see voice-tools.ts. evt.call_id is
+ * the FUNCTION call id (distinct from the SIP call_id) and must echo back.
  */
 async function handleFunctionCall(
   ws: WsClient,
@@ -361,45 +327,28 @@ async function handleFunctionCall(
   evt: RealtimeEvent,
 ): Promise<void> {
   const callId = ctx.sipCallId;
-  if (evt.name !== 'enregistrer_qualification' || !evt.call_id) {
-    logger.warn({ callId, name: evt.name }, 'openai-sip: unknown function call — ignoring');
+  if (!evt.name || !evt.call_id) {
+    logger.warn({ callId, name: evt.name }, 'openai-sip: malformed function call — ignoring');
     return;
   }
+  logger.info({ callId, tool: evt.name }, 'openai-sip: tool call');
 
-  let args: Record<string, unknown> = {};
-  try {
-    args = evt.arguments ? (JSON.parse(evt.arguments) as Record<string, unknown>) : {};
-  } catch {
-    logger.warn({ callId }, 'openai-sip: bad function arguments JSON');
-  }
-
-  // Server-side effect: append a forensic record. Vehicle facts only — no PII.
-  try {
-    await appendAudit(db, {
-      actorType: 'agent',
-      actorId: 'voice-sales-agent',
-      action: 'voice.qualification.record',
-      targetType: ctx.leadId ? 'lead' : 'call',
-      targetId: ctx.leadId ?? callId,
-      meta: { callId, ...args },
-    });
-    logger.info({ callId, identified: Boolean(ctx.leadId) }, 'openai-sip: qualification recorded');
-  } catch (err) {
-    logger.warn(
-      { callId, err: err instanceof Error ? err.message : String(err) },
-      'openai-sip: qualification audit append failed (continuing)',
-    );
-  }
+  const output = await handleVoiceTool(
+    db,
+    {
+      sipCallId: callId,
+      ...(ctx.leadId ? { leadId: ctx.leadId } : {}),
+      ...(ctx.customerId ? { customerId: ctx.customerId } : {}),
+    },
+    evt.name,
+    evt.arguments,
+  );
 
   // Return the function result, then let the model keep talking.
   ws.send(
     JSON.stringify({
       type: 'conversation.item.create',
-      item: {
-        type: 'function_call_output',
-        call_id: evt.call_id,
-        output: JSON.stringify({ status: 'enregistré' }),
-      },
+      item: { type: 'function_call_output', call_id: evt.call_id, output },
     }),
   );
   ws.send(JSON.stringify({ type: 'response.create' }));
