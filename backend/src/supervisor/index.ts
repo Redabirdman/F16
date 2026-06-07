@@ -54,6 +54,13 @@ import {
   startCallbackScheduler,
   type CallbackSchedulerHandle,
 } from '../leads/callback-scheduler.js';
+import {
+  startAdsPoller,
+  startAdsLearningScheduler,
+  type AdsPollerHandle,
+  type AdsLearningHandle,
+} from '../agents/ads-manager-agent/index.js';
+import { MetaGraphClient } from '../integrations/meta/client.js';
 
 export interface WorkerSet {
   workers: Worker[];
@@ -64,6 +71,10 @@ export interface WorkerSet {
   engagementScheduler: EngagementSchedulerHandle | null;
   /** Paid-lead callback scheduler handle, if started (M12). */
   callbackScheduler: CallbackSchedulerHandle | null;
+  /** Ads Manager poller handle (Meta sync + fatigue), if started (M12 P2). */
+  adsPoller: AdsPollerHandle | null;
+  /** Ads learning scheduler handle, if started (M12 P2). */
+  adsLearning: AdsLearningHandle | null;
   /** Supervisor arbitration scheduler handle, if started (M15.T4). */
   supervisorArbitration: ArbitrationHandle | null;
   /** Supervisor strategy review scheduler handle, if started (M15.T3). */
@@ -89,6 +100,8 @@ export interface StartWorkersOptions {
     knowledgeCurator?: boolean;
     engagementAgent?: boolean;
     callbackScheduler?: boolean;
+    adsPoller?: boolean;
+    adsLearning?: boolean;
     supervisorAgent?: boolean;
     supervisorArbitration?: boolean;
     supervisorStrategy?: boolean;
@@ -114,6 +127,12 @@ export async function startWorkers(opts: StartWorkersOptions): Promise<WorkerSet
     knowledgeCurator: opts.flags?.knowledgeCurator ?? true,
     engagementAgent: opts.flags?.engagementAgent ?? true,
     callbackScheduler: opts.flags?.callbackScheduler ?? true,
+    // Poller env-gated on the Meta token + ad account; learning is cheap and
+    // safe to run always (no-ops on a fresh account with no ads).
+    adsPoller:
+      opts.flags?.adsPoller ??
+      Boolean(process.env.META_SYSTEM_USER_TOKEN && process.env.META_AD_ACCOUNT_ID),
+    adsLearning: opts.flags?.adsLearning ?? true,
     supervisorAgent: opts.flags?.supervisorAgent ?? true,
     supervisorArbitration: opts.flags?.supervisorArbitration ?? true,
     // Default OFF — burns Opus tokens daily. Operator opts in via env or
@@ -125,6 +144,8 @@ export async function startWorkers(opts: StartWorkersOptions): Promise<WorkerSet
   let knowledgeCurator: KnowledgeCuratorHandle | null = null;
   let engagementScheduler: EngagementSchedulerHandle | null = null;
   let callbackScheduler: CallbackSchedulerHandle | null = null;
+  let adsPoller: AdsPollerHandle | null = null;
+  let adsLearning: AdsLearningHandle | null = null;
   let supervisorArbitration: ArbitrationHandle | null = null;
   let supervisorStrategy: StrategyReviewHandle | null = null;
 
@@ -304,6 +325,52 @@ export async function startWorkers(opts: StartWorkersOptions): Promise<WorkerSet
     logger.info('supervisor: callback scheduler SKIPPED by flag');
   }
 
+  // 7c. ads-manager (M12 Phase 2). 15-min poller (Meta mirror sync + fatigue
+  //     notify) env-gated on the Meta token + ad account; daily learning
+  //     snapshot (cheap, no-ops on a fresh account).
+  if (flags.adsPoller) {
+    const token = process.env.META_SYSTEM_USER_TOKEN;
+    const adAccountId = process.env.META_AD_ACCOUNT_ID;
+    if (!token || !adAccountId) {
+      logger.warn(
+        'supervisor: ads-poller requested but META_SYSTEM_USER_TOKEN/META_AD_ACCOUNT_ID unset — skipping',
+      );
+    } else {
+      try {
+        const client = new MetaGraphClient({
+          accessToken: token,
+          ...(process.env.META_APP_SECRET ? { appSecret: process.env.META_APP_SECRET } : {}),
+          ...(process.env.META_GRAPH_API_VERSION
+            ? { apiVersion: process.env.META_GRAPH_API_VERSION }
+            : {}),
+        });
+        adsPoller = startAdsPoller({ db: opts.db, client, adAccountId });
+        logger.info('supervisor: ads-manager poller started');
+      } catch (err) {
+        logger.error(
+          { err: err instanceof Error ? err.message : String(err) },
+          'supervisor: ads-poller failed to start',
+        );
+      }
+    }
+  } else {
+    logger.info('supervisor: ads-poller SKIPPED (no META_SYSTEM_USER_TOKEN + META_AD_ACCOUNT_ID)');
+  }
+
+  if (flags.adsLearning) {
+    try {
+      adsLearning = startAdsLearningScheduler({ db: opts.db });
+      logger.info('supervisor: ads-learning scheduler started');
+    } catch (err) {
+      logger.error(
+        { err: err instanceof Error ? err.message : String(err) },
+        'supervisor: ads-learning failed to start',
+      );
+    }
+  } else {
+    logger.info('supervisor: ads-learning SKIPPED by flag');
+  }
+
   // 8. supervisor-agent singleton (M15.T1) + optional arbitration + strategy.
   //    T1 (observation) is a BaseAgent consuming compliance + knowledge
   //    queues. T4 (arbitration) is a 5-min interval scanning agent_messages
@@ -366,6 +433,8 @@ export async function startWorkers(opts: StartWorkersOptions): Promise<WorkerSet
     knowledgeCurator,
     engagementScheduler,
     callbackScheduler,
+    adsPoller,
+    adsLearning,
     supervisorArbitration,
     supervisorStrategy,
     stop: async () => {
@@ -384,6 +453,12 @@ export async function startWorkers(opts: StartWorkersOptions): Promise<WorkerSet
       if (callbackScheduler) {
         callbackScheduler.stop();
       }
+      if (adsPoller) {
+        adsPoller.stop();
+      }
+      if (adsLearning) {
+        adsLearning.stop();
+      }
       if (supervisorArbitration) {
         supervisorArbitration.stop();
       }
@@ -397,6 +472,8 @@ export async function startWorkers(opts: StartWorkersOptions): Promise<WorkerSet
           knowledgeCurator: knowledgeCurator !== null,
           engagementScheduler: engagementScheduler !== null,
           callbackScheduler: callbackScheduler !== null,
+          adsPoller: adsPoller !== null,
+          adsLearning: adsLearning !== null,
           supervisorArbitration: supervisorArbitration !== null,
           supervisorStrategy: supervisorStrategy !== null,
         },

@@ -306,6 +306,63 @@ export async function recordHourlyMetrics(
     });
 }
 
+/** An ad joined with its most-recent hourly metric (or null if never polled). */
+export interface AdWithLatestMetric {
+  ad: Ad;
+  latestMetric: AdMetricHourly | null;
+}
+
+/**
+ * All ads (optionally filtered by status) each joined with their latest
+ * `ad_metrics_hourly` row. Used by the fatigue scorer + learning loop. One
+ * round-trip for ads, one batched DISTINCT ON for the latest metric.
+ */
+export async function getAdsWithLatestMetric(
+  db: Database,
+  opts: { statuses?: string[] } = {},
+): Promise<AdWithLatestMetric[]> {
+  const adRows =
+    opts.statuses && opts.statuses.length > 0
+      ? await db.select().from(ads).where(inArray(ads.status, opts.statuses))
+      : await db.select().from(ads);
+  if (adRows.length === 0) return [];
+
+  const adIds = adRows.map((a) => a.id);
+  const latest: AdMetricHourly[] = (await db.execute(sql`
+    SELECT DISTINCT ON (ad_id)
+      ad_id                       AS "adId",
+      captured_at                 AS "capturedAt",
+      impressions,
+      clicks,
+      ctr,
+      conversions,
+      cost_per_conversion_cents   AS "costPerConversionCents",
+      spend_cents                 AS "spendCents",
+      frequency,
+      reach,
+      raw_meta_payload            AS "rawMetaPayload"
+    FROM ad_metrics_hourly
+    WHERE ad_id = ANY(${sql.raw(`ARRAY[${adIds.map((id) => `'${id}'`).join(',')}]::uuid[]`)})
+    ORDER BY ad_id, captured_at DESC
+  `)) as unknown as AdMetricHourly[];
+
+  const byAd = new Map<string, AdMetricHourly>();
+  for (const m of latest) byAd.set(m.adId, m);
+  return adRows.map((ad) => ({ ad, latestMetric: byAd.get(ad.id) ?? null }));
+}
+
+/** Persist a computed fatigue score (0..1) on an ad. */
+export async function setAdFatigueScore(
+  db: Database,
+  adId: string,
+  fatigueScore: number,
+): Promise<void> {
+  await db
+    .update(ads)
+    .set({ fatigueScore, updatedAt: sql`now()` })
+    .where(eq(ads.id, adId));
+}
+
 /** Range query — all metrics rows for an ad in `[from, to]`, ASC by time. */
 export async function getMetricsForAd(
   db: Database,
