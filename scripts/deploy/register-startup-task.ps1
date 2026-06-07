@@ -1,36 +1,41 @@
-# F16 M10 V2 — register the voice stack to auto-start at logon (Task Scheduler).
+# F16 M10 V2 — auto-start the voice stack at logon.
 #
-# Creates a scheduled task "F16VoiceStack" that runs start-voice-stack.ps1 at
-# user logon, so backend + Asterisk + tunnel come back after a reboot without
-# manual steps. Run once (normal user is fine; it registers under the current user).
+# Installs a hidden launcher in the user's Startup folder that runs
+# start-voice-stack.ps1 at every logon — so backend + Asterisk + tunnel come
+# back after a reboot with no manual steps and NO admin rights.
 #
-#   pwsh -File register-startup-task.ps1            # register / update
-#   pwsh -File register-startup-task.ps1 -Remove    # unregister
+#   pwsh -File register-startup-task.ps1            # install / update
+#   pwsh -File register-startup-task.ps1 -Remove    # uninstall
+#
+# (We use the Startup folder rather than Task Scheduler because registering a
+#  scheduled task on this machine requires elevation; the Startup folder does
+#  not. To use Task Scheduler instead, run an ELEVATED shell and:
+#   $a=New-ScheduledTaskAction -Execute (Get-Command pwsh).Source -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$start`""
+#   Register-ScheduledTask F16VoiceStack -Action $a -Trigger (New-ScheduledTaskTrigger -AtLogOn) -RunLevel Limited -Force )
 param([switch]$Remove)
 
-$taskName = 'F16VoiceStack'
+$startup = [Environment]::GetFolderPath('Startup')
+$dest = Join-Path $startup 'F16VoiceStack.vbs'
 $start = Join-Path $PSScriptRoot 'start-voice-stack.ps1'
 
 if ($Remove) {
-  Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
-  Write-Host "Removed scheduled task '$taskName'."
+  if (Test-Path $dest) { Remove-Item $dest -Force }
+  Write-Host "Removed logon launcher: $dest"
   return
 }
 
 $pwsh = (Get-Command pwsh -ErrorAction SilentlyContinue)?.Source
-if (-not $pwsh) { $pwsh = (Get-Command powershell).Source }   # fall back to Windows PowerShell
+if (-not $pwsh) { $pwsh = (Get-Command powershell).Source }
 
-$action = New-ScheduledTaskAction -Execute $pwsh `
-  -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$start`""
-$trigger = New-ScheduledTaskTrigger -AtLogOn
-$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
-  -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero)
-$principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Highest
+# A .vbs wrapper runs the PowerShell start script fully hidden (no console flash).
+$vbs = @"
+' F16 voice stack — auto-start at logon (hidden). Installed by register-startup-task.ps1.
+Set s = CreateObject("WScript.Shell")
+s.Run "$pwsh -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ""$start""", 0, False
+"@
+Set-Content -Path $dest -Value $vbs -Encoding ASCII
 
-Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger `
-  -Settings $settings -Principal $principal -Force | Out-Null
-
-Write-Host "Registered '$taskName' to run at logon:"
-Write-Host "  $pwsh -File `"$start`""
-Write-Host "Run now with:  Start-ScheduledTask -TaskName $taskName"
-Write-Host "Remove with:   pwsh -File register-startup-task.ps1 -Remove"
+Write-Host "Installed logon launcher: $dest"
+Write-Host "It runs at logon: $start"
+Write-Host "Start now without rebooting:  pwsh -NoProfile -File `"$start`""
+Write-Host "Remove with:                  pwsh -File register-startup-task.ps1 -Remove"
