@@ -80,6 +80,12 @@ interface CallContext {
   customerId?: string;
   /** Ordered transcript of the call, flushed to conversation_turns on close. */
   transcripts: Array<{ direction: 'inbound' | 'outbound'; content: string }>;
+  /** Set before a deliberate hangup (terminer_appel) so close doesn't reconnect. */
+  intentionalHangup?: boolean;
+  /** One bounded control-WS reconnect attempt on an unexpected drop. */
+  reconnectAttempted?: boolean;
+  /** Guard so transcripts persist exactly once across reconnects. */
+  persisted?: boolean;
 }
 
 /**
@@ -227,13 +233,17 @@ function findSipHeader(
  * dispatch the qualification tool into the backend, and persist transcripts on
  * close. Self-cleans. Intentionally not awaited by the webhook handler.
  */
-function openControlSocket(ctx: CallContext, apiKey: string, db: Database): void {
+function openControlSocket(ctx: CallContext, apiKey: string, db: Database, greet = true): void {
   const callId = ctx.sipCallId;
   const ws = new WsClient(`${OPENAI_WS}?call_id=${encodeURIComponent(callId)}`, {
     headers: { authorization: `Bearer ${apiKey}` },
   });
 
   ws.on('open', () => {
+    if (!greet) {
+      logger.info({ callId }, 'openai-sip: control WS reattached (no greeting)');
+      return;
+    }
     logger.info({ callId }, 'openai-sip: control WS open → greeting');
     ws.send(
       JSON.stringify({
@@ -287,6 +297,15 @@ function openControlSocket(ctx: CallContext, apiKey: string, db: Database): void
   });
 
   ws.on('close', () => {
+    // Unexpected drop (not a deliberate terminer_appel) → one reconnect attempt
+    // so tools + transcripts keep working; OpenAI holds the SIP call meanwhile.
+    // If the call is actually over, the reconnect WS just closes again → persist.
+    if (!ctx.intentionalHangup && !ctx.reconnectAttempted) {
+      ctx.reconnectAttempted = true;
+      logger.warn({ callId }, 'openai-sip: control WS dropped → reconnecting once');
+      setTimeout(() => openControlSocket(ctx, apiKey, db, false), 500);
+      return;
+    }
     logger.info(
       { callId, turns: ctx.transcripts.length },
       'openai-sip: control WS closed → persisting transcripts',
@@ -354,6 +373,7 @@ async function handleFunctionCall(
       }),
     );
     logger.info({ callId, reason }, 'openai-sip: terminer_appel → hanging up');
+    ctx.intentionalHangup = true; // deliberate end → no reconnect on the close
     // Voicemail → hang up immediately; graceful end → let a one-line goodbye play.
     const delayMs = reason === 'messagerie_vocale' ? 250 : 3500;
     setTimeout(() => void hangupCall(callId, apiKey), delayMs);
@@ -403,6 +423,8 @@ async function hangupCall(callId: string, apiKey: string): Promise<void> {
  * monotonically nudged so the ordering survives equal-millisecond inserts.
  */
 async function persistTranscripts(db: Database, ctx: CallContext): Promise<void> {
+  if (ctx.persisted) return; // run once across reconnects
+  ctx.persisted = true;
   if (ctx.transcripts.length === 0) return;
 
   if (!ctx.customerId) {

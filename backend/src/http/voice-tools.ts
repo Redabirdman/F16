@@ -223,6 +223,29 @@ export async function handleVoiceTool(
               'Impossible de lancer le devis automatique pour cet appel. Note les infos et propose un rappel par un conseiller.',
           });
         }
+        // Validate BEFORE quote.request so a bad/partial field (e.g. a 2-digit
+        // postal code the caller half-said) makes the model re-ask instead of
+        // erroring out.
+        const manquants: string[] = [];
+        const prix = Number(args.prix_achat_eur);
+        if (!Number.isFinite(prix) || prix <= 0) manquants.push('prix_achat_eur');
+        if (!/^\d{5}$/.test(String(args.code_postal ?? ''))) manquants.push('code_postal');
+        if (!/^\d{4}-\d{2}-\d{2}/.test(String(args.date_achat ?? ''))) manquants.push('date_achat');
+        if (!/^\d{4}-\d{2}-\d{2}/.test(String(args.date_naissance ?? '')))
+          manquants.push('date_naissance');
+        if (
+          !['garage_box', 'parking_prive_clos', 'parking_prive_non_clos', 'rue'].includes(
+            String(args.stationnement ?? ''),
+          )
+        )
+          manquants.push('stationnement');
+        if (manquants.length > 0) {
+          return JSON.stringify({
+            statut: 'champs_incomplets',
+            manquants,
+            message: `Redemande gentiment au client: ${manquants.join(', ')} (code postal = 5 chiffres, dates au format AAAA-MM-JJ).`,
+          });
+        }
         const res = (await invokeTool(toolCtx(db, ctx), 'quote.request', {
           customerId: ctx.customerId,
           leadId: ctx.leadId,
