@@ -252,6 +252,19 @@ export async function insertCreative(db: Database, input: InsertCreativeInput): 
   return row;
 }
 
+/** Look up a creative by its content hash (dedup for re-generated assets). */
+export async function getCreativeBySha256(
+  db: Database,
+  fileSha256: string,
+): Promise<Creative | null> {
+  const [row] = await db
+    .select()
+    .from(creatives)
+    .where(eq(creatives.fileSha256, fileSha256))
+    .limit(1);
+  return row ?? null;
+}
+
 // ---------------------------------------------------------------------------
 // Hourly metrics
 // ---------------------------------------------------------------------------
