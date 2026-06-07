@@ -8,6 +8,10 @@ export const LeadNewPayload = registerIntent(
     source: z.enum(['website', 'meta', 'organic', 'referral', 'other']),
     sourceId: z.string().optional(),
     productLine: z.enum(['scooter', 'car']),
+    // M12: stated first-contact preference from a paid lead form. Lets the
+    // Lead Scorer honor the customer's choice over the LLM's channel guess.
+    preferredChannel: z.enum(['whatsapp', 'call']).optional(),
+    preferredTime: z.enum(['maintenant', 'matin', 'apres_midi', 'soir']).optional(),
     raw: z.record(z.string(), z.unknown()).optional(),
   }),
 );

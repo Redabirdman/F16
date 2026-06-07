@@ -11,6 +11,8 @@ import { buildLeadIntakeRouter } from './leads/intake-http.js';
 import { buildVoiceRouter } from './http/voice.js';
 import { buildOpenAiSipRouter } from './http/openai-sip.js';
 import { buildVoiceCallRequestRouter } from './http/voice-call-request.js';
+import { buildMetaLeadgenRouter } from './http/meta-leadgen-webhook.js';
+import { MetaGraphClient } from './integrations/meta/client.js';
 import { buildSessionLookupRouter } from './http/session-lookup.js';
 import { buildAdminLeadsRouter } from './admin/leads-list.js';
 import { buildAdminLeadDetailRouter } from './admin/lead-detail.js';
@@ -157,6 +159,31 @@ export function buildApp(opts: BuildAppOptions = {}): Hono {
     if (openAiSipApp) {
       app.route('/', openAiSipApp);
       logger.info({}, 'OpenAI Realtime SIP webhook mounted at /v1/voice/openai-webhook');
+    }
+
+    // M12 — Meta Lead Ads webhook (`/v1/meta/leadgen-webhook`). Mounted only
+    // when a System User token + verify token are configured (env). The GET
+    // handshake verifies the subscription; the POST leadgen path fetches each
+    // lead via Graph and runs it through `ingestLead` (dual-write + LEAD.NEW),
+    // scheduling a voice callback for `call`-preference leads.
+    const metaToken = process.env.META_SYSTEM_USER_TOKEN;
+    const metaVerifyToken = process.env.META_LEADGEN_VERIFY_TOKEN;
+    if (metaToken && metaVerifyToken) {
+      const metaClient = new MetaGraphClient({
+        accessToken: metaToken,
+        ...(process.env.META_APP_SECRET ? { appSecret: process.env.META_APP_SECRET } : {}),
+        ...(process.env.META_GRAPH_API_VERSION
+          ? { apiVersion: process.env.META_GRAPH_API_VERSION }
+          : {}),
+      });
+      const metaLeadgenApp = buildMetaLeadgenRouter({
+        db: opts.db,
+        client: metaClient,
+        verifyToken: metaVerifyToken,
+        ...(process.env.META_APP_SECRET ? { appSecret: process.env.META_APP_SECRET } : {}),
+      });
+      app.route('/', metaLeadgenApp);
+      logger.info({}, 'Meta leadgen webhook mounted at /v1/meta/leadgen-webhook');
     }
 
     // M14 V1 + V2 — admin surface. Auth middleware reads

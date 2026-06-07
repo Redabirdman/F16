@@ -50,6 +50,10 @@ import {
   startKnowledgeCurator,
   type KnowledgeCuratorHandle,
 } from '../knowledge/index.js';
+import {
+  startCallbackScheduler,
+  type CallbackSchedulerHandle,
+} from '../leads/callback-scheduler.js';
 
 export interface WorkerSet {
   workers: Worker[];
@@ -58,6 +62,8 @@ export interface WorkerSet {
   knowledgeCurator: KnowledgeCuratorHandle | null;
   /** Engagement scheduler handle, if started (M11). */
   engagementScheduler: EngagementSchedulerHandle | null;
+  /** Paid-lead callback scheduler handle, if started (M12). */
+  callbackScheduler: CallbackSchedulerHandle | null;
   /** Supervisor arbitration scheduler handle, if started (M15.T4). */
   supervisorArbitration: ArbitrationHandle | null;
   /** Supervisor strategy review scheduler handle, if started (M15.T3). */
@@ -82,6 +88,7 @@ export interface StartWorkersOptions {
     voiceOperator?: boolean;
     knowledgeCurator?: boolean;
     engagementAgent?: boolean;
+    callbackScheduler?: boolean;
     supervisorAgent?: boolean;
     supervisorArbitration?: boolean;
     supervisorStrategy?: boolean;
@@ -106,6 +113,7 @@ export async function startWorkers(opts: StartWorkersOptions): Promise<WorkerSet
     voiceOperator: opts.flags?.voiceOperator ?? Boolean(process.env.ASTERISK_ARI_URL),
     knowledgeCurator: opts.flags?.knowledgeCurator ?? true,
     engagementAgent: opts.flags?.engagementAgent ?? true,
+    callbackScheduler: opts.flags?.callbackScheduler ?? true,
     supervisorAgent: opts.flags?.supervisorAgent ?? true,
     supervisorArbitration: opts.flags?.supervisorArbitration ?? true,
     // Default OFF — burns Opus tokens daily. Operator opts in via env or
@@ -116,6 +124,7 @@ export async function startWorkers(opts: StartWorkersOptions): Promise<WorkerSet
 
   let knowledgeCurator: KnowledgeCuratorHandle | null = null;
   let engagementScheduler: EngagementSchedulerHandle | null = null;
+  let callbackScheduler: CallbackSchedulerHandle | null = null;
   let supervisorArbitration: ArbitrationHandle | null = null;
   let supervisorStrategy: StrategyReviewHandle | null = null;
 
@@ -278,6 +287,23 @@ export async function startWorkers(opts: StartWorkersOptions): Promise<WorkerSet
     logger.info('supervisor: engagement-agent SKIPPED by flag');
   }
 
+  // 7b. callback scheduler (M12). Scans paid 'call'-preference leads whose
+  //     callback_due_at has arrived and emits VOICE.CALL_SCHEDULED → the
+  //     voice-operator dials. Single, idempotent emitter (claim-by-UPDATE).
+  if (flags.callbackScheduler) {
+    try {
+      callbackScheduler = startCallbackScheduler({ db: opts.db });
+      logger.info('supervisor: callback scheduler started');
+    } catch (err) {
+      logger.error(
+        { err: err instanceof Error ? err.message : String(err) },
+        'supervisor: callback scheduler failed to start',
+      );
+    }
+  } else {
+    logger.info('supervisor: callback scheduler SKIPPED by flag');
+  }
+
   // 8. supervisor-agent singleton (M15.T1) + optional arbitration + strategy.
   //    T1 (observation) is a BaseAgent consuming compliance + knowledge
   //    queues. T4 (arbitration) is a 5-min interval scanning agent_messages
@@ -339,6 +365,7 @@ export async function startWorkers(opts: StartWorkersOptions): Promise<WorkerSet
     agents,
     knowledgeCurator,
     engagementScheduler,
+    callbackScheduler,
     supervisorArbitration,
     supervisorStrategy,
     stop: async () => {
@@ -354,6 +381,9 @@ export async function startWorkers(opts: StartWorkersOptions): Promise<WorkerSet
       if (engagementScheduler) {
         engagementScheduler.stop();
       }
+      if (callbackScheduler) {
+        callbackScheduler.stop();
+      }
       if (supervisorArbitration) {
         supervisorArbitration.stop();
       }
@@ -366,6 +396,7 @@ export async function startWorkers(opts: StartWorkersOptions): Promise<WorkerSet
           agents: agents.length,
           knowledgeCurator: knowledgeCurator !== null,
           engagementScheduler: engagementScheduler !== null,
+          callbackScheduler: callbackScheduler !== null,
           supervisorArbitration: supervisorArbitration !== null,
           supervisorStrategy: supervisorStrategy !== null,
         },

@@ -51,6 +51,21 @@ export const LeadIntakePayloadSchema = z.object({
   formAnswers: z.record(z.string(), z.unknown()).optional(),
   /** The exact source-payload for audit (Meta webhook body, form POST, …). */
   raw: z.record(z.string(), z.unknown()).optional(),
+
+  // --- M12 paid-acquisition (Meta lead forms) -----------------------------
+  /** Meta `leadgen_id` — dedup key for webhook retries. */
+  metaLeadgenId: z.string().optional(),
+  /** Full attribution chain (campaign/adset/ad/form ids + names). */
+  attribution: z.record(z.string(), z.unknown()).optional(),
+  /** Captured preference: how the prospect wants first contact. */
+  preferredChannel: z.enum(['whatsapp', 'call']).optional(),
+  /** Captured preference: when the prospect wants first contact. */
+  preferredTime: z.enum(['maintenant', 'matin', 'apres_midi', 'soir']).optional(),
+  /**
+   * When to place the callback (ISO-8601). Set by the Meta webhook for
+   * `call` leads; the callback scheduler dials at/after this time.
+   */
+  callbackDueAt: z.string().datetime().optional(),
 });
 export type LeadIntakePayload = z.infer<typeof LeadIntakePayloadSchema>;
 
@@ -170,6 +185,17 @@ export async function ingestLead(db: Database, payload: LeadIntakePayload): Prom
       ? { ...(payload.formAnswers ?? {}), ...(payload.raw ?? {}) }
       : null;
 
+  // M12: a `call`-preference lead schedules a voice callback. We persist the
+  // due time + a 'pending' state; the callback scheduler (callback-scheduler.ts)
+  // is the single emitter of VOICE.CALL_SCHEDULED, so even 'maintenant' flows
+  // through one idempotent path (dialed on the next tick, ~1 min).
+  const isCallback = payload.preferredChannel === 'call';
+  const callbackDueAt = isCallback
+    ? payload.callbackDueAt
+      ? new Date(payload.callbackDueAt)
+      : new Date()
+    : null;
+
   const [insertedLead] = await db
     .insert(leads)
     .values({
@@ -180,6 +206,12 @@ export async function ingestLead(db: Database, payload: LeadIntakePayload): Prom
       status: 'new',
       score: null,
       rawPayload: mergedRaw,
+      metaLeadgenId: payload.metaLeadgenId ?? null,
+      attribution: payload.attribution ?? null,
+      preferredChannel: payload.preferredChannel ?? null,
+      preferredTime: payload.preferredTime ?? null,
+      callbackDueAt,
+      callbackState: isCallback ? 'pending' : null,
     })
     .returning();
 
@@ -202,6 +234,11 @@ export async function ingestLead(db: Database, payload: LeadIntakePayload): Prom
     source: payload.source,
     ...(payload.sourceId ? { sourceId: payload.sourceId } : {}),
     productLine: payload.productLine,
+    // Thread the stated channel preference so the Lead Scorer routes the
+    // welcome to the right channel (call → voice, suppressing a competing
+    // WhatsApp greeting on a lead who explicitly asked to be phoned).
+    ...(payload.preferredChannel ? { preferredChannel: payload.preferredChannel } : {}),
+    ...(payload.preferredTime ? { preferredTime: payload.preferredTime } : {}),
     // The intent schema accepts `raw` as the audit blob — merge form answers
     // + the source-payload there so consumers don't need a second DB hop.
     ...(mergedRaw ? { raw: mergedRaw } : {}),

@@ -20,6 +20,30 @@ export const leadSourceEnum = pgEnum('lead_source', [
   'other',
 ]);
 
+// Lead's preferred FIRST-contact channel, captured on paid lead forms (M12).
+// 'call' is routed to the voice channel (voice-operator callback); 'whatsapp'
+// flows through the normal Sales-Agent welcome. Kept distinct from `channel`
+// because it is the customer's stated preference, not a live conversation leg.
+export const leadPreferredChannelEnum = pgEnum('lead_preferred_channel', ['whatsapp', 'call']);
+
+// Preferred contact-time window from the paid lead form (M12). 'maintenant' =
+// ASAP; the others map to a next-occurrence slot in Europe/Paris.
+export const leadContactWindowEnum = pgEnum('lead_contact_window', [
+  'maintenant',
+  'matin',
+  'apres_midi',
+  'soir',
+]);
+
+// Scheduled-callback lifecycle for paid leads who chose 'call' (M12). The
+// callback scheduler scans 'pending' rows whose callback_due_at has arrived,
+// emits VOICE.CALL_SCHEDULED, and flips the row to 'dispatched'.
+export const leadCallbackStateEnum = pgEnum('lead_callback_state', [
+  'pending',
+  'dispatched',
+  'cancelled',
+]);
+
 // Lead lifecycle state machine (see design §M5). Forward-only in practice;
 // `dormant` is the only "rewindable" state via re-engagement.
 export const leadStatusEnum = pgEnum('lead_status', [

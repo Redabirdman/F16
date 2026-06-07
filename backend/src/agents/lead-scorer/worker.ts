@@ -96,7 +96,18 @@ export async function handleLeadNew(
     leadId: string;
     source: 'website' | 'meta' | 'organic' | 'referral' | 'other';
     productLine: 'scooter' | 'car';
+    preferredChannel?: 'whatsapp' | 'call';
   };
+
+  // M12: when a paid lead stated a contact preference, it overrides the LLM's
+  // channel guess ('call' → the voice leg; 'whatsapp' → WhatsApp). The customer
+  // asked for this explicitly — we honor it.
+  const channelOverride: 'whatsapp' | 'voice' | undefined =
+    payload.preferredChannel === 'call'
+      ? 'voice'
+      : payload.preferredChannel === 'whatsapp'
+        ? 'whatsapp'
+        : undefined;
 
   // 1. Load the lead. Defensive: a stale BullMQ job might race a deletion.
   const [lead] = await opts.db.select().from(leads).where(eq(leads.id, payload.leadId)).limit(1);
@@ -176,17 +187,19 @@ export async function handleLeadNew(
       'lead-scorer: invalid JSON, falling back to heuristic',
     );
     const fallback = heuristicScore(customerSnapshot, payload.source);
-    return persistAndEmit(opts.db, lead.id, fallback);
+    return persistAndEmit(opts.db, lead.id, fallback, channelOverride);
   }
 
-  return persistAndEmit(opts.db, lead.id, parsed.value);
+  return persistAndEmit(opts.db, lead.id, parsed.value, channelOverride);
 }
 
 async function persistAndEmit(
   db: Database,
   leadId: string,
   score: LeadScoreOutput,
+  channelOverride?: 'whatsapp' | 'voice' | 'email' | 'sms',
 ): Promise<MessageHandlerResult> {
+  const channel = channelOverride ?? score.channel;
   await db
     .update(leads)
     .set({
@@ -209,7 +222,7 @@ async function persistAndEmit(
     leadId,
     score: score.score,
     opening: score.opening,
-    channel: score.channel,
+    channel,
   };
 
   await sendMessage(
@@ -237,7 +250,7 @@ async function persistAndEmit(
     },
   );
 
-  logger.info({ leadId, score: score.score, channel: score.channel }, 'lead-scorer: lead scored');
+  logger.info({ leadId, score: score.score, channel }, 'lead-scorer: lead scored');
 
   return { ok: true, result: { score: score.score, channel: score.channel } };
 }

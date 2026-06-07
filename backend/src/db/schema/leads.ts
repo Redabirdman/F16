@@ -13,8 +13,24 @@
  * layer, not at the DB level (V1).
  */
 import { sql } from 'drizzle-orm';
-import { pgTable, uuid, text, integer, jsonb, timestamp, index } from 'drizzle-orm/pg-core';
-import { leadSourceEnum, leadStatusEnum, productLineEnum } from './_enums.js';
+import {
+  pgTable,
+  uuid,
+  text,
+  integer,
+  jsonb,
+  timestamp,
+  index,
+  uniqueIndex,
+} from 'drizzle-orm/pg-core';
+import {
+  leadSourceEnum,
+  leadStatusEnum,
+  productLineEnum,
+  leadPreferredChannelEnum,
+  leadContactWindowEnum,
+  leadCallbackStateEnum,
+} from './_enums.js';
 import { customers } from './customers.js';
 
 export const leads = pgTable(
@@ -37,6 +53,25 @@ export const leads = pgTable(
     rawPayload: jsonb('raw_payload').$type<Record<string, unknown>>(),
     hubspotDealId: text('hubspot_deal_id'),
 
+    // --- M12 paid-acquisition attribution + contact preferences -------------
+    // The Meta `leadgen_id` from the webhook — unique per submission. Used to
+    // dedup webhook re-deliveries (Meta retries on any non-2xx). Null for
+    // non-Meta leads; Postgres treats NULLs as distinct so the unique index
+    // does not collide across website/organic rows.
+    metaLeadgenId: text('meta_leadgen_id'),
+    // Full Meta attribution chain + form context (campaign/adset/ad/form ids +
+    // names). jsonb so the funnel can attribute spend→revenue without new
+    // columns, and so future website/Google attribution reuses the shape.
+    attribution: jsonb('attribution').$type<Record<string, unknown>>(),
+    // Captured on the paid lead form: how + when the prospect wants first
+    // contact. `preferredChannel='call'` drives the callback scheduler below.
+    preferredChannel: leadPreferredChannelEnum('preferred_channel'),
+    preferredTime: leadContactWindowEnum('preferred_time'),
+    // Scheduled-callback bookkeeping — only set when preferredChannel='call'.
+    // The callback scheduler scans (callback_state='pending', callback_due_at<=now).
+    callbackDueAt: timestamp('callback_due_at', { withTimezone: true }),
+    callbackState: leadCallbackStateEnum('callback_state'),
+
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
     scoredAt: timestamp('scored_at', { withTimezone: true }),
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
@@ -48,6 +83,10 @@ export const leads = pgTable(
     index('leads_status_idx').on(t.status),
     // Customer detail page — list of leads for one customer.
     index('leads_customer_id_idx').on(t.customerId),
+    // Dedup Meta webhook re-deliveries by leadgen id (NULLs are distinct).
+    uniqueIndex('leads_meta_leadgen_id_uniq').on(t.metaLeadgenId),
+    // Callback scheduler scan — find due 'pending' callbacks, oldest first.
+    index('leads_callback_due_idx').on(t.callbackState, t.callbackDueAt),
   ],
 );
 
