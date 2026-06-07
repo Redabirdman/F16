@@ -80,8 +80,10 @@ d('runCallbackTick (live)', () => {
   }
 
   it('dispatches a due callback → VOICE.CALL_SCHEDULED + state dispatched', async () => {
+    // Seed the already-normalized E.164 the webbook path stores (ingestLead
+    // normalizes before insertCustomer; insertCustomer itself stores as-given).
     const { leadId, customerId } = await seedLead({
-      phone: '0612345678',
+      phone: '+33612345678',
       dueAt: new Date(Date.now() - 60_000),
       state: 'pending',
     });

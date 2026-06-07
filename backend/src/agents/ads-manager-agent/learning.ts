@@ -44,7 +44,9 @@ export async function computeAdPerformance(
   opts: { days?: number; now?: Date } = {},
 ): Promise<AdPerformance[]> {
   const now = opts.now ?? new Date();
-  const from = new Date(now.getTime() - (opts.days ?? 7) * DAY_MS);
+  // Bind as an ISO string + explicit cast: the postgres.js driver rejects raw
+  // JS Date params in `db.execute(sql\`\`)` (ERR_INVALID_ARG_TYPE).
+  const fromIso = new Date(now.getTime() - (opts.days ?? 7) * DAY_MS).toISOString();
 
   const rows = (await db.execute(sql`
     SELECT
@@ -57,10 +59,10 @@ export async function computeAdPerformance(
         SELECT COUNT(*) FROM leads l
         WHERE l.source = 'meta'
           AND l.attribution->>'adId' = a.meta_ad_id
-          AND l.created_at >= ${from}
+          AND l.created_at >= ${fromIso}::timestamptz
       )::bigint AS "leads"
     FROM ads a
-    LEFT JOIN ad_metrics_hourly m ON m.ad_id = a.id AND m.captured_at >= ${from}
+    LEFT JOIN ad_metrics_hourly m ON m.ad_id = a.id AND m.captured_at >= ${fromIso}::timestamptz
     GROUP BY a.id, a.meta_ad_id, a.name
   `)) as unknown as Array<{
     metaAdId: string;
