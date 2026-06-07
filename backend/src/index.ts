@@ -10,6 +10,7 @@ import { buildWhatsAppWebhook, parseAuthorisedResolvers } from './channels/whats
 import { buildLeadIntakeRouter } from './leads/intake-http.js';
 import { buildVoiceRouter } from './http/voice.js';
 import { buildOpenAiSipRouter } from './http/openai-sip.js';
+import { buildVoiceCallRequestRouter } from './http/voice-call-request.js';
 import { buildSessionLookupRouter } from './http/session-lookup.js';
 import { buildAdminLeadsRouter } from './admin/leads-list.js';
 import { buildAdminLeadDetailRouter } from './admin/lead-detail.js';
@@ -114,6 +115,15 @@ export function buildApp(opts: BuildAppOptions = {}): Hono {
       ...(opts.leadIntakeHmacSecret ? { hmacSecret: opts.leadIntakeHmacSecret } : {}),
     });
     app.route('/', voiceApp);
+
+    // M10 V2 — website "call me" intake (`POST /v1/voice/call-request`).
+    // Resolves/creates the lead by phone and emits VOICE.CALL_SCHEDULED → the
+    // voice-operator dials via native SIP. Same shared HMAC secret as /v1/leads.
+    const voiceCallRequestApp = buildVoiceCallRequestRouter({
+      db: opts.db,
+      ...(opts.leadIntakeHmacSecret ? { hmacSecret: opts.leadIntakeHmacSecret } : {}),
+    });
+    app.route('/', voiceCallRequestApp);
 
     // Voice — session-lookup route (`GET /v1/voice/session/:sessionId`). After
     // Asterisk bridges an answered call to AudioSocket, Pipecat knows only the

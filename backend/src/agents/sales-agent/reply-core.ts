@@ -52,6 +52,7 @@ const SALES_AGENT_TOOL_NAMES = [
   'knowledge.search',
   'human.escalate',
   'quote.request',
+  'voice.schedule_call',
 ] as const;
 
 /** Cosine-distance ceiling for recalled facts (see agent.ts notes). */

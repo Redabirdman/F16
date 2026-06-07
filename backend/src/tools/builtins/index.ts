@@ -15,6 +15,7 @@ import './customer-remember-fact.js';
 import './knowledge-search.js';
 import './human-escalate.js';
 import './quote-request.js';
+import './voice-schedule-call.js';
 
 export { customerReadProfileToolName } from './customer-read-profile.js';
 export { customerUpdateProfileToolName } from './customer-update-profile.js';
@@ -22,3 +23,4 @@ export { customerRememberFactToolName } from './customer-remember-fact.js';
 export { knowledgeSearchToolName } from './knowledge-search.js';
 export { humanEscalateToolName } from './human-escalate.js';
 export { quoteRequestToolName } from './quote-request.js';
+export { voiceScheduleCallToolName } from './voice-schedule-call.js';
