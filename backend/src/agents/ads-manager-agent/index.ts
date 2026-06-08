@@ -21,3 +21,12 @@ export {
   type AdsLearningOptions,
   type AdsLearningHandle,
 } from './poller.js';
+export { assembleCampaignDraft, type AssembleDraftOptions, type DraftResult } from './drafting.js';
+export { launchCampaignDraft, type LaunchOptions, type LaunchResult } from './launch.js';
+export {
+  scanDraftApprovals,
+  startDraftApprovalScanner,
+  type DraftApprovalOptions,
+  type DraftApprovalSchedulerHandle,
+  type ApprovalScanResult,
+} from './approval.js';

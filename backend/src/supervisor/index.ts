@@ -57,8 +57,10 @@ import {
 import {
   startAdsPoller,
   startAdsLearningScheduler,
+  startDraftApprovalScanner,
   type AdsPollerHandle,
   type AdsLearningHandle,
+  type DraftApprovalSchedulerHandle,
 } from '../agents/ads-manager-agent/index.js';
 import { MetaGraphClient } from '../integrations/meta/client.js';
 
@@ -75,6 +77,8 @@ export interface WorkerSet {
   adsPoller: AdsPollerHandle | null;
   /** Ads learning scheduler handle, if started (M12 P2). */
   adsLearning: AdsLearningHandle | null;
+  /** Campaign-draft approval scanner handle, if started (M12 P3). */
+  adsApproval: DraftApprovalSchedulerHandle | null;
   /** Supervisor arbitration scheduler handle, if started (M15.T4). */
   supervisorArbitration: ArbitrationHandle | null;
   /** Supervisor strategy review scheduler handle, if started (M15.T3). */
@@ -102,6 +106,7 @@ export interface StartWorkersOptions {
     callbackScheduler?: boolean;
     adsPoller?: boolean;
     adsLearning?: boolean;
+    adsApproval?: boolean;
     supervisorAgent?: boolean;
     supervisorArbitration?: boolean;
     supervisorStrategy?: boolean;
@@ -133,6 +138,14 @@ export async function startWorkers(opts: StartWorkersOptions): Promise<WorkerSet
       opts.flags?.adsPoller ??
       Boolean(process.env.META_SYSTEM_USER_TOKEN && process.env.META_AD_ACCOUNT_ID),
     adsLearning: opts.flags?.adsLearning ?? true,
+    // Draft-approval scanner needs the token + ad account + page to launch.
+    adsApproval:
+      opts.flags?.adsApproval ??
+      Boolean(
+        process.env.META_SYSTEM_USER_TOKEN &&
+        process.env.META_AD_ACCOUNT_ID &&
+        process.env.META_PAGE_ID,
+      ),
     supervisorAgent: opts.flags?.supervisorAgent ?? true,
     supervisorArbitration: opts.flags?.supervisorArbitration ?? true,
     // Default OFF — burns Opus tokens daily. Operator opts in via env or
@@ -146,6 +159,7 @@ export async function startWorkers(opts: StartWorkersOptions): Promise<WorkerSet
   let callbackScheduler: CallbackSchedulerHandle | null = null;
   let adsPoller: AdsPollerHandle | null = null;
   let adsLearning: AdsLearningHandle | null = null;
+  let adsApproval: DraftApprovalSchedulerHandle | null = null;
   let supervisorArbitration: ArbitrationHandle | null = null;
   let supervisorStrategy: StrategyReviewHandle | null = null;
 
@@ -371,6 +385,49 @@ export async function startWorkers(opts: StartWorkersOptions): Promise<WorkerSet
     logger.info('supervisor: ads-learning SKIPPED by flag');
   }
 
+  // 7d. ads draft-approval scanner (M12 P3). Polls for resolved CAMPAIGN_DRAFT
+  //     actions → launches PAUSED on Meta / rejects / re-drafts. Needs the
+  //     token + ad account + page.
+  if (flags.adsApproval) {
+    const token = process.env.META_SYSTEM_USER_TOKEN;
+    const adAccountId = process.env.META_AD_ACCOUNT_ID;
+    const pageId = process.env.META_PAGE_ID;
+    if (!token || !adAccountId || !pageId) {
+      logger.warn(
+        'supervisor: ads-approval requested but META token/ad account/page unset — skipping',
+      );
+    } else {
+      try {
+        const client = new MetaGraphClient({
+          accessToken: token,
+          ...(process.env.META_APP_SECRET ? { appSecret: process.env.META_APP_SECRET } : {}),
+          ...(process.env.META_GRAPH_API_VERSION
+            ? { apiVersion: process.env.META_GRAPH_API_VERSION }
+            : {}),
+        });
+        adsApproval = startDraftApprovalScanner({
+          db: opts.db,
+          client,
+          adAccountId,
+          pageId,
+          dsaBeneficiary: process.env.META_DSA_BENEFICIARY ?? 'Assuryal',
+          dsaPayor: process.env.META_DSA_PAYOR ?? 'Assuryal',
+          ...(process.env.META_INSTAGRAM_USER_ID
+            ? { instagramUserId: process.env.META_INSTAGRAM_USER_ID }
+            : {}),
+        });
+        logger.info('supervisor: ads draft-approval scanner started');
+      } catch (err) {
+        logger.error(
+          { err: err instanceof Error ? err.message : String(err) },
+          'supervisor: ads-approval failed to start',
+        );
+      }
+    }
+  } else {
+    logger.info('supervisor: ads draft-approval scanner SKIPPED (no token/ad account/page)');
+  }
+
   // 8. supervisor-agent singleton (M15.T1) + optional arbitration + strategy.
   //    T1 (observation) is a BaseAgent consuming compliance + knowledge
   //    queues. T4 (arbitration) is a 5-min interval scanning agent_messages
@@ -435,6 +492,7 @@ export async function startWorkers(opts: StartWorkersOptions): Promise<WorkerSet
     callbackScheduler,
     adsPoller,
     adsLearning,
+    adsApproval,
     supervisorArbitration,
     supervisorStrategy,
     stop: async () => {
@@ -459,6 +517,9 @@ export async function startWorkers(opts: StartWorkersOptions): Promise<WorkerSet
       if (adsLearning) {
         adsLearning.stop();
       }
+      if (adsApproval) {
+        adsApproval.stop();
+      }
       if (supervisorArbitration) {
         supervisorArbitration.stop();
       }
@@ -474,6 +535,7 @@ export async function startWorkers(opts: StartWorkersOptions): Promise<WorkerSet
           callbackScheduler: callbackScheduler !== null,
           adsPoller: adsPoller !== null,
           adsLearning: adsLearning !== null,
+          adsApproval: adsApproval !== null,
           supervisorArbitration: supervisorArbitration !== null,
           supervisorStrategy: supervisorStrategy !== null,
         },
