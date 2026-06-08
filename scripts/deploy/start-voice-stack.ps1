@@ -1,16 +1,18 @@
-# F16 M10 V2 — bring up the whole voice stack on this PC (idempotent).
+# F16 M10 V2 + M17 — bring up the whole voice stack on this PC (idempotent).
 #
 # Starts (only what's not already up):
 #   1. WSL Asterisk + a keepalive that holds the distro open (OVH re-registers)
 #   2. Backend (Hono) on :3001  (ANTHROPIC_API_KEY cleared per the boot gotcha)
-#   3. cloudflared quick tunnel -> backend:3001  (URL captured to .tools\tunnel-url.txt)
+#   3. cloudflared NAMED tunnel "f16" -> backend:3001 at the STABLE hostname
+#      https://hooks.assuryalconseil.fr (M17 — set up via cf-tunnel-setup.ts).
 #
 # Run manually any time, or at logon via register-startup-task.ps1.
 #
-# ⚠️ The quick-tunnel URL is RANDOM each start. Until a STABLE tunnel is set up
-#    (needs a Cloudflare-managed domain), after every (re)start you must
-#    re-register the printed URL + "/v1/voice/openai-webhook" in the OpenAI
-#    dashboard webhook. The URL is written to .tools\tunnel-url.txt.
+# ✅ M17: the public URL is now STABLE (https://hooks.assuryalconseil.fr) and
+#    NEVER changes across restarts — no more re-registering webhooks. The named
+#    tunnel authenticates with CLOUDFLARE_TUNNEL_TOKEN from backend\.env (the
+#    remotely-managed tunnel's run-token). If that token is ever rotated, re-run
+#    `npx tsx scripts/cf-tunnel-setup.ts` from backend\ to refresh it.
 $ErrorActionPreference = 'Continue'
 $F16 = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)   # ...\Assuryal\F16
 $backend = Join-Path $F16 'backend'
@@ -39,25 +41,28 @@ if (Test-Port 3001) {
     -FilePath 'npx.exe' -ArgumentList 'tsx','src/index.ts'
 }
 
-# 3. cloudflared quick tunnel
+# 3. cloudflared NAMED tunnel (stable hostname). Token from backend\.env.
 $tunnelUp = Get-Process cloudflared -ErrorAction SilentlyContinue
 if ($tunnelUp) {
-  Write-Host '[3/3] cloudflared already running — skipping (URL in tunnel-url.txt)'
+  Write-Host '[3/3] cloudflared already running — skipping (stable: https://hooks.assuryalconseil.fr)'
 } else {
-  Write-Host '[3/3] Starting cloudflared tunnel…'
+  Write-Host '[3/3] Starting cloudflared NAMED tunnel…'
   if (Test-Path $tunnelLog) { Remove-Item $tunnelLog -Force }
-  Start-Process -WindowStyle Hidden -FilePath $cf `
-    -ArgumentList 'tunnel','--url','http://localhost:3001','--no-autoupdate' `
-    -RedirectStandardOutput $tunnelLog -RedirectStandardError "$tunnelLog.err"
-  Start-Sleep -Seconds 8
-  $url = (Select-String -Path "$tunnelLog.err",$tunnelLog -Pattern 'https://[a-z0-9-]+\.trycloudflare\.com' -ErrorAction SilentlyContinue | Select-Object -First 1).Matches.Value
-  if ($url) {
-    Set-Content -Path $tunnelUrlFile -Value $url
-    Write-Host ''
-    Write-Host "  Tunnel URL: $url"
-    Write-Host "  ⚠️  Register this in OpenAI webhooks: $url/v1/voice/openai-webhook"
+  $envFile = Join-Path $backend '.env'
+  $tunnelToken = $null
+  if (Test-Path $envFile) {
+    $m = Select-String -Path $envFile -Pattern '^CLOUDFLARE_TUNNEL_TOKEN=(.+)$' | Select-Object -First 1
+    if ($m) { $tunnelToken = $m.Matches.Groups[1].Value.Trim() }
+  }
+  if (-not $tunnelToken) {
+    Write-Host '  ⚠️  CLOUDFLARE_TUNNEL_TOKEN missing in backend\.env — run: npx tsx scripts/cf-tunnel-setup.ts'
   } else {
-    Write-Host '  (tunnel URL not captured yet — check .tools\tunnel.log)'
+    Start-Process -WindowStyle Hidden -FilePath $cf `
+      -ArgumentList 'tunnel','run','--token',$tunnelToken `
+      -RedirectStandardOutput $tunnelLog -RedirectStandardError "$tunnelLog.err"
+    Start-Sleep -Seconds 6
+    Set-Content -Path $tunnelUrlFile -Value 'https://hooks.assuryalconseil.fr'
+    Write-Host '  Stable URL: https://hooks.assuryalconseil.fr (permanent — webhooks need no re-registration)'
   }
 }
 Write-Host 'voice stack: up.'
