@@ -34,15 +34,16 @@ import type { AgentMessageEnvelope, MessageHandlerResult } from '../../messaging
 import { logger } from '../../logger.js';
 import { appendAudit } from '../../db/repositories/audit-log.js';
 import { getCustomerById } from '../../db/repositories/customers.js';
-import { AsteriskAriClient, asteriskClientFromEnv } from '../../voice/asterisk-client.js';
+import { type VoiceOriginator, asteriskClientFromEnv } from '../../voice/asterisk-client.js';
 import { putSession } from '../../voice/session-store.js';
 
 export interface VoiceOperatorConfig extends BaseAgentConfig {
   /**
-   * Injectable Asterisk ARI client. When omitted, the agent lazily builds one
-   * from env on first use (`asteriskClientFromEnv`). Tests pass a fake.
+   * Injectable Asterisk origination client (ARI-HTTP or network-independent
+   * CLI). When omitted, the agent lazily builds one from env on first use
+   * (`asteriskClientFromEnv`). Tests pass a fake.
    */
-  asteriskClient?: AsteriskAriClient | null;
+  asteriskClient?: VoiceOriginator | null;
 }
 
 /** Shape of the VOICE.CALL_SCHEDULED payload (validated upstream by the registry). */
@@ -55,7 +56,7 @@ interface CallScheduledPayload {
 
 export class VoiceOperatorAgent extends BaseAgent {
   /** null = "not yet resolved"; set lazily from env on first handler call. */
-  private client: AsteriskAriClient | null;
+  private client: VoiceOriginator | null;
   private readonly clientInjected: boolean;
 
   constructor(cfg: VoiceOperatorConfig) {
@@ -84,7 +85,7 @@ export class VoiceOperatorAgent extends BaseAgent {
    * use it; otherwise build from env once and cache. A null result means the
    * env is incomplete → origination is disabled for this process.
    */
-  private resolveClient(): AsteriskAriClient | null {
+  private resolveClient(): VoiceOriginator | null {
     if (this.clientInjected) return this.client;
     if (this.client) return this.client;
     this.client = asteriskClientFromEnv();

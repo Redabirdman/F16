@@ -11,7 +11,9 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   AsteriskAriClient,
+  AsteriskCliClient,
   asteriskClientFromEnv,
+  formatOvhDest,
   type FetchLike,
   type AsteriskAriConfig,
 } from '../../src/voice/asterisk-client.js';
@@ -76,7 +78,8 @@ describe('AsteriskAriClient.originateCall', () => {
     expect(init.headers['content-type']).toBe('application/json');
 
     const body = JSON.parse(init.body) as Record<string, unknown>;
-    expect(body.endpoint).toBe('PJSIP/+33612345678@ovh-trunk');
+    // OVH dial string is normalised to 00-international (+336… → 00336…).
+    expect(body.endpoint).toBe('PJSIP/0033612345678@ovh-trunk');
     expect(body.extension).toBe('+33612345678');
     expect(body.context).toBe('f16-dial');
     expect(body.priority).toBe(1);
@@ -168,6 +171,9 @@ describe('asteriskClientFromEnv', () => {
     'VOICE_CALLER_ID',
     'AUDIOSOCKET_HOST',
     'AUDIOSOCKET_PORT',
+    'F16_ASTERISK_TRANSPORT',
+    'F16_VOICE_NATIVE_SIP',
+    'ASTERISK_OPENAI_CONTEXT',
   ] as const;
 
   function withSavedEnv(fn: () => void): void {
@@ -186,13 +192,23 @@ describe('asteriskClientFromEnv', () => {
 
   it('returns null when the no-default required vars are missing', () => {
     withSavedEnv(() => {
-      // url/user/host/port have defaults; password/trunk/context/callerId do not.
+      // Default transport=cli needs the trunk; absent → null.
       expect(asteriskClientFromEnv()).toBeNull();
     });
   });
 
-  it('builds a client from the required vars (url/user/host/port default)', () => {
+  it('defaults to the network-independent CLI transport (just needs the trunk)', () => {
     withSavedEnv(() => {
+      process.env.ASTERISK_OVH_TRUNK = 'ovh-trunk';
+      const client = asteriskClientFromEnv();
+      expect(client).toBeInstanceOf(AsteriskCliClient);
+      expect(client?.nativeSip).toBe(true);
+    });
+  });
+
+  it('builds the ARI client when F16_ASTERISK_TRANSPORT=ari', () => {
+    withSavedEnv(() => {
+      process.env.F16_ASTERISK_TRANSPORT = 'ari';
       process.env.ASTERISK_ARI_PASSWORD = 'pw';
       process.env.ASTERISK_OVH_TRUNK = 'ovh-trunk';
       process.env.ASTERISK_DIALPLAN_CONTEXT = 'f16-dial';
@@ -200,5 +216,74 @@ describe('asteriskClientFromEnv', () => {
       const client = asteriskClientFromEnv();
       expect(client).toBeInstanceOf(AsteriskAriClient);
     });
+  });
+});
+
+describe('AsteriskCliClient', () => {
+  it('originateNativeSip sets the global then originates (via the injected runner)', async () => {
+    const cmds: string[] = [];
+    const client = new AsteriskCliClient({
+      trunk: 'ovh-trunk',
+      openAiContext: 'f16-openai-bridge',
+      runner: async (cmd) => {
+        cmds.push(cmd);
+        return 'Channel created';
+      },
+    });
+    const res = await client.originateNativeSip({
+      to: '+212650012403',
+      sessionId: '11111111-2222-3333-4444-555555555555',
+    });
+    expect(cmds[0]).toBe('dialplan set global F16SESSION 11111111-2222-3333-4444-555555555555');
+    expect(cmds[1]).toBe(
+      'channel originate PJSIP/00212650012403@ovh-trunk extension s@f16-openai-bridge',
+    );
+    expect(res.channelId).toBe('cli-11111111-2222-3333-4444-555555555555');
+  });
+
+  it('throws on a rejected originate', async () => {
+    const client = new AsteriskCliClient({
+      trunk: 'ovh-trunk',
+      runner: async () => 'Unable to request channel PJSIP/...',
+    });
+    await expect(
+      client.originateNativeSip({
+        to: '+212650012403',
+        sessionId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      }),
+    ).rejects.toThrow(/asterisk_originate_rejected/);
+  });
+
+  it('rejects a non-E164 destination (no command run)', async () => {
+    let ran = false;
+    const client = new AsteriskCliClient({
+      trunk: 'ovh-trunk',
+      runner: async () => {
+        ran = true;
+        return '';
+      },
+    });
+    await expect(
+      client.originateNativeSip({
+        to: 'not-a-number',
+        sessionId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      }),
+    ).rejects.toThrow(/missing_to/);
+    expect(ran).toBe(false);
+  });
+
+  it('cascade (originateCall) is unsupported on the CLI transport', async () => {
+    const client = new AsteriskCliClient({ trunk: 'ovh-trunk', runner: async () => '' });
+    await expect(client.originateCall()).rejects.toThrow(/cascade_unsupported/);
+  });
+});
+
+describe('formatOvhDest', () => {
+  it('normalises to 00-international (OVH rejects bare/+ numbers)', () => {
+    expect(formatOvhDest('212650012403')).toBe('00212650012403');
+    expect(formatOvhDest('+212650012403')).toBe('00212650012403');
+    expect(formatOvhDest('+33612345678')).toBe('0033612345678');
+    expect(formatOvhDest('0033757818787')).toBe('0033757818787'); // already 00 → unchanged
+    expect(formatOvhDest('+212 650 012 403')).toBe('00212650012403'); // strips spaces
   });
 });

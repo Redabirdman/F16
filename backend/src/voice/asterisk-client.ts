@@ -95,7 +95,21 @@ export interface OriginateCallResult {
   channelId: string;
 }
 
-export class AsteriskAriClient {
+/**
+ * Transport-agnostic origination surface the voice-operator depends on. Two
+ * implementations: ARI-over-HTTP (`AsteriskAriClient`) and a NETWORK-INDEPENDENT
+ * CLI transport (`AsteriskCliClient`, via `wsl.exe asterisk -rx`). The CLI one
+ * is preferred on this host because the backend ⇄ WSL-Asterisk link has no
+ * reachable IP (the FSE bridged switch shares the host IP) and must survive
+ * Wi-Fi / network / machine changes — process-exec depends on no network.
+ */
+export interface VoiceOriginator {
+  readonly nativeSip: boolean;
+  originateCall(input: OriginateCallInput): Promise<OriginateCallResult>;
+  originateNativeSip(input: OriginateCallInput): Promise<OriginateCallResult>;
+}
+
+export class AsteriskAriClient implements VoiceOriginator {
   private readonly cfg: Required<Omit<AsteriskAriConfig, 'fetchImpl'>>;
   private readonly fetchImpl: FetchLike;
   private readonly authHeader: string;
@@ -147,7 +161,7 @@ export class AsteriskAriClient {
 
     const url = `${this.cfg.ariUrl}/channels`;
     const body = {
-      endpoint: `PJSIP/${input.to}@${this.cfg.trunk}`,
+      endpoint: `PJSIP/${formatOvhDest(input.to)}@${this.cfg.trunk}`,
       extension: input.to,
       context: this.cfg.dialplanContext,
       priority: 1,
@@ -205,7 +219,7 @@ export class AsteriskAriClient {
     // 2. Originate into the OpenAI bridge context (no AudioSocket vars needed).
     const url = `${this.cfg.ariUrl}/channels`;
     const body = {
-      endpoint: `PJSIP/${input.to}@${this.cfg.trunk}`,
+      endpoint: `PJSIP/${formatOvhDest(input.to)}@${this.cfg.trunk}`,
       extension: 's',
       context: this.cfg.openAiContext,
       priority: 1,
@@ -264,10 +278,128 @@ export class AsteriskAriClient {
 }
 
 /**
- * Build an AsteriskAriClient from process.env. Returns null when the required
+ * Runs an Asterisk CLI command and returns stdout. Default impl shells out to
+ * `wsl.exe -d <distro> -u root asterisk -rx "<cmd>"` via execFile (NO shell, so
+ * args can't be injection vectors). Injectable for tests.
+ */
+export type AsteriskRunner = (cmd: string) => Promise<string>;
+
+const E164_RE = /^\+?[0-9]{6,15}$/;
+const UUID_RE = /^[0-9a-fA-F-]{8,40}$/;
+
+/**
+ * Normalise a destination to the OVH trunk's expected dial string: international
+ * `00<countrycode><number>`. The DB stores bare E.164 (`212650012403`) or `+`
+ * form (`+212650012403`); OVH rejects both (no route → 0 calls) and needs the
+ * `00` prefix (e.g. `00212650012403`). Idempotent: already-`00` stays as-is.
+ */
+export function formatOvhDest(e164: string): string {
+  const digits = e164.replace(/[^\d+]/g, '');
+  if (digits.startsWith('+')) return `00${digits.slice(1)}`;
+  if (digits.startsWith('00')) return digits;
+  return `00${digits}`;
+}
+
+/**
+ * Network-independent Asterisk transport (Option B, M16/M17 hardening). Drives
+ * Asterisk through `wsl.exe asterisk -rx` instead of ARI-over-HTTP, so backend ⇄
+ * Asterisk needs NO IP/network and survives Wi-Fi/hotspot/machine changes.
+ * Implements only the native-SIP path (the V1 voice path); the legacy
+ * Pipecat/AudioSocket cascade still requires ARI (it sets per-channel vars).
+ */
+export class AsteriskCliClient implements VoiceOriginator {
+  private readonly trunk: string;
+  private readonly openAiContext: string;
+  private readonly run: AsteriskRunner;
+  readonly nativeSip = true;
+
+  constructor(cfg: {
+    trunk: string;
+    openAiContext?: string;
+    distro?: string;
+    timeoutMs?: number;
+    runner?: AsteriskRunner;
+  }) {
+    if (!cfg.trunk) throw new Error('AsteriskCliClient: trunk required');
+    this.trunk = cfg.trunk;
+    this.openAiContext = cfg.openAiContext ?? 'f16-openai-bridge';
+    const distro = cfg.distro ?? process.env.WSL_DISTRO ?? 'Ubuntu';
+    const timeoutMs = cfg.timeoutMs ?? 15_000;
+    this.run =
+      cfg.runner ??
+      (async (cmd: string): Promise<string> => {
+        const { execFile } = await import('node:child_process');
+        const { promisify } = await import('node:util');
+        const pexec = promisify(execFile);
+        const { stdout, stderr } = await pexec(
+          'wsl.exe',
+          ['-d', distro, '-u', 'root', 'asterisk', '-rx', cmd],
+          { timeout: timeoutMs, windowsHide: true },
+        );
+        return `${stdout}\n${stderr}`;
+      });
+  }
+
+  async originateNativeSip(input: OriginateCallInput): Promise<OriginateCallResult> {
+    if (!input.to || !E164_RE.test(input.to)) throw new Error('asterisk_originate_missing_to');
+    if (!input.sessionId || !UUID_RE.test(input.sessionId)) {
+      throw new Error('asterisk_originate_missing_session');
+    }
+
+    // 1. Set the global the bridge dialplan stamps onto the OpenAI INVITE
+    //    (fallback for MASTER_CHANNEL(AS_UUID)).
+    try {
+      await this.run(`dialplan set global F16SESSION ${input.sessionId}`);
+    } catch (err) {
+      logger.error(
+        { sessionId: input.sessionId, err: err instanceof Error ? err.message : String(err) },
+        'asterisk-cli: set F16SESSION global failed',
+      );
+      throw new Error('asterisk_setglobal_transport_error');
+    }
+
+    // 2. Originate into the OpenAI bridge context. `to`/endpoint embeds PII —
+    //    never logged. CLI gives no channel id, so we synthesize a stable one.
+    let out: string;
+    try {
+      out = await this.run(
+        `channel originate PJSIP/${formatOvhDest(input.to)}@${this.trunk} extension s@${this.openAiContext}`,
+      );
+    } catch (err) {
+      logger.error(
+        { sessionId: input.sessionId, err: err instanceof Error ? err.message : String(err) },
+        'asterisk-cli: originate transport error',
+      );
+      throw new Error('asterisk_originate_transport_error');
+    }
+    if (/unable|no such|invalid|error/i.test(out)) {
+      logger.error({ sessionId: input.sessionId }, 'asterisk-cli: originate rejected');
+      throw new Error('asterisk_originate_rejected');
+    }
+
+    const channelId = `cli-${input.sessionId}`;
+    logger.info(
+      { sessionId: input.sessionId, channelId },
+      'asterisk-cli: outbound call originated',
+    );
+    return { channelId };
+  }
+
+  /** Cascade (Pipecat/AudioSocket) needs per-channel vars → use ARI, not CLI. */
+  async originateCall(): Promise<OriginateCallResult> {
+    throw new Error('asterisk_cli_cascade_unsupported');
+  }
+}
+
+/**
+ * Build a VoiceOriginator from process.env. Returns null when the required
  * env is incomplete — the voice-operator treats that as "voice origination
  * disabled" (same env-gate discipline as the maxance-operator), so a dev box
  * without Asterisk config doesn't crash on a stray VOICE.CALL_SCHEDULED.
+ *
+ * Transport is chosen by `F16_ASTERISK_TRANSPORT` (cli | ari, default cli on
+ * this host): `cli` = network-independent wsl.exe exec (preferred); `ari` =
+ * legacy HTTP (needs a reachable ARI URL). The cascade path always needs `ari`.
  *
  * Env:
  *   ASTERISK_ARI_URL        (default http://localhost:8088/ari)
@@ -281,19 +413,30 @@ export class AsteriskAriClient {
  *   F16_VOICE_NATIVE_SIP    ('1'/'true' → OpenAI native-SIP bridge; default ON)
  *   ASTERISK_OPENAI_CONTEXT (default f16-openai-bridge)
  */
-export function asteriskClientFromEnv(fetchImpl?: FetchLike): AsteriskAriClient | null {
+export function asteriskClientFromEnv(fetchImpl?: FetchLike): VoiceOriginator | null {
+  const trunk = process.env.ASTERISK_OVH_TRUNK;
+  const openAiContext = process.env.ASTERISK_OPENAI_CONTEXT ?? 'f16-openai-bridge';
+  // Native SIP is the V1 voice path; default ON unless explicitly disabled.
+  const nativeSipEnv = (process.env.F16_VOICE_NATIVE_SIP ?? '1').toLowerCase();
+  const nativeSip = nativeSipEnv === '1' || nativeSipEnv === 'true';
+  // Transport: CLI (network-independent) is the default; ARI is legacy/cascade.
+  const transport = (process.env.F16_ASTERISK_TRANSPORT ?? 'cli').toLowerCase();
+
+  // CLI transport (preferred): network-independent native-SIP origination. Only
+  // needs the trunk; caller-ID + media are owned by the bridge dialplan/trunk.
+  if (transport === 'cli' && nativeSip) {
+    if (!trunk) return null;
+    return new AsteriskCliClient({ trunk, openAiContext });
+  }
+
+  // ARI transport (legacy / cascade): needs the full HTTP config.
   const ariUrl = process.env.ASTERISK_ARI_URL ?? 'http://localhost:8088/ari';
   const ariUser = process.env.ASTERISK_ARI_USER ?? 'f16';
   const ariPassword = process.env.ASTERISK_ARI_PASSWORD;
-  const trunk = process.env.ASTERISK_OVH_TRUNK;
   const dialplanContext = process.env.ASTERISK_DIALPLAN_CONTEXT;
   const callerId = process.env.VOICE_CALLER_ID;
   const audioSocketHost = process.env.AUDIOSOCKET_HOST ?? '127.0.0.1';
   const audioSocketPort = process.env.AUDIOSOCKET_PORT ?? '9092';
-  // Native SIP is the V1 voice path; default ON unless explicitly disabled.
-  const nativeSipEnv = (process.env.F16_VOICE_NATIVE_SIP ?? '1').toLowerCase();
-  const nativeSip = nativeSipEnv === '1' || nativeSipEnv === 'true';
-  const openAiContext = process.env.ASTERISK_OPENAI_CONTEXT ?? 'f16-openai-bridge';
 
   // ariUrl/ariUser/host/port all have safe defaults. The truly required,
   // no-default values are the password + trunk + context + callerId.
