@@ -15,12 +15,18 @@
  */
 import { logger } from '../../logger.js';
 
+/** Retry policy (M16) — match the Meta/HubSpot clients: 3 attempts, 1s/2s/4s. */
+const MAX_ATTEMPTS = 3;
+const INITIAL_BACKOFF_MS = 1_000;
+
 export interface WahaClientOptions {
   baseUrl: string;
   apiKey?: string;
   session?: string;
   /** Fetch implementation (Node 22 built-in default; pass in for tests). */
   fetchImpl?: typeof fetch;
+  /** Override retry sleep — tests pass `() => Promise.resolve()` to skip waiting. */
+  sleepMs?: (ms: number) => Promise<void>;
 }
 
 export interface WahaSendTextInput {
@@ -69,24 +75,62 @@ export class WahaClient {
   private readonly apiKey: string | undefined;
   private readonly session: string;
   private readonly fetchImpl: typeof fetch;
+  private readonly sleep: (ms: number) => Promise<void>;
 
   constructor(opts: WahaClientOptions) {
     this.baseUrl = opts.baseUrl.replace(/\/+$/, '');
     this.apiKey = opts.apiKey;
     this.session = opts.session ?? 'default';
     this.fetchImpl = opts.fetchImpl ?? fetch;
+    this.sleep =
+      opts.sleepMs ?? ((ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms)));
   }
 
+  /**
+   * POST with retry (M16). A transient WAHA blip (network error, 429, or 5xx)
+   * would otherwise silently drop a WhatsApp send — a human-action alert, a
+   * customer reply, or a creative image. Retries 3× with exponential backoff;
+   * 4xx other than 429 surface immediately (a bad request won't fix itself).
+   * PII protection unchanged: the request body is NEVER echoed in errors.
+   */
   private async request<T>(path: string, body: unknown): Promise<T> {
     const headers: Record<string, string> = { 'content-type': 'application/json' };
     if (this.apiKey) headers['x-api-key'] = this.apiKey;
-    const res = await this.fetchImpl(`${this.baseUrl}${path}`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) {
+    const payload = JSON.stringify(body);
+    let lastErr: unknown;
+
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      let res: Response;
+      try {
+        res = await this.fetchImpl(`${this.baseUrl}${path}`, {
+          method: 'POST',
+          headers,
+          body: payload,
+        });
+      } catch (err) {
+        lastErr = err;
+        if (attempt < MAX_ATTEMPTS) {
+          const wait = INITIAL_BACKOFF_MS * 2 ** (attempt - 1);
+          logger.warn(
+            { path, attempt, err: err instanceof Error ? err.message : 'unknown' },
+            'waha: network error, retrying',
+          );
+          await this.sleep(wait);
+          continue;
+        }
+        throw err instanceof Error ? new Error(`WAHA ${path} network error: ${err.message}`) : err;
+      }
+
+      if (res.ok) return res.json() as Promise<T>;
+
       const text = await res.text().catch(() => '');
+      const retryable = res.status === 429 || res.status >= 500;
+      if (retryable && attempt < MAX_ATTEMPTS) {
+        const wait = INITIAL_BACKOFF_MS * 2 ** (attempt - 1);
+        logger.warn({ path, status: res.status, attempt }, 'waha: retryable status, backing off');
+        await this.sleep(wait);
+        continue;
+      }
       // PII protection: do NOT include the request body in error text — it may
       // contain phone numbers and conversation content. Only HTTP status +
       // short prefix of response body (which should not contain PII either).
@@ -94,7 +138,10 @@ export class WahaClient {
         `WAHA ${path} failed: ${res.status} ${res.statusText} — ${text.slice(0, 200)}`,
       );
     }
-    return res.json() as Promise<T>;
+
+    throw lastErr instanceof Error
+      ? lastErr
+      : new Error(`WAHA ${path} failed after ${MAX_ATTEMPTS} attempts`);
   }
 
   async sendText(input: WahaSendTextInput): Promise<WahaSendResponse> {
