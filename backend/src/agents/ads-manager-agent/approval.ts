@@ -26,7 +26,11 @@ import * as humanActions from '../../db/repositories/human-actions.js';
 import { sendMessage } from '../../messaging/dispatcher.js';
 import { launchCampaignDraft } from './launch.js';
 import { assembleCampaignDraft } from './drafting.js';
-import { generateAndRegisterCreative, type CreativeAngle } from '../creative-agent/index.js';
+import {
+  generateAndRegisterCreative,
+  anglesFromFeedback,
+  type CreativeAngle,
+} from '../creative-agent/index.js';
 
 const DEFAULT_INTERVAL_MS = 60_000;
 
@@ -76,8 +80,20 @@ async function redraft(
   const leadFormId = (adset.rawMetaPayload as { leadFormId?: string } | null)?.leadFormId;
   if (angles.length === 0 || !leadFormId) return;
 
-  for (const angle of angles) {
-    await generateAndRegisterCreative({ db: opts.db, angle });
+  // Regenerate only the angle(s) the feedback names (e.g. "the speed picture…"),
+  // applying the feedback to the prompt; if none are named, regenerate all.
+  const named = notes ? anglesFromFeedback(notes).filter((a) => angles.includes(a)) : [];
+  const toRegen = named.length > 0 ? named : angles;
+  logger.info(
+    { oldCampaignId, toRegen, notes },
+    'ads-approval: regenerating creatives per feedback',
+  );
+  for (const angle of toRegen) {
+    await generateAndRegisterCreative({
+      db: opts.db,
+      angle,
+      ...(notes ? { feedback: notes } : {}),
+    });
   }
   await assembleCampaignDraft({
     db: opts.db,

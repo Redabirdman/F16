@@ -61,10 +61,12 @@ export interface ResolutionMatch {
   option: HumanActionOption;
   /** "uuid" | "latest_pending" — useful for audit logs. */
   matchedActionVia: 'uuid' | 'latest_pending';
-  /** "numeric" | "kind_alias" — same. */
-  matchedOptionVia: 'numeric' | 'kind_alias';
+  /** "numeric" | "kind_alias" | "freeform_revise" — same. */
+  matchedOptionVia: 'numeric' | 'kind_alias' | 'freeform_revise';
   /** Author chat id we extracted, in E.164 (e.g. "+33612345678"). */
   resolverPhone: string;
+  /** Free-text feedback (the operator's own words) — set on a revise match. */
+  notes?: string;
 }
 
 /** Result when the message looks like a resolution but doesn't fully match. */
@@ -79,14 +81,20 @@ export interface ResolutionFailure {
     | 'empty_body';
   /** Extra detail for log fields. */
   detail?: string;
+  /** On 'option_not_recognised' for an authorised resolver: the resolved
+   *  phone + target action id, so the caller can fall back to the LLM. */
+  resolverPhone?: string;
+  actionId?: string;
 }
 
 /** Either a successful match or a tagged failure. */
 export type ResolutionOutcome = ResolutionMatch | ResolutionFailure;
 
-/** Type guard: distinguish a successful match from a failure. */
+/** Type guard: distinguish a successful match from a failure. A match always
+ *  carries a chosen `option`; failures never do (even though some now carry
+ *  `actionId`/`resolverPhone` for the LLM fallback). */
 export function isMatch(o: ResolutionOutcome): o is ResolutionMatch {
-  return (o as ResolutionMatch).actionId !== undefined;
+  return (o as ResolutionMatch).option !== undefined;
 }
 
 /**
@@ -227,5 +235,14 @@ export function parseHumanActionResolution(input: ParseInput): ResolutionOutcome
     }
   }
 
-  return { reason: 'option_not_recognised', detail: stripped.slice(0, 40) };
+  // 7. No deterministic match. Free-form replies ("approved", "redo the speed
+  //    one…") are handled by the LLM interpreter in the webhook — the regex
+  //    layer is only the fast path for "1"/"approve". We surface the
+  //    authorised resolver phone so the caller can hand the message to the LLM.
+  return {
+    reason: 'option_not_recognised',
+    detail: stripped.slice(0, 40),
+    resolverPhone,
+    actionId: action.id,
+  };
 }

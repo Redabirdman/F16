@@ -112,12 +112,32 @@ const BRAND_ANCHORS = (hook: string, sub: string): string =>
 (F) A full-width deep-navy bar at the very bottom with a small white headset icon and white text EXACTLY '${BRAND.helpBar}' — NO phone number anywhere in the image.
 Brand violet-purple appears ONLY on the headline card, the price digits, the shield, and the CTA accent — NEVER as a large background area. Do NOT render any hex code or colour code as visible text. Render all French text with perfect accents and no spelling artefacts. Style: premium editorial commercial photography for a French insurance brand, scroll-stopping; the electric scooter is always unmistakably the subject.`;
 
-/** Build the full Nano Banana prompt for an angle. */
-export function buildCreativePrompt(angle: CreativeAngle): string {
+/** Build the full Nano Banana prompt for an angle, injecting any learned
+ *  creative constraints (distilled from Ridaa's past feedback) as
+ *  high-priority rules that override conflicting defaults. */
+export function buildCreativePrompt(angle: CreativeAngle, learnings: string[] = []): string {
   const a = ANGLES[angle];
+  const constraints =
+    learnings.length > 0
+      ? `\n\nLEARNED CONSTRAINTS — these come from the client's prior feedback and MUST be respected, they OVERRIDE any conflicting instruction above:\n${learnings.map((l) => `- ${l}`).join('\n')}`
+      : '';
   return `Ad creative for Assuryal (French electric-scooter / trottinette insurance).
 
 SCENE: ${a.scene}
 
-${BRAND_ANCHORS(a.hook, a.sub)}`;
+${BRAND_ANCHORS(a.hook, a.sub)}${constraints}`;
+}
+
+/** Detect which angle(s) a free-text feedback note refers to (English + FR). */
+export function anglesFromFeedback(feedback: string): CreativeAngle[] {
+  const f = feedback.toLowerCase();
+  const map: Record<CreativeAngle, string[]> = {
+    fear: ['fear', 'peur', 'vol', 'accident'],
+    legal: ['legal', 'légal', 'obligatoire', 'loi'],
+    value: ['value', 'valeur', 'prix', 'price', '5€', '5 €'],
+    speed: ['speed', 'vitesse', 'rapide', 'fast', 'quick', '2 min'],
+    social: ['social', 'communaut', 'community'],
+  };
+  const hits = ALL_ANGLES.filter((a) => map[a].some((kw) => f.includes(kw)));
+  return hits;
 }

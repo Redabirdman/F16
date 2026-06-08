@@ -6,8 +6,9 @@
  * top of this client and translates F16 `ContentBlock`s into individual WAHA
  * send calls.
  *
- * Production: WAHA runs on Ridaa's VPS (env `WAHA_BASE_URL`). Tests use a
- * local Node `http.createServer` mock (see `tests/channels/whatsapp/`).
+ * Production: WAHA runs as a CLOUD instance with a connected number (env
+ * `WAHA_BASE_URL` + `WAHA_API_KEY`, session `WAHA_SESSION` = 'default'). Tests
+ * use a local Node `http.createServer` mock (see `tests/channels/whatsapp/`).
  *
  * PII protection: errors NEVER echo the request body (which can contain
  * phone numbers + message text). Response bodies are truncated to 200 chars.
@@ -30,7 +31,12 @@ export interface WahaSendTextInput {
 
 export interface WahaSendImageInput {
   chatId: string;
-  url: string; // public URL or pre-signed; WAHA fetches
+  /** Public URL WAHA fetches. Provide this OR `data` (base64). */
+  url?: string;
+  /** Base64-encoded image bytes (for local files WAHA can't fetch). */
+  data?: string;
+  /** MIME type when sending `data`. Default 'image/png'. */
+  mimetype?: string;
   caption?: string;
   filename?: string;
 }
@@ -101,10 +107,17 @@ export class WahaClient {
   }
 
   async sendImage(input: WahaSendImageInput): Promise<WahaSendResponse> {
+    const file = input.data
+      ? {
+          mimetype: input.mimetype ?? 'image/png',
+          filename: input.filename ?? 'image.png',
+          data: input.data,
+        }
+      : { url: input.url, filename: input.filename };
     return this.request<WahaSendResponse>('/api/sendImage', {
       session: this.session,
       chatId: input.chatId,
-      file: { url: input.url, filename: input.filename },
+      file,
       ...(input.caption ? { caption: input.caption } : {}),
     });
   }

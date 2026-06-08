@@ -46,10 +46,12 @@
  *     edits on individual messages by default; we accept the closure
  *     message as the "thread is now done" signal.
  */
+import { readFile } from 'node:fs/promises';
 import { BaseAgent } from '../base.js';
 import type { AgentMessageEnvelope, MessageHandlerResult } from '../../messaging/dispatcher.js';
 import { logger } from '../../logger.js';
 import { getActionById } from '../../db/repositories/human-actions.js';
+import { getCampaignTree } from '../../db/repositories/ads.js';
 import type { WahaClient } from '../../channels/whatsapp/waha-client.js';
 import { formatHumanActionRequest, formatHumanActionResolved } from './format.js';
 
@@ -116,6 +118,22 @@ export class ReporterAgent extends BaseAgent {
     }
     const text = formatHumanActionRequest(action);
     await this.waha.sendText({ chatId: this.groupChatId, text });
+
+    // M12: a campaign draft also ships its creative images so Ridaa can judge
+    // the visuals before approving. Best-effort — a failed image send must not
+    // fail the (already-sent) text request.
+    if (action.intent === 'CAMPAIGN_DRAFT' && action.correlationId) {
+      await this.sendDraftCreatives(action.correlationId).catch((err) => {
+        logger.warn(
+          {
+            err: err instanceof Error ? err.message : String(err),
+            campaignId: action.correlationId,
+          },
+          'reporter-agent: failed to send draft creatives',
+        );
+      });
+    }
+
     logger.info(
       {
         humanActionId: action.id,
@@ -125,6 +143,39 @@ export class ReporterAgent extends BaseAgent {
       'reporter-agent: posted human-action request to WA group',
     );
     return { ok: true, result: { posted: true, humanActionId: action.id } };
+  }
+
+  /**
+   * Send each distinct creative image of a draft campaign as a WhatsApp image
+   * (base64 — the cloud WAHA can't fetch our local files). Captions the angle +
+   * headline so Ridaa sees which is which.
+   */
+  private async sendDraftCreatives(campaignId: string): Promise<void> {
+    const tree = await getCampaignTree(this.db, campaignId);
+    if (!tree) return;
+    const seen = new Set<string>();
+    for (const adset of tree.adsets) {
+      for (const ad of adset.ads) {
+        const c = ad.creative;
+        if (!c || seen.has(c.id)) continue;
+        seen.add(c.id);
+        try {
+          const bytes = await readFile(c.fileUrl);
+          await this.waha.sendImage({
+            chatId: this.groupChatId,
+            data: bytes.toString('base64'),
+            mimetype: 'image/png',
+            filename: `${c.angle}.png`,
+            caption: `🅰️ Angle « ${c.angle} » — ${c.headline ?? ''}`,
+          });
+        } catch (err) {
+          logger.warn(
+            { err: err instanceof Error ? err.message : String(err), creativeId: c.id },
+            'reporter-agent: creative image send failed',
+          );
+        }
+      }
+    }
   }
 
   /**

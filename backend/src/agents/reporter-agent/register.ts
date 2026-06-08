@@ -5,8 +5,8 @@
  * Sales Agent + Maxance Operator pattern.
  *
  * Env requirements (V1):
- *   WAHA_BASE_URL           — WAHA REST endpoint (e.g. http://127.0.0.1:3000)
- *   WAHA_API_KEY            — optional WAHA admin key
+ *   WAHA_BASE_URL           — cloud WAHA REST endpoint (e.g. https://waha.example.com)
+ *   WAHA_API_KEY            — WAHA API key (x-api-key) for the cloud instance
  *   WAHA_SESSION            — session name on the WAHA instance (default 'default')
  *   HUMAN_ACTION_GROUP_CHAT_ID — WhatsApp group chat id, e.g. '120363012345@g.us'
  *

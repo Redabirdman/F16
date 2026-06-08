@@ -30,6 +30,8 @@ import { insertCustomer, getCustomerByPhone } from '../../db/repositories/custom
 import { insertTurn } from '../../db/repositories/conversation-turns.js';
 import { leads } from '../../db/schema/leads.js';
 import { listPending, resolveAction } from '../../db/repositories/human-actions.js';
+import { interpretHumanReply } from '../../agents/reporter-agent/interpret.js';
+import type { HumanActionOption } from '../../db/schema/agent-runtime.js';
 import {
   WahaWebhookEnvelopeSchema,
   WahaMessagePayloadSchema,
@@ -292,27 +294,66 @@ async function tryResolveHumanActionFromGroup(
   }
   const authorised = opts.humanActionAuthorisedResolvers ?? new Set<string>();
   const pending = await listPending(opts.db, { limit: 20 });
+  // In a 1:1 DM (the configured chat id is a personal `@c.us`), WAHA omits
+  // `author` — the sender IS the `from`. Treat it as the author so a direct
+  // approval from Ridaa/Achraf authorises like a group reply would.
+  const effectiveAuthor = msg.author ?? (msg.from.endsWith('@c.us') ? msg.from : undefined);
   const outcome = parseHumanActionResolution({
     body: msg.body,
     from: msg.from,
-    author: msg.author,
+    author: effectiveAuthor,
     groupChatId,
     authorisedResolvers: authorised,
     pendingActions: pending,
   });
 
-  if (!isMatch(outcome)) {
-    logger.warn(
-      { reason: outcome.reason, detail: outcome.detail },
-      'waha webhook: human-action message did not resolve',
-    );
-    return { resolved: false, reason: outcome.reason };
+  // Resolve via the deterministic fast path ("1" / "approuver"), or fall back
+  // to the LLM interpreter for any free-form reply from an authorised resolver
+  // ("approved", "redo the speed one to show a stand-up scooter…"). The LLM
+  // picks the intended option AND distils a clear instruction for a revise.
+  let chosen: HumanActionOption | undefined;
+  let resolverPhone: string | undefined;
+  let actionId: string | undefined;
+  let notes: string | undefined;
+  let via = 'regex';
+
+  if (isMatch(outcome)) {
+    chosen = outcome.option;
+    resolverPhone = outcome.resolverPhone;
+    actionId = outcome.actionId;
+    notes = outcome.notes;
+  } else if (
+    outcome.reason === 'option_not_recognised' &&
+    outcome.actionId &&
+    outcome.resolverPhone
+  ) {
+    const action = pending.find((a) => a.id === outcome.actionId);
+    if (action) {
+      const interp = await interpretHumanReply({ action, message: msg.body });
+      if (interp) {
+        chosen = (action.options as HumanActionOption[]).find((o) => o.id === interp.optionId);
+        resolverPhone = outcome.resolverPhone;
+        actionId = action.id;
+        notes = interp.feedback ?? undefined;
+        via = `llm:${interp.confidence}`;
+      }
+    }
   }
 
-  await resolveAction(opts.db, outcome.actionId, {
-    chosenOption: outcome.option,
-    by: outcome.resolverPhone,
+  if (!chosen || !actionId || !resolverPhone) {
+    const reason = isMatch(outcome) ? 'no_option' : outcome.reason;
+    logger.warn(
+      { reason, detail: isMatch(outcome) ? undefined : outcome.detail },
+      'waha webhook: human-action message did not resolve',
+    );
+    return { resolved: false, reason };
+  }
+
+  await resolveAction(opts.db, actionId, {
+    chosenOption: chosen,
+    by: resolverPhone,
     source: 'whatsapp',
+    ...(notes ? { notes } : {}),
   });
 
   await sendMessage(
@@ -322,27 +363,17 @@ async function tryResolveHumanActionFromGroup(
       toRole: 'human-router',
       toInstance: 'singleton',
       intent: 'HUMAN_ACTION.RESOLVED',
-      payload: {
-        humanActionId: outcome.actionId,
-        choice: outcome.option.id,
-        source: 'whatsapp',
-      },
-      correlationId: outcome.actionId,
+      payload: { humanActionId: actionId, choice: chosen.id, source: 'whatsapp' },
+      correlationId: actionId,
     },
   );
 
   logger.info(
-    {
-      humanActionId: outcome.actionId,
-      choice: outcome.option.id,
-      resolverPhone: outcome.resolverPhone,
-      matchedActionVia: outcome.matchedActionVia,
-      matchedOptionVia: outcome.matchedOptionVia,
-    },
+    { humanActionId: actionId, choice: chosen.id, resolverPhone, via },
     'waha webhook: human-action resolved via WhatsApp',
   );
 
-  return { resolved: true, actionId: outcome.actionId, choice: outcome.option.id };
+  return { resolved: true, actionId, choice: chosen.id };
 }
 
 /** Re-export so start() and tests can build a Set from the env value. */

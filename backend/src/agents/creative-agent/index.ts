@@ -12,7 +12,15 @@ export {
 } from './creative.js';
 export { generateImage, type GenerateImageOptions } from './generate.js';
 export {
+  distillFeedbackToGuidance,
+  learnFromFeedback,
+  loadLearnings,
+  storeLearning,
+  type DistilledLearning,
+} from './learnings.js';
+export {
   buildCreativePrompt,
+  anglesFromFeedback,
   angleCopy,
   ALL_ANGLES,
   BRAND,

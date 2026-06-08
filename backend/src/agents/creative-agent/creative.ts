@@ -14,6 +14,7 @@ import { logger } from '../../logger.js';
 import type { Creative } from '../../db/schema/ads.js';
 import { insertCreative, getCreativeBySha256 } from '../../db/repositories/ads.js';
 import { generateImage } from './generate.js';
+import { learnFromFeedback, loadLearnings } from './learnings.js';
 import {
   buildCreativePrompt,
   angleCopy,
@@ -40,6 +41,8 @@ export interface GenerateCreativeOptions {
   apiKey?: string;
   /** Provenance tag. Default 'ai-nano-banana'. */
   generatedBy?: string;
+  /** Human revision feedback to apply to this regeneration (verbatim). */
+  feedback?: string;
   fetchImpl?: typeof fetch;
 }
 
@@ -47,7 +50,18 @@ export async function generateAndRegisterCreative(
   opts: GenerateCreativeOptions,
 ): Promise<Creative> {
   const format = opts.format ?? '1:1';
-  const prompt = buildCreativePrompt(opts.angle);
+  // Intelligence: distil any new feedback into a durable learning FIRST, then
+  // build the prompt with ALL applicable learnings injected (so corrections
+  // shape this generation and every future one) — never a verbatim append.
+  if (opts.feedback) {
+    await learnFromFeedback(opts.db, {
+      feedback: opts.feedback,
+      angle: opts.angle,
+      createdByAgent: 'creative-agent',
+    });
+  }
+  const learnings = await loadLearnings(opts.db, opts.angle);
+  const prompt = buildCreativePrompt(opts.angle, learnings);
   const bytes = await generateImage({
     prompt,
     logoPath: opts.logoPath ?? ASSURYAL_LOGO_PATH,
