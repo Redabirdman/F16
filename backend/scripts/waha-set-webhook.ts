@@ -25,10 +25,9 @@ if (key) headers['x-api-key'] = key;
     .json()
     .catch(() => ({}));
   const existing: any[] = (cur as any).config?.webhooks ?? [];
-  if (existing.some((w) => w?.url === hookUrl)) {
-    console.log('webhook already set:', hookUrl);
-    process.exit(0);
-  }
+  // NOTE: we DON'T short-circuit when the URL already matches — re-applying is
+  // idempotent and is the only way to add/refresh the HMAC signing key on an
+  // already-registered webhook.
   // Drop any prior F16 webhook (old/dead tunnel) but keep other apps' webhooks.
   const kept = existing.filter((w) => !String(w?.url ?? '').endsWith('/webhooks/waha'));
   // M16 — when WAHA_HMAC_SECRET is set, ask WAHA to sign our webhook (HMAC-SHA512
