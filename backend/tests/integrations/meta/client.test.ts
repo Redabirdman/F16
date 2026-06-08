@@ -97,6 +97,19 @@ describe('MetaGraphClient.getLeadgenData', () => {
   });
 });
 
+describe('MetaGraphClient.del', () => {
+  it('issues an HTTP DELETE to the given path with no body', async () => {
+    const { fetchImpl, calls } = stubFetch(() => ({ status: 200, body: { success: true } }));
+    const client = new MetaGraphClient({ accessToken: 'TKN', fetchImpl, sleepMs: noSleep });
+    const res = await client.del<{ success: boolean }>('/120999');
+    expect(res).toEqual({ success: true });
+    expect(calls[0]!.method).toBe('DELETE');
+    expect(calls[0]!.url).toContain('/v21.0/120999');
+    expect(calls[0]!.body).toBeNull();
+    expect(calls[0]!.headers['authorization']).toBe('Bearer TKN');
+  });
+});
+
 describe('MetaGraphClient retry', () => {
   it('retries on HTTP 500 then succeeds', async () => {
     const { fetchImpl, calls } = stubFetch((_c, n) =>

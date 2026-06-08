@@ -238,12 +238,17 @@ export class MetaGraphClient {
     return this.request<T>('POST', path, {}, params, tokenOverride);
   }
 
+  /** DELETE an object by path (e.g. `/{campaign-id}`). Used for launch rollback. */
+  async del<T>(path: string): Promise<T> {
+    return this.request<T>('DELETE', path, {}, null, undefined);
+  }
+
   // ---------------------------------------------------------------------------
   // Internals
   // ---------------------------------------------------------------------------
 
   private async request<T>(
-    method: 'GET' | 'POST',
+    method: 'GET' | 'POST' | 'DELETE',
     path: string,
     query: Record<string, string>,
     formParams: Record<string, string> | null,
@@ -316,7 +321,7 @@ export class MetaGraphClient {
   }
 
   private async rawRequest(
-    method: 'GET' | 'POST',
+    method: 'GET' | 'POST' | 'DELETE',
     path: string,
     query: Record<string, string>,
     formParams: Record<string, string> | null,

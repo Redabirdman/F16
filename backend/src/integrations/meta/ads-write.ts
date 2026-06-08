@@ -160,3 +160,13 @@ export async function createAd(
   if (!res.id) throw new Error('createAd: no id returned');
   return { id: res.id };
 }
+
+/**
+ * Delete a campaign (cascades to its adsets/ads). Used to roll back a
+ * half-built launch so a mid-flight failure (e.g. adset ToS rejection) doesn't
+ * leave an orphan campaign shell on the account. Best-effort by design — the
+ * caller logs but never lets a rollback failure mask the original error.
+ */
+export async function deleteCampaign(client: MetaGraphClient, campaignId: string): Promise<void> {
+  await client.del(`/${campaignId}`);
+}
