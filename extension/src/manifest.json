@@ -20,6 +20,6 @@
     "default_title": "F16 Maxance Driver",
     "default_popup": "popup.html"
   },
-  "permissions": ["scripting", "tabs", "storage", "webNavigation"],
+  "permissions": ["scripting", "tabs", "storage", "webNavigation", "alarms"],
   "host_permissions": ["https://www.maxance.com/*", "https://extranet.maxance.com/*"]
 }

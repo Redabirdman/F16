@@ -1162,6 +1162,32 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-chrome.runtime.onInstalled.addListener(() => void reconnectLoop());
-chrome.runtime.onStartup.addListener(() => void reconnectLoop());
+/**
+ * MV3 keepalive (M16 hardening). An idle service worker is terminated by
+ * Chrome after ~30s, which kills the reconnect loop's `await sleep(delay)`
+ * timer while the backend WS is DOWN — so a dropped connection would never
+ * recover until some unrelated event respawned the SW. A periodic alarm
+ * guarantees the SW is respawned on a fixed cadence; the respawn re-runs the
+ * top-level `reconnectLoop()` (idempotent via `loopRunning`), and the handler
+ * also kicks it directly. 30s is the MV3 minimum period. While a WS is OPEN
+ * the active connection already keeps the SW alive — this only matters during
+ * disconnected windows, which is exactly when we need it.
+ */
+const KEEPALIVE_ALARM = 'f16-ws-keepalive';
+function ensureKeepaliveAlarm(): void {
+  chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 0.5 });
+}
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === KEEPALIVE_ALARM) void reconnectLoop();
+});
+
+chrome.runtime.onInstalled.addListener(() => {
+  ensureKeepaliveAlarm();
+  void reconnectLoop();
+});
+chrome.runtime.onStartup.addListener(() => {
+  ensureKeepaliveAlarm();
+  void reconnectLoop();
+});
+ensureKeepaliveAlarm();
 void reconnectLoop();
