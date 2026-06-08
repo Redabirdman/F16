@@ -19,12 +19,19 @@
  * doesn't leak how much of the signature was correct. The check is constant-
  * time on the byte length and uses our shared `PII_ENCRYPTION_KEY` policy
  * for env-driven secrets (the WAHA HMAC secret is independent).
+ *
+ * ⚠️ Algorithm: WAHA signs the `X-Webhook-Hmac` header with HMAC-**SHA-512**
+ * by default (NOT SHA-256). The algorithm is configurable via `hmacAlgo`
+ * (env `WAHA_HMAC_ALGO`) so a differently-configured WAHA still verifies; the
+ * default matches stock WAHA. Setting the wrong algo rejects every inbound
+ * message with a 401, so this MUST be live-verified when re-enabling HMAC.
  */
 import { Hono } from 'hono';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { desc, eq } from 'drizzle-orm';
 import type { Database } from '../../db/index.js';
 import { logger } from '../../logger.js';
+import { recordWebhookSignatureFailure } from '../../metrics/index.js';
 import { sendMessage } from '../../messaging/dispatcher.js';
 import { insertCustomer, getCustomerByPhone } from '../../db/repositories/customers.js';
 import { insertTurn } from '../../db/repositories/conversation-turns.js';
@@ -52,6 +59,11 @@ export interface WhatsAppWebhookOptions {
    * don't forward the header. Production deployments MUST set this.
    */
   hmacSecret?: string;
+  /**
+   * HMAC digest algorithm WAHA signs with. Defaults to `sha512` (stock WAHA).
+   * Override via env `WAHA_HMAC_ALGO` for a non-default WAHA install.
+   */
+  hmacAlgo?: string;
   /**
    * Optional — WAHA chat id of the human-action group (e.g.
    * "120363012345@g.us"). When set, inbound messages from this chat are
@@ -87,8 +99,10 @@ export function buildWhatsAppWebhook(opts: WhatsAppWebhookOptions): Hono {
     // 1. HMAC verification (skipped when no secret is configured).
     if (opts.hmacSecret) {
       const sig = c.req.header('x-webhook-hmac') ?? c.req.header('x-waha-signature') ?? '';
-      if (!verifyHmac(rawBody, sig, opts.hmacSecret)) {
-        logger.warn('waha webhook: HMAC verification failed');
+      const algo = opts.hmacAlgo ?? 'sha512';
+      if (!verifyHmac(rawBody, sig, opts.hmacSecret, algo)) {
+        recordWebhookSignatureFailure('waha');
+        logger.warn({ algo }, 'waha webhook: HMAC verification failed');
         return c.json({ error: 'invalid signature' }, 401);
       }
     }
@@ -386,9 +400,14 @@ export { parseAuthorisedResolvers };
  * and short-circuits when the byte lengths differ — `timingSafeEqual` throws
  * on mismatched-length buffers, so we filter that here for a clean 401.
  */
-function verifyHmac(rawBody: string, providedSig: string, secret: string): boolean {
+function verifyHmac(
+  rawBody: string,
+  providedSig: string,
+  secret: string,
+  algo = 'sha512',
+): boolean {
   if (!providedSig) return false;
-  const computed = createHmac('sha256', secret).update(rawBody).digest('hex');
+  const computed = createHmac(algo, secret).update(rawBody).digest('hex');
   const provided = providedSig.startsWith('sha256=') ? providedSig.slice(7) : providedSig;
   if (provided.length !== computed.length) return false;
   try {

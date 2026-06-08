@@ -38,6 +38,8 @@ const ENV_KEYS = [
   'ANTHROPIC_API_KEY',
   'OPENROUTER_API_KEY',
   'BILLIONMAIL_API_KEY',
+  'OPENAI_API_KEY',
+  'OPENAI_WEBHOOK_SECRET',
 ] as const;
 const saved: Record<string, string | undefined> = {};
 
@@ -136,5 +138,18 @@ describe('GET /v1/admin/integrations/health', () => {
     };
     const anthropic = body.integrations.find((i) => i.name === 'anthropic');
     expect(anthropic?.status).toBe('ok');
+  });
+
+  it('reports openai_sip ok + signature ON when key + webhook secret are set', async () => {
+    process.env.OPENAI_API_KEY = 'sk-test';
+    process.env.OPENAI_WEBHOOK_SECRET = 'whsec_test';
+    const app = buildAdminIntegrationsRouter({ fetchImpl: makeFetch({}) });
+    const res = await app.request('/v1/admin/integrations/health');
+    const body = (await res.json()) as {
+      integrations: Array<{ name: string; status: string; detail?: string }>;
+    };
+    const sip = body.integrations.find((i) => i.name === 'openai_sip');
+    expect(sip?.status).toBe('ok');
+    expect(sip?.detail).toMatch(/signature verification ON/);
   });
 });

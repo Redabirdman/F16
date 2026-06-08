@@ -12,10 +12,28 @@
  * BullMQ does its own.
  */
 import { Queue, Worker, QueueEvents } from 'bullmq';
+import type { JobsOptions } from 'bullmq';
 import { Redis } from 'ioredis';
 import { logger } from '../logger.js';
+import { metrics, recordJobCompleted, recordJobFailed, queueDepthGauge } from '../metrics/index.js';
+import { moveToDlq } from './dlq.js';
 
 let _redis: Redis | null = null;
+
+/**
+ * Default retry policy applied to EVERY job (M16 hardening). A transient
+ * failure (Redis blip, Maxance 502, Graph rate-limit) is retried with
+ * exponential backoff instead of dying on the first throw. Per-`add` options
+ * override these key-by-key, so the dispatcher's `priority`/`removeOn*` still
+ * win while inheriting `attempts` + `backoff`. After `attempts` are exhausted
+ * the worker-`failed` handler dead-letters the job (see ./dlq.ts).
+ */
+export const DEFAULT_JOB_OPTIONS: JobsOptions = {
+  attempts: 5,
+  backoff: { type: 'exponential', delay: 1000 },
+  removeOnComplete: { count: 1000 },
+  removeOnFail: { count: 5000 },
+};
 
 /** Process-wide singleton ioredis client built from REDIS_URL. */
 export function getRedis(): Redis {
@@ -42,7 +60,11 @@ const _queues = new Map<string, Queue>();
 export function getQueue(name: string): Queue {
   let q = _queues.get(name);
   if (!q) {
-    q = new Queue(name, { connection: getRedis(), prefix: prefix() });
+    q = new Queue(name, {
+      connection: getRedis(),
+      prefix: prefix(),
+      defaultJobOptions: DEFAULT_JOB_OPTIONS,
+    });
     _queues.set(name, q);
   }
   return q;
@@ -58,10 +80,75 @@ export function createWorker<T = unknown, R = unknown>(
   processor: (jobName: string, data: T) => Promise<R>,
   opts: { concurrency?: number } = {},
 ): Worker<T, R> {
-  return new Worker<T, R>(queueName, async (job) => processor(job.name, job.data), {
-    connection: getRedis(),
-    prefix: prefix(),
-    concurrency: opts.concurrency ?? 1,
+  const worker = new Worker<T, R>(
+    queueName,
+    async (job) => {
+      const startedAt = Date.now();
+      const result = await processor(job.name, job.data);
+      recordJobCompleted(queueName, (Date.now() - startedAt) / 1000);
+      return result;
+    },
+    {
+      connection: getRedis(),
+      prefix: prefix(),
+      concurrency: opts.concurrency ?? 1,
+    },
+  );
+
+  // M16 — observe + dead-letter. `failed` fires on every failed attempt;
+  // we count each, and once the job has exhausted its `attempts` budget we
+  // park it on the DLQ (best-effort, never throws).
+  worker.on('failed', (job, err) => {
+    recordJobFailed(queueName);
+    if (!job) return;
+    const maxAttempts = job.opts.attempts ?? 1;
+    if (job.attemptsMade >= maxAttempts) {
+      void moveToDlq(queueName, job);
+    } else {
+      logger.warn(
+        {
+          queue: queueName,
+          jobName: job.name,
+          attemptsMade: job.attemptsMade,
+          maxAttempts,
+          err: err instanceof Error ? err.message : String(err),
+        },
+        'bullmq job failed — will retry',
+      );
+    }
+  });
+  worker.on('error', (err) =>
+    logger.error(
+      { err: err instanceof Error ? err.message : String(err), queue: queueName },
+      'bullmq worker error',
+    ),
+  );
+
+  return worker;
+}
+
+/**
+ * Register a scrape-time collector that snapshots BullMQ job counts per
+ * queue + state into the `f16_queue_depth` gauge. Call once at boot with
+ * the set of live queue names. Idempotent-ish: registering twice just adds a
+ * second (harmless) collector that overwrites the same series.
+ */
+export function registerQueueDepthCollector(queueNames: readonly string[]): void {
+  const gauge = queueDepthGauge();
+  metrics.registerCollector(async () => {
+    for (const name of queueNames) {
+      const counts = await getQueue(name).getJobCounts(
+        'wait',
+        'active',
+        'delayed',
+        'failed',
+        'completed',
+        'paused',
+      );
+      for (const [state, n] of Object.entries(counts)) {
+        gauge.set({ queue: name, state }, n ?? 0);
+      }
+    }
   });
 }
 

@@ -31,7 +31,17 @@ if (key) headers['x-api-key'] = key;
   }
   // Drop any prior F16 webhook (old/dead tunnel) but keep other apps' webhooks.
   const kept = existing.filter((w) => !String(w?.url ?? '').endsWith('/webhooks/waha'));
-  const webhooks = [...kept, { url: hookUrl, events: ['message'] }];
+  // M16 — when WAHA_HMAC_SECRET is set, ask WAHA to sign our webhook (HMAC-SHA512
+  // in the X-Webhook-Hmac header). The backend verifies it (default algo sha512).
+  const hmacSecret = process.env.WAHA_HMAC_SECRET;
+  const ours: Record<string, unknown> = { url: hookUrl, events: ['message'] };
+  if (hmacSecret) {
+    ours.hmac = { key: hmacSecret };
+    console.log('HMAC signing ENABLED on this webhook (X-Webhook-Hmac, sha512)');
+  } else {
+    console.log('HMAC signing DISABLED (WAHA_HMAC_SECRET empty) — backend skips verification');
+  }
+  const webhooks = [...kept, ours];
   const res = await fetch(`${base}/api/sessions/${session}`, {
     method: 'PUT',
     headers,

@@ -20,7 +20,9 @@
  * What we probe:
  *   - WAHA           — GET /api/sessions/{name}; status must be 'WORKING'
  *   - HubSpot        — GET /crm/v3/owners?limit=1 with API token
- *   - Pipecat        — GET /health on the configured Pipecat URL
+ *   - OpenAI-SIP     — env-presence of OPENAI_API_KEY (live voice path);
+ *                      reports whether webhook signature verification is on
+ *   - Pipecat (legacy) — GET /health; the cascade fallback, never required
  *   - Maxance        — env-presence only (MAXANCE_DRIVER); the live
  *                      extension WS state is owned by the maxance-operator
  *                      agent and surfaced separately on /agents (M14 V2)
@@ -68,6 +70,7 @@ export function buildAdminIntegrationsRouter(opts: AdminIntegrationsRouterOption
     const probes = await Promise.all([
       probeWaha(f, timeoutMs),
       probeHubspot(f, timeoutMs),
+      probeOpenAiSip(),
       probePipecat(f, timeoutMs),
       envPresenceProbe('maxance', 'MAXANCE_DRIVER'),
       envPresenceProbe('anthropic', 'ANTHROPIC_API_KEY'),
@@ -167,10 +170,37 @@ async function probeHubspot(f: typeof fetch, timeoutMs: number): Promise<Integra
   }
 }
 
+/**
+ * OpenAI Realtime native-SIP voice (M10 V2). There's no public health
+ * endpoint to ping (OpenAI is the SIP endpoint), so this is an env-presence
+ * check: the webhook route is mounted only when OPENAI_API_KEY is set, and a
+ * configured signing secret means signature verification is live. We also
+ * surface the current public tunnel URL (the thing that breaks on restart)
+ * when the deploy launcher has written it.
+ */
+function probeOpenAiSip(): IntegrationHealth {
+  const key = process.env.OPENAI_API_KEY;
+  if (!key) {
+    return { name: 'openai_sip', status: 'unconfigured', required: false };
+  }
+  const signed = Boolean(process.env.OPENAI_WEBHOOK_SECRET);
+  return {
+    name: 'openai_sip',
+    status: 'ok',
+    detail: signed ? 'key set; webhook signature verification ON' : 'key set; signature OFF (dev)',
+    required: true,
+  };
+}
+
+/**
+ * Pipecat cascade voice — LEGACY. The live voice path is OpenAI native SIP
+ * (probeOpenAiSip); Pipecat is the fallback cascade and is no longer required.
+ * Probed only when PIPECAT_BASE_URL is explicitly set; never `required`.
+ */
 async function probePipecat(f: typeof fetch, timeoutMs: number): Promise<IntegrationHealth> {
   const base = process.env.PIPECAT_BASE_URL;
   if (!base) {
-    return { name: 'pipecat', status: 'unconfigured', required: false };
+    return { name: 'pipecat (legacy)', status: 'unconfigured', required: false };
   }
   const t0 = Date.now();
   try {
@@ -178,21 +208,21 @@ async function probePipecat(f: typeof fetch, timeoutMs: number): Promise<Integra
     const durationMs = Date.now() - t0;
     if (!res.ok) {
       return {
-        name: 'pipecat',
+        name: 'pipecat (legacy)',
         status: 'unreachable',
         detail: `HTTP ${res.status}`,
         durationMs,
-        required: true,
+        required: false,
       };
     }
-    return { name: 'pipecat', status: 'ok', durationMs, required: true };
+    return { name: 'pipecat (legacy)', status: 'ok', durationMs, required: false };
   } catch (err) {
     return {
-      name: 'pipecat',
+      name: 'pipecat (legacy)',
       status: 'unreachable',
       detail: truncate(err instanceof Error ? err.message : String(err)),
       durationMs: Date.now() - t0,
-      required: true,
+      required: false,
     };
   }
 }

@@ -40,6 +40,7 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 import { WebSocket as WsClient } from 'ws';
 import type { Database } from '../db/index.js';
 import { logger } from '../logger.js';
+import { recordWsReconnect } from '../metrics/index.js';
 import { getSession } from '../voice/session-store.js';
 import { insertTurn } from '../db/repositories/conversation-turns.js';
 import { appendAudit } from '../db/repositories/audit-log.js';
@@ -82,11 +83,15 @@ interface CallContext {
   transcripts: Array<{ direction: 'inbound' | 'outbound'; content: string }>;
   /** Set before a deliberate hangup (terminer_appel) so close doesn't reconnect. */
   intentionalHangup?: boolean;
-  /** One bounded control-WS reconnect attempt on an unexpected drop. */
-  reconnectAttempted?: boolean;
+  /** Bounded control-WS reconnect attempts on unexpected drops (M16). */
+  reconnectCount?: number;
   /** Guard so transcripts persist exactly once across reconnects. */
   persisted?: boolean;
 }
+
+/** Max control-WS reconnect attempts + base backoff before we give up + persist (M16). */
+const MAX_WS_RECONNECTS = 3;
+const WS_RECONNECT_BASE_MS = 500;
 
 /**
  * Build the OpenAI Realtime SIP webhook router. Returns null when no API key is
@@ -297,13 +302,20 @@ function openControlSocket(ctx: CallContext, apiKey: string, db: Database, greet
   });
 
   ws.on('close', () => {
-    // Unexpected drop (not a deliberate terminer_appel) → one reconnect attempt
-    // so tools + transcripts keep working; OpenAI holds the SIP call meanwhile.
-    // If the call is actually over, the reconnect WS just closes again → persist.
-    if (!ctx.intentionalHangup && !ctx.reconnectAttempted) {
-      ctx.reconnectAttempted = true;
-      logger.warn({ callId }, 'openai-sip: control WS dropped → reconnecting once');
-      setTimeout(() => openControlSocket(ctx, apiKey, db, false), 500);
+    // Unexpected drop (not a deliberate terminer_appel) → bounded reconnect with
+    // exponential backoff so a transient blip doesn't kill a live call; OpenAI
+    // holds the SIP leg meanwhile. If the call is actually over, each reconnect
+    // WS just closes again → after MAX attempts we stop + persist.
+    const attempts = ctx.reconnectCount ?? 0;
+    if (!ctx.intentionalHangup && attempts < MAX_WS_RECONNECTS) {
+      ctx.reconnectCount = attempts + 1;
+      const delay = WS_RECONNECT_BASE_MS * 2 ** attempts;
+      recordWsReconnect('openai_control');
+      logger.warn(
+        { callId, attempt: ctx.reconnectCount, max: MAX_WS_RECONNECTS, delay },
+        'openai-sip: control WS dropped → reconnecting with backoff',
+      );
+      setTimeout(() => openControlSocket(ctx, apiKey, db, false), delay);
       return;
     }
     logger.info(

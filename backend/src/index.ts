@@ -24,6 +24,12 @@ import { buildAdminRealtimeRouter } from './admin/realtime-sse.js';
 import { buildAdminAgentsRouter } from './admin/agents.js';
 import { requireAdminAuth } from './admin/auth.js';
 import type { RealtimeListener } from './realtime/notify.js';
+import { metrics, registerDefaultMetrics } from './metrics/index.js';
+import { registerQueueDepthCollector } from './queue/index.js';
+import { INTENT_TO_QUEUE } from './messaging/dispatcher.js';
+
+// Register the default process gauges once at module load (idempotent).
+registerDefaultMetrics();
 
 /**
  * Read package.json once at module load to surface the running version on /health.
@@ -79,6 +85,19 @@ export function buildApp(opts: BuildAppOptions = {}): Hono {
     return c.json(body, 200);
   });
 
+  // M16 — Prometheus scrape endpoint. Open by default (exposes only counters /
+  // gauges, no secrets); set METRICS_BEARER_TOKEN to require `Authorization:
+  // Bearer <token>` when the tunnel exposes it publicly.
+  app.get('/metrics', async (c) => {
+    const token = process.env.METRICS_BEARER_TOKEN;
+    if (token) {
+      const auth = c.req.header('authorization') ?? '';
+      if (auth !== `Bearer ${token}`) return c.text('unauthorized', 401);
+    }
+    const body = await metrics.render();
+    return c.text(body, 200, { 'content-type': 'text/plain; version=0.0.4; charset=utf-8' });
+  });
+
   if (opts.db) {
     // Mount channel webhooks only when we have a DB to write to. Without
     // one, the `/webhooks/waha` route would just 500 on every request — a
@@ -95,6 +114,7 @@ export function buildApp(opts: BuildAppOptions = {}): Hono {
       db: opts.db,
       // exactOptionalPropertyTypes: only set the key when defined.
       ...(opts.wahaHmacSecret ? { hmacSecret: opts.wahaHmacSecret } : {}),
+      ...(process.env.WAHA_HMAC_ALGO ? { hmacAlgo: process.env.WAHA_HMAC_ALGO } : {}),
       ...(humanActionGroupChatId ? { humanActionGroupChatId } : {}),
       ...(humanActionAuthorisedResolvers.size > 0 ? { humanActionAuthorisedResolvers } : {}),
     });
@@ -283,6 +303,10 @@ export async function start(port: number = Number(process.env.PORT ?? 3001)): Pr
   // accept requests but nothing downstream actually processes them.
   const { startWorkers } = await import('./supervisor/index.js');
   const workerSet = await startWorkers({ db: db() });
+
+  // M16 — snapshot live BullMQ depth per queue on every /metrics scrape.
+  // Distinct queue names come from the intent→queue routing table.
+  registerQueueDepthCollector([...new Set(Object.values(INTENT_TO_QUEUE))]);
 
   const shutdown = (signal: NodeJS.Signals): void => {
     logger.info({ signal }, 'shutting down');

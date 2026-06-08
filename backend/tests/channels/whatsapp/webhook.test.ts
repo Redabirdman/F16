@@ -92,8 +92,8 @@ function buildBody(opts: {
   });
 }
 
-function sign(rawBody: string, secret: string): string {
-  return createHmac('sha256', secret).update(rawBody).digest('hex');
+function sign(rawBody: string, secret: string, algo = 'sha256'): string {
+  return createHmac(algo, secret).update(rawBody).digest('hex');
 }
 
 d('WAHA inbound webhook (live)', () => {
@@ -120,12 +120,15 @@ d('WAHA inbound webhook (live)', () => {
     __resetForTests();
   });
 
-  function buildApp(opts?: { hmacSecret?: string }) {
+  function buildApp(opts?: { hmacSecret?: string; hmacAlgo?: string }) {
     return buildWhatsAppWebhook({
       db,
       ...(opts && 'hmacSecret' in opts && opts.hmacSecret !== undefined
         ? { hmacSecret: opts.hmacSecret }
         : {}),
+      // The `sign()` helper defaults to sha256; pin the verifier to match
+      // unless a test overrides it. Production defaults to sha512 (WAHA).
+      hmacAlgo: opts?.hmacAlgo ?? 'sha256',
     });
   }
 
@@ -323,6 +326,41 @@ d('WAHA inbound webhook (live)', () => {
     expect(res.status).toBe(200);
     const j = (await res.json()) as { accepted: boolean; customerId: string };
     expect(j.accepted).toBe(true);
+    expect(await db.select().from(customers)).toHaveLength(1);
+  });
+
+  // -------------------------------------------------------------------------
+  // 8b. Algorithm matters (M16): production default is sha512 (WAHA). A
+  //     sha256 signature must be REJECTED under the default, and a sha512
+  //     signature ACCEPTED.
+  // -------------------------------------------------------------------------
+  it('test 8b (sha512 default): sha256 sig rejected, sha512 sig accepted', async () => {
+    // No hmacAlgo override -> verifier defaults to sha512.
+    const app = buildWhatsAppWebhook({ db, hmacSecret: SECRET });
+    const body = buildBody({ phone: '33611111888', body: 'bonjour' });
+
+    // Wrong algo (sha256) -> 401.
+    const bad = await app.request('/webhooks/waha', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-webhook-hmac': sign(body, SECRET, 'sha256'),
+      },
+      body,
+    });
+    expect(bad.status).toBe(401);
+    expect(await db.select().from(customers)).toHaveLength(0);
+
+    // Correct algo (sha512) -> processed.
+    const good = await app.request('/webhooks/waha', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-webhook-hmac': sign(body, SECRET, 'sha512'),
+      },
+      body,
+    });
+    expect(good.status).toBe(200);
     expect(await db.select().from(customers)).toHaveLength(1);
   });
 
