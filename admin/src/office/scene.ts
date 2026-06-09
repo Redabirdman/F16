@@ -124,7 +124,7 @@ export class OfficeScene {
   }
 
   private drawFloor(): void {
-    this.floorLayer.removeChildren();
+    for (const c of this.floorLayer.removeChildren()) c.destroy();
     // Draw each zone rug as a filled isometric rectangle of tiles.
     for (const zone of Object.values(ZONES)) {
       this.drawZone(zone);
@@ -152,7 +152,7 @@ export class OfficeScene {
 
   /** Zone labels live on a top layer so props/sprites never occlude them. */
   private drawZoneLabels(): void {
-    this.labelLayer.removeChildren();
+    for (const c of this.labelLayer.removeChildren()) c.destroy();
     const style = new TextStyle({ fill: 0xe2e8f0, fontSize: 12, fontWeight: '700' });
     for (const zone of Object.values(ZONES)) {
       const labelPos = isoToScreen(zone.rect.col0, zone.rect.row0);
@@ -189,7 +189,7 @@ export class OfficeScene {
       this.propLayer.addChild(spr);
     }
 
-    // Plants at 3 tasteful spots.
+    // Plants.
     for (const pos of PLANT_POSITIONS) {
       this.addPropSprite(ENV_TEXTURES.plant, pos.col, pos.row, 0.18, 4);
     }

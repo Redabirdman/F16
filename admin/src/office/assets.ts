@@ -30,7 +30,6 @@ export function textureUrl(role: string): string {
 
 /** Public URLs for environment textures (P4). */
 export const ENV_TEXTURES = {
-  floorTile: '/office/floor-tile.png',
   desk: '/office/prop-desk.png',
   plant: '/office/prop-plant.png',
   maxanceBooth: '/office/prop-maxance.png',
