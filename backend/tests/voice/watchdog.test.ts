@@ -34,7 +34,7 @@ describe('watchdogTick', () => {
     const cmds: string[] = [];
     const run = async (bash: string): Promise<string> => {
       cmds.push(bash);
-      return `ACTIVE=active\nREG=${REG_OK}`;
+      return `active\n---F16SEP---\n${REG_OK}`;
     };
     const d = await watchdogTick(run);
     expect(d).toEqual({ heal: false, reason: 'ok' });
@@ -45,7 +45,7 @@ describe('watchdogTick', () => {
     const cmds: string[] = [];
     const run = async (bash: string): Promise<string> => {
       cmds.push(bash);
-      return `ACTIVE=active\nREG=${REG_STALE}`;
+      return `active\n---F16SEP---\n${REG_STALE}`;
     };
     const d = await watchdogTick(run);
     expect(d.reason).toBe('ovh_stale');
@@ -56,7 +56,7 @@ describe('watchdogTick', () => {
     const cmds: string[] = [];
     const run = async (bash: string): Promise<string> => {
       cmds.push(bash);
-      return 'ACTIVE=inactive\nREG=';
+      return 'inactive\n---F16SEP---\n';
     };
     const d = await watchdogTick(run);
     expect(d.reason).toBe('asterisk_not_active');
@@ -83,7 +83,7 @@ describe('startVoiceWatchdog', () => {
     let calls = 0;
     const run = async (): Promise<string> => {
       calls += 1;
-      return `ACTIVE=active\nREG=${REG_OK}`;
+      return `active\n---F16SEP---\n${REG_OK}`;
     };
     const h = startVoiceWatchdog({
       enabledOverride: true,

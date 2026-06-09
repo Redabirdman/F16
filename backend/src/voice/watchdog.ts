@@ -31,6 +31,12 @@ const pexec = promisify(execFile);
 
 const DEFAULT_INTERVAL_MS = 60_000;
 
+/** Probe: raw is-active + registrations table, split by a sentinel (no `$(...)`). */
+const PROBE_SEP = '---F16SEP---';
+const PROBE_CMD =
+  `systemctl is-active asterisk 2>/dev/null; echo '${PROBE_SEP}'; ` +
+  `asterisk -rx 'pjsip show registrations' 2>/dev/null`;
+
 export interface HealDecision {
   heal: boolean;
   reason: 'ok' | 'asterisk_not_active' | 'ovh_stale';
@@ -92,11 +98,11 @@ export interface VoiceWatchdogHandle {
 export async function watchdogTick(run: WslRunner): Promise<HealDecision> {
   let out: string;
   try {
-    // Single round-trip: is-active + the OVH registration line.
-    out = await run(
-      'echo "ACTIVE=$(systemctl is-active asterisk 2>/dev/null)"; ' +
-        'echo "REG=$(asterisk -rx \\"pjsip show registrations\\" 2>/dev/null | grep -i ovh-trunk | head -1)"',
-    );
+    // Single round-trip. NOTE: we deliberately AVOID `$(...)` command
+    // substitution + variable assignment — `wsl.exe` pre-evaluates them before
+    // bash runs, which mangles the output (the registration text contains `(`).
+    // Instead emit raw output split by a sentinel and parse in TS.
+    out = await run(PROBE_CMD);
   } catch (err) {
     logger.warn(
       { err: err instanceof Error ? err.message : String(err) },
@@ -105,8 +111,13 @@ export async function watchdogTick(run: WslRunner): Promise<HealDecision> {
     return { heal: false, reason: 'ok' };
   }
 
-  const active = /ACTIVE=(\S*)/.exec(out)?.[1] ?? '';
-  const regLine = /REG=(.*)/.exec(out)?.[1]?.trim() || undefined;
+  const [activePart = '', regPart = ''] = out.split(PROBE_SEP);
+  const active = activePart.trim();
+  const regLine =
+    regPart
+      .split('\n')
+      .find((l) => /ovh-trunk/i.test(l))
+      ?.trim() || undefined;
   const decision = decideHeal(active, regLine);
 
   voiceOvhRegisteredGauge().set(decision.reason === 'ok' ? 1 : 0);
