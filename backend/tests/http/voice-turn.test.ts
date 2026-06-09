@@ -38,13 +38,31 @@ afterAll(() => {
   else process.env.PII_ENCRYPTION_KEY = savedPiiKey;
 });
 
-/** Model-aware Claude stub: Haiku → sentry verdict; Sonnet → nextText. */
+/**
+ * Claude stub that distinguishes the Compliance Sentry from the sales DRAFT by
+ * the SYSTEM PROMPT marker, not the model. On the VOICE path the sales draft
+ * runs on Haiku AND the LLM sentry is skipped (rules-only), so bucketing by
+ * `model.includes('haiku')` would misroute the single Haiku draft call to the
+ * sentry branch and return the verdict JSON as the reply. The sentry is uniquely
+ * identifiable by its system prompt ("Compliance Sentry").
+ */
+function systemText(req: { system?: unknown }): string {
+  const sys = req.system;
+  if (typeof sys === 'string') return sys;
+  if (Array.isArray(sys)) {
+    return sys
+      .map((s) => (s && typeof s === 'object' && 'text' in s ? String(s.text) : ''))
+      .join(' ');
+  }
+  return '';
+}
+
 class StubAnthropic {
   public nextText = 'Bonjour, je peux vous aider ?';
   public nextSentryText: string | null = null;
   public messages = {
-    create: async (req: { model: string }) => {
-      if (req.model.includes('haiku')) {
+    create: async (req: { model: string; system?: unknown }) => {
+      if (systemText(req).includes('Compliance Sentry')) {
         const text = this.nextSentryText ?? '{"verdict":"pass","reasons":[]}';
         return {
           content: [{ type: 'text' as const, text }],

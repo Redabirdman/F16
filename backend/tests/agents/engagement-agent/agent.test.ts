@@ -94,6 +94,63 @@ class TestableEngagementAgent extends EngagementAgent {
   }
 }
 
+/**
+ * Pin BOTH `Date.now()` and the no-arg `new Date()` constructor to a fixed
+ * instant, then run `fn`, then restore. The engagement agent reads the clock
+ * via `new Date()` (not `Date.now()`), so overriding `Date.now` alone leaks the
+ * real wall-clock into the agent — making the quiet-hours / anti-spam skip
+ * tests pass or fail depending on the real day/time the suite happens to run.
+ * This wrapper makes those tests deterministic. `new Date(arg)` is preserved.
+ */
+async function withFixedClock(instant: Date, fn: () => Promise<void>): Promise<void> {
+  const RealDate = Date;
+  const fixedMs = instant.getTime();
+
+  class FixedDate extends RealDate {
+    constructor(...args: any[]) {
+      // No-arg construction → the pinned instant; explicit args pass through
+      // unchanged. We branch on arity so trailing `undefined`s never sneak in
+      // (which would otherwise yield an Invalid Date for the y/m/d... form).
+
+      switch (args.length) {
+        case 0:
+          super(fixedMs);
+          break;
+        case 1:
+          super(args[0]);
+          break;
+        case 2:
+          super(args[0], args[1]);
+          break;
+        case 3:
+          super(args[0], args[1], args[2]);
+          break;
+        case 4:
+          super(args[0], args[1], args[2], args[3]);
+          break;
+        case 5:
+          super(args[0], args[1], args[2], args[3], args[4]);
+          break;
+        case 6:
+          super(args[0], args[1], args[2], args[3], args[4], args[5]);
+          break;
+        default:
+          super(args[0], args[1], args[2], args[3], args[4], args[5], args[6]);
+      }
+    }
+    static override now(): number {
+      return fixedMs;
+    }
+  }
+
+  (globalThis as any).Date = FixedDate;
+  try {
+    await fn();
+  } finally {
+    (globalThis as any).Date = RealDate;
+  }
+}
+
 function envelope(leadId: string): AgentMessageEnvelope {
   return {
     id: 'msg-engagement-test-1',
@@ -290,11 +347,12 @@ d('EngagementAgent.onMessage', () => {
   });
 
   it('skips on quiet hours (Saturday) even when threshold is reached', async () => {
-    const originalNow = Date.now;
-    // 2026-05-23T12:00:00Z = Saturday 14:00 Paris.
+    // 2026-05-23T12:00:00Z = Saturday 14:00 Paris. The agent reads the clock
+    // via `new Date()`, so we pin the whole Date constructor (not just
+    // Date.now) to make this deterministic regardless of the real run day.
     const fixed = new Date('2026-05-23T12:00:00Z');
-    Date.now = () => fixed.getTime();
-    try {
+    const fixedMs = fixed.getTime();
+    await withFixedClock(fixed, async () => {
       await db.execute(sql`TRUNCATE TABLE customers RESTART IDENTITY CASCADE`);
       await db.execute(sql`TRUNCATE TABLE conversation_turns RESTART IDENTITY CASCADE`);
       await db.execute(sql`TRUNCATE TABLE leads RESTART IDENTITY CASCADE`);
@@ -316,7 +374,7 @@ d('EngagementAgent.onMessage', () => {
         direction: 'outbound',
         agentRole: 'sales-agent',
         content: 'welcome',
-        occurredAt: new Date(fixed.getTime() - 30 * 3600_000),
+        occurredAt: new Date(fixedMs - 30 * 3600_000),
       });
       const result = await newAgent().handle(envelope(lead!.id));
       expect(result).toMatchObject({
@@ -324,16 +382,16 @@ d('EngagementAgent.onMessage', () => {
         result: { skipped: 'quiet-hours' },
       });
       expect(wa.sends).toHaveLength(0);
-    } finally {
-      Date.now = originalNow;
-    }
+    });
   });
 
   it('suppresses the nudge when a sales-agent reply happened within the threshold', async () => {
-    const originalNow = Date.now;
     const fixed = new Date('2026-05-19T12:00:00Z'); // Tuesday 14:00 Paris
-    Date.now = () => fixed.getTime();
-    try {
+    const fixedMs = fixed.getTime();
+    // Pin the whole Date constructor: the agent reads `new Date()` for "now",
+    // so overriding Date.now alone leaks the real wall-clock and the anti-spam
+    // window (outbound 2h ago) appears days old → the skip never fires.
+    await withFixedClock(fixed, async () => {
       await db.execute(sql`TRUNCATE TABLE customers RESTART IDENTITY CASCADE`);
       await db.execute(sql`TRUNCATE TABLE conversation_turns RESTART IDENTITY CASCADE`);
       await db.execute(sql`TRUNCATE TABLE leads RESTART IDENTITY CASCADE`);
@@ -355,7 +413,7 @@ d('EngagementAgent.onMessage', () => {
         channel: 'whatsapp',
         direction: 'inbound',
         content: 'On reparle plus tard',
-        occurredAt: new Date(fixed.getTime() - 30 * 3600_000),
+        occurredAt: new Date(fixedMs - 30 * 3600_000),
       });
       await db.insert(conversationTurns).values({
         customerId: cust.id,
@@ -364,7 +422,7 @@ d('EngagementAgent.onMessage', () => {
         direction: 'outbound',
         agentRole: 'sales-agent',
         content: 'Pas de souci, je reste disponible',
-        occurredAt: new Date(fixed.getTime() - 2 * 3600_000),
+        occurredAt: new Date(fixedMs - 2 * 3600_000),
       });
       const result = await newAgent().handle(envelope(lead!.id));
       expect(result.ok).toBe(true);
@@ -375,9 +433,7 @@ d('EngagementAgent.onMessage', () => {
         tagged.result.skipped,
       );
       expect(wa.sends).toHaveLength(0);
-    } finally {
-      Date.now = originalNow;
-    }
+    });
   });
 
   it('escalates + marks dormant at step 2 after 7d (any weekday/weekend)', async () => {

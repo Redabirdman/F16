@@ -221,8 +221,10 @@ d('SalesAgent multi-queue (live pg + redis)', () => {
       db,
       meta: { leadId },
     });
-    // Sanity: multi-queue subscription wired.
-    expect([...agent.queues].sort()).toEqual(['customer', 'lead']);
+    // Sanity: multi-queue subscription wired. The Sales Agent now consumes a
+    // THIRD queue, 'quote' (QUOTE.PREVIEW_READY / QUOTE.FAILED from the Maxance
+    // Operator, M8 — commit 390eeb8), alongside 'lead' and 'customer'.
+    expect([...agent.queues].sort()).toEqual(['customer', 'lead', 'quote']);
 
     const messageId = await sendMessage(
       { db },

@@ -59,16 +59,24 @@ d('startArbitration.tickOnce', () => {
   }
 
   it('flags a correlationId with 5+ alternations between 2 agents', async () => {
-    await seedLoop('corr-loop-1', [
-      ['agent-A', 'agent-B'],
-      ['agent-B', 'agent-A'],
-      ['agent-A', 'agent-B'],
-      ['agent-B', 'agent-A'],
-      ['agent-A', 'agent-B'],
-      ['agent-B', 'agent-A'],
-    ]);
+    // startArbitration() fires an eager fire-and-forget `void tick()` on
+    // construction (so a fresh boot surfaces pre-existing loops). Start the
+    // scheduler FIRST and drain that eager tick against the still-empty table
+    // via an awaited tickOnce() — otherwise the eager tick races our seeded
+    // data and steals the flag, leaving our explicit tick to dedup-skip it.
     const handle = startArbitration({ db, intervalMs: 3_600_000 });
     try {
+      await handle.tickOnce(); // drain eager tick on empty table → 0 flags
+
+      await seedLoop('corr-loop-1', [
+        ['agent-A', 'agent-B'],
+        ['agent-B', 'agent-A'],
+        ['agent-A', 'agent-B'],
+        ['agent-B', 'agent-A'],
+        ['agent-A', 'agent-B'],
+        ['agent-B', 'agent-A'],
+      ]);
+
       const result = await handle.tickOnce();
       expect(result.scanned).toBe(1);
       expect(result.flagged).toBe(1);
@@ -121,16 +129,21 @@ d('startArbitration.tickOnce', () => {
   });
 
   it('dedups: a second tick on the same loop does not create another human action', async () => {
-    await seedLoop('corr-dedup', [
-      ['agent-A', 'agent-B'],
-      ['agent-B', 'agent-A'],
-      ['agent-A', 'agent-B'],
-      ['agent-B', 'agent-A'],
-      ['agent-A', 'agent-B'],
-      ['agent-B', 'agent-A'],
-    ]);
+    // Start FIRST + drain the eager construction-time tick on an empty table,
+    // then seed, so our explicit `first` tick is the one that raises the flag.
     const handle = startArbitration({ db, intervalMs: 3_600_000 });
     try {
+      await handle.tickOnce(); // drain eager tick on empty table → 0 flags
+
+      await seedLoop('corr-dedup', [
+        ['agent-A', 'agent-B'],
+        ['agent-B', 'agent-A'],
+        ['agent-A', 'agent-B'],
+        ['agent-B', 'agent-A'],
+        ['agent-A', 'agent-B'],
+        ['agent-B', 'agent-A'],
+      ]);
+
       const first = await handle.tickOnce();
       const second = await handle.tickOnce();
       expect(first.flagged).toBe(1);

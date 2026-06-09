@@ -812,10 +812,13 @@ d('SalesAgent.onMessage (live pg, stub channel, stub Claude)', () => {
   it('test 12 (unhandled intent): returns skipped, no send, no Claude call', async () => {
     const { leadId } = await seedLead();
     const agent = newAgent({ leadId });
-    const result = await agent.handle(makeEnvelope('QUOTE.READY', { quoteId: 'x' }));
+    // NOTE: QUOTE.READY is now a HANDLED intent (M8.T6 — devis-ready customer
+    // confirmation, commit 8c17b68). Use an intent the switch genuinely has no
+    // case for to exercise the unhandled-intent skip path.
+    const result = await agent.handle(makeEnvelope('SOME.UNHANDLED_INTENT', { quoteId: 'x' }));
     expect(result).toMatchObject({
       ok: true,
-      result: { skipped: 'unhandled-intent', intent: 'QUOTE.READY' },
+      result: { skipped: 'unhandled-intent', intent: 'SOME.UNHANDLED_INTENT' },
     });
     expect(wa.sends).toHaveLength(0);
     expect(claudeStub.calls).toHaveLength(0);

@@ -11,15 +11,32 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { WebSocket as WsClient } from 'ws';
 import { randomUUID } from 'node:crypto';
+import { createServer } from 'node:net';
 import {
   ExtensionClient,
   ExtensionClientError,
 } from '../../../src/agents/maxance-operator/extension-client.js';
 import type { Command, Response } from '@f16/extension/wire';
 
-/** Pick a random high port to avoid colliding with anything else. */
-function randomPort(): number {
-  return 19_000 + Math.floor(Math.random() * 30_000);
+/**
+ * Ask the OS for a guaranteed-free ephemeral port: bind a throwaway server
+ * to port 0, read back the assigned port, then close it. The kernel won't
+ * immediately re-hand the same port on the next bind in this tight window,
+ * so each harness gets a distinct, currently-unused port. This avoids the
+ * EADDRINUSE flakes the old `19_000 + random(30_000)` picker hit when it
+ * collided with a real listener on this machine (this PC runs a live Maxance
+ * extension WS keepalive) or with a sibling test still releasing its socket.
+ */
+async function freePort(): Promise<number> {
+  return await new Promise<number>((resolve, reject) => {
+    const srv = createServer();
+    srv.once('error', reject);
+    srv.listen(0, '127.0.0.1', () => {
+      const addr = srv.address();
+      const port = typeof addr === 'object' && addr ? addr.port : 0;
+      srv.close((err) => (err ? reject(err) : resolve(port)));
+    });
+  });
 }
 
 interface Harness {
@@ -32,7 +49,7 @@ interface Harness {
 }
 
 async function newHarness(opts: { autoReply?: boolean } = {}): Promise<Harness> {
-  const port = randomPort();
+  const port = await freePort();
   const client = new ExtensionClient({ port, timeoutMs: 2_000 });
   await client.start();
 
@@ -154,7 +171,7 @@ describe('ExtensionClient — ping/health', () => {
   });
 
   it('returns no_extension when no extension is connected', async () => {
-    const port = randomPort();
+    const port = await freePort();
     const client = new ExtensionClient({ port, timeoutMs: 1_000 });
     await client.start();
     await expect(client.health()).resolves.toEqual({ status: 'no_extension' });
@@ -264,7 +281,7 @@ describe('ExtensionClient — error path', () => {
   });
 
   it('throws no_active_connection when no extension is connected', async () => {
-    const port = randomPort();
+    const port = await freePort();
     const client = new ExtensionClient({ port, timeoutMs: 1_000 });
     await client.start();
     await expect(client.ensureLoggedIn()).rejects.toThrow(/no_active_connection/);

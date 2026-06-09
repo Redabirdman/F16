@@ -31,6 +31,14 @@ afterAll(() => {
   else process.env.PII_ENCRYPTION_KEY = savedPiiKey;
 });
 
+/**
+ * Monotonic counter so every seeded customer gets a UNIQUE phone. The
+ * `customers_phone_hash_uniq` partial index rejects duplicate phone hashes, so
+ * tests that seed multiple customers must not reuse a number. Never reset — a
+ * strictly-increasing value is collision-free even across truncating tests.
+ */
+let seedSeq = 0;
+
 /** Helper: seed a lead with a controllable status + a single conversation turn. */
 async function seedLeadWithTurn(
   db: Database,
@@ -39,9 +47,12 @@ async function seedLeadWithTurn(
     turnAgoHours: number;
   },
 ): Promise<string> {
+  seedSeq += 1;
   const c = await insertCustomer(db, {
     fullName: 'Test Lead',
-    phone: '+33611111111',
+    // Unique per seed: +336 2X XX XX XX, distinct from the +33611111112 used by
+    // the no-turns test below.
+    phone: `+336${String(20_000_000 + seedSeq)}`,
   });
   const [lead] = await db
     .insert(leads)

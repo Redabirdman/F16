@@ -42,18 +42,37 @@ afterAll(() => {
 });
 
 /**
- * Minimal model-aware Claude stub: Haiku (sentry) returns a verdict JSON
- * (default pass); Sonnet (sales) returns `nextText`. Mirrors the stub in
- * agent.test.ts / compliance-integration.test.ts.
+ * Claude stub that distinguishes the Compliance Sentry from the sales DRAFT by
+ * the SYSTEM PROMPT marker, not the model.
+ *
+ * Why not the model: these tests drive the VOICE channel, where the sales draft
+ * runs on Haiku (latency optimisation) AND the LLM sentry is skipped entirely
+ * (`checkComplianceFor({ rulesOnly: true })`). Bucketing by `model.includes(
+ * 'haiku')` would misroute the single Haiku draft call to the sentry branch and
+ * return the verdict JSON as the reply. The sentry is uniquely identifiable by
+ * its system prompt ("Compliance Sentry"); the draft never contains it.
  */
+function systemText(req: { system?: unknown }): string {
+  const sys = req.system;
+  if (typeof sys === 'string') return sys;
+  if (Array.isArray(sys)) {
+    return sys
+      .map((s) => (s && typeof s === 'object' && 'text' in s ? String(s.text) : ''))
+      .join(' ');
+  }
+  return '';
+}
+
 class StubAnthropic {
-  public sonnetCalls: Array<{ model: string }> = [];
+  /** Sales-draft calls (Sonnet on text channels, Haiku on voice). */
+  public draftCalls: Array<{ model: string }> = [];
+  /** Compliance-sentry LLM calls (Haiku) — none on the voice/rulesOnly path. */
   public sentryCalls: Array<{ model: string }> = [];
   public nextText = 'Bonjour, comment puis-je vous aider ?';
   public nextSentryText: string | null = null;
   public messages = {
-    create: async (req: { model: string }) => {
-      if (req.model.includes('haiku')) {
+    create: async (req: { model: string; system?: unknown }) => {
+      if (systemText(req).includes('Compliance Sentry')) {
         this.sentryCalls.push({ model: req.model });
         const text = this.nextSentryText ?? '{"verdict":"pass","reasons":[]}';
         return {
@@ -62,7 +81,7 @@ class StubAnthropic {
           usage: { input_tokens: 50, output_tokens: 15 },
         };
       }
-      this.sonnetCalls.push({ model: req.model });
+      this.draftCalls.push({ model: req.model });
       return {
         content: [{ type: 'text' as const, text: this.nextText }],
         stop_reason: 'end_turn' as const,
@@ -148,9 +167,10 @@ d('generateSalesReply (live pg, stub Claude)', () => {
     );
     expect(result.customerId).toBe(customerId);
     expect(result.leadId).toBe(leadId);
-    // Sonnet called once; sentry (Haiku) called once.
-    expect(claudeStub.sonnetCalls).toHaveLength(1);
-    expect(claudeStub.sentryCalls.length).toBeGreaterThanOrEqual(1);
+    // Voice path: exactly one sales-draft call (Haiku), and NO LLM sentry call
+    // (compliance runs rules-only on voice).
+    expect(claudeStub.draftCalls).toHaveLength(1);
+    expect(claudeStub.sentryCalls).toHaveLength(0);
   });
 
   // -------------------------------------------------------------------------
@@ -186,7 +206,7 @@ d('generateSalesReply (live pg, stub Claude)', () => {
       agentInstance: 'voice-sess-3',
     });
     expect(result).toEqual({ outcome: 'skip', reason: 'empty-inbound' });
-    expect(claudeStub.sonnetCalls).toHaveLength(0);
+    expect(claudeStub.draftCalls).toHaveLength(0);
   });
 
   // -------------------------------------------------------------------------
@@ -203,7 +223,7 @@ d('generateSalesReply (live pg, stub Claude)', () => {
       agentInstance: 'voice-sess-4',
     });
     expect(result).toEqual({ outcome: 'skip', reason: 'no-contact-address' });
-    expect(claudeStub.sonnetCalls).toHaveLength(0);
+    expect(claudeStub.draftCalls).toHaveLength(0);
   });
 
   // -------------------------------------------------------------------------

@@ -40,6 +40,9 @@ vi.mock('../../src/agents/maxance-operator/index.js', () => ({
 vi.mock('../../src/agents/reporter-agent/index.js', () => ({
   registerReporterAgentClass: vi.fn(),
 }));
+vi.mock('../../src/agents/voice-operator/index.js', () => ({
+  registerVoiceOperatorClass: vi.fn(),
+}));
 vi.mock('../../src/knowledge/index.js', () => ({
   bootstrapKnowledgeSources: vi.fn(),
   startKnowledgeCurator: vi.fn(() => ({
@@ -77,6 +80,7 @@ const hubspotMod = await import('../../src/integrations/hubspot/index.js');
 const registryMod = await import('../../src/agents/registry.js');
 const maxanceMod = await import('../../src/agents/maxance-operator/index.js');
 const reporterMod = await import('../../src/agents/reporter-agent/index.js');
+const voiceOperatorMod = await import('../../src/agents/voice-operator/index.js');
 const knowledgeMod = await import('../../src/knowledge/index.js');
 const engagementMod = await import('../../src/agents/engagement-agent/index.js');
 const supervisorAgentMod = await import('../../src/agents/supervisor-agent/index.js');
@@ -88,6 +92,10 @@ const ENV_KEYS = [
   'HUMAN_ACTION_GROUP_CHAT_ID',
   'WAHA_BASE_URL',
   'MAXANCE_DRIVER',
+  // Cleared so the voice-operator gate (default = Boolean(ASTERISK_ARI_URL)) is
+  // deterministic regardless of the ambient .env loaded by tests/setup.ts on
+  // this prod PC. Tests that want voice-operator set it explicitly.
+  'ASTERISK_ARI_URL',
 ] as const;
 const savedEnv: Record<string, string | undefined> = {};
 
@@ -104,6 +112,7 @@ beforeEach(() => {
   vi.mocked(registryMod.spawn).mockClear();
   vi.mocked(maxanceMod.registerMaxanceOperatorClass).mockClear();
   vi.mocked(reporterMod.registerReporterAgentClass).mockClear();
+  vi.mocked(voiceOperatorMod.registerVoiceOperatorClass).mockClear();
   vi.mocked(knowledgeMod.bootstrapKnowledgeSources).mockClear();
   vi.mocked(knowledgeMod.startKnowledgeCurator).mockClear();
   vi.mocked(engagementMod.registerEngagementAgentClass).mockClear();
@@ -145,7 +154,9 @@ describe('startWorkers — env-gated startup', () => {
     expect(registryMod.spawn).toHaveBeenCalledWith(
       expect.objectContaining({ role: 'supervisor', instanceId: 'singleton' }),
     );
-    // engagement + supervisor agents both spawned via registry.
+    // engagement + supervisor agents spawned via registry. voice-operator is
+    // env-gated on ASTERISK_ARI_URL (cleared in beforeEach → off by default);
+    // its gating has dedicated tests below.
     expect(set.agents).toHaveLength(2);
   });
 
@@ -207,7 +218,8 @@ describe('startWorkers — env-gated startup', () => {
     expect(registryMod.spawn).toHaveBeenCalledWith(
       expect.objectContaining({ role: 'human-router', instanceId: 'singleton' }),
     );
-    // reporter + engagement-agent + supervisor-agent (all always-on singletons).
+    // reporter + engagement-agent + supervisor-agent (always-on singletons;
+    // voice-operator is gated off — ASTERISK_ARI_URL cleared in beforeEach).
     expect(set.agents).toHaveLength(3);
   });
 
@@ -223,7 +235,27 @@ describe('startWorkers — env-gated startup', () => {
     expect(registryMod.spawn).toHaveBeenCalledWith(
       expect.objectContaining({ role: 'maxance-operator', instanceId: 'singleton' }),
     );
-    // maxance + engagement-agent + supervisor-agent (always-on singletons).
+    // maxance + engagement-agent + supervisor-agent (always-on singletons;
+    // voice-operator is gated off — ASTERISK_ARI_URL cleared in beforeEach).
+    expect(set.agents).toHaveLength(3);
+  });
+
+  it('skips voice-operator when ASTERISK_ARI_URL is unset', async () => {
+    const set = await startWorkers({ db: fakeDb });
+    expect(registryMod.spawn).not.toHaveBeenCalledWith(
+      expect.objectContaining({ role: 'voice-operator' }),
+    );
+    // engagement + supervisor only.
+    expect(set.agents).toHaveLength(2);
+  });
+
+  it('starts voice-operator when ASTERISK_ARI_URL is set', async () => {
+    process.env.ASTERISK_ARI_URL = 'http://127.0.0.1:8088';
+    const set = await startWorkers({ db: fakeDb });
+    expect(registryMod.spawn).toHaveBeenCalledWith(
+      expect.objectContaining({ role: 'voice-operator', instanceId: 'singleton' }),
+    );
+    // engagement + supervisor + voice-operator.
     expect(set.agents).toHaveLength(3);
   });
 
@@ -242,7 +274,8 @@ describe('startWorkers — error tolerance', () => {
     vi.mocked(registryMod.spawn).mockRejectedValueOnce(new Error('boom_register_throw'));
     const set = await startWorkers({ db: fakeDb });
     // lead-scorer + sales-spawn still up; reporter failed silently. The
-    // engagement-agent + supervisor-agent spawns (after reporter) still succeed.
+    // engagement-agent + supervisor-agent spawns (after reporter) still
+    // succeed. voice-operator gated off (ASTERISK_ARI_URL cleared).
     expect(set.workers).toHaveLength(2);
     expect(set.agents).toHaveLength(2);
   });
@@ -252,7 +285,8 @@ describe('startWorkers — error tolerance', () => {
     vi.mocked(registryMod.spawn).mockRejectedValueOnce(new Error('boom_maxance_spawn'));
     const set = await startWorkers({ db: fakeDb });
     expect(set.workers).toHaveLength(2);
-    // maxance failed; engagement-agent + supervisor-agent (booted after) still up.
+    // maxance failed; engagement-agent + supervisor-agent (booted after) still
+    // up. voice-operator gated off (ASTERISK_ARI_URL cleared).
     expect(set.agents).toHaveLength(2);
   });
 });
