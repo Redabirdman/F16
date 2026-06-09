@@ -2,7 +2,7 @@
 // PixiJS renderer for the isometric office. Reads OfficeState, never fetches.
 // V2 (Three.js) replaces THIS file only — the state core stays untouched.
 import { Application, Container, Graphics, Text, TextStyle } from 'pixi.js';
-import { ZONES, isoToScreen, TILE_W, TILE_H, deskCoords } from './layout';
+import { ZONES, isoToScreen, TILE_W, TILE_H, deskCoords, ENTRANCE, homeDeskFor } from './layout';
 import type { ZoneDef } from './layout';
 import { roleColor, PLACEHOLDER_MODE } from './assets';
 import type { OfficeAgent, OfficeEffect, OfficeState } from './types';
@@ -18,6 +18,26 @@ export class OfficeScene {
   private floorLayer: Container;
   private spriteLayer: Container = new Container();
   private sprites = new Map<string, Container>();
+  private animState = new Map<string, { spriteState: string; bobPhase: number }>();
+  private lastDeskByKey = new Map<string, string>();
+  private walks = new Map<
+    string,
+    {
+      from: { x: number; y: number };
+      to: { x: number; y: number };
+      t: number;
+      dur: number;
+      then?: () => void;
+    }
+  >();
+  private pulseLayer: Container = new Container();
+  private pulses: {
+    g: Graphics;
+    from: { x: number; y: number };
+    to: { x: number; y: number };
+    t: number;
+    dur: number;
+  }[] = [];
   private ready = false;
 
   constructor(private readonly opts: OfficeSceneOptions = {}) {
@@ -39,11 +59,13 @@ export class OfficeScene {
     this.app.stage.addChild(this.world);
     this.world.addChild(this.floorLayer);
     this.world.addChild(this.spriteLayer);
+    this.world.addChild(this.pulseLayer);
     this.world.eventMode = 'static';
     this.world.on('pointertap', () => this.opts.onSelect?.(null)); // background tap clears
     this.ready = true;
     this.drawFloor();
     this.centerCamera(host);
+    this.app.ticker.add((ticker) => this.tick(ticker.deltaMS));
   }
 
   private centerCamera(host: HTMLDivElement): void {
@@ -95,17 +117,23 @@ export class OfficeScene {
       if (!state.agents.has(key)) {
         node.destroy({ children: true });
         this.sprites.delete(key);
+        this.lastDeskByKey.delete(key);
+        this.animState.delete(key);
+        this.walks.delete(key);
       }
     }
     // Add / update.
     for (const agent of state.agents.values()) {
       let node = this.sprites.get(agent.key);
+      const wasNew = !this.lastDeskByKey.has(agent.key);
       if (!node) {
         node = this.makeSprite(agent);
         this.sprites.set(agent.key, node);
         this.spriteLayer.addChild(node);
       }
       this.positionSprite(node, agent);
+      this.lastDeskByKey.set(agent.key, agent.deskId);
+      if (wasNew && agent.role === 'sales-agent') this.walkIn(agent.key);
       this.styleSprite(node, agent);
     }
     // Depth-sort by screen Y so nearer desks overlap correctly.
@@ -119,6 +147,10 @@ export class OfficeScene {
     node.on('pointertap', (e) => {
       e.stopPropagation();
       this.opts.onSelect?.(agent.key);
+    });
+    this.animState.set(agent.key, {
+      spriteState: agent.spriteState,
+      bobPhase: (agent.key.length % 10) * 0.6,
     });
     if (PLACEHOLDER_MODE) {
       const body = new Graphics();
@@ -137,6 +169,8 @@ export class OfficeScene {
   }
 
   private styleSprite(node: Container, agent: OfficeAgent): void {
+    const a = this.animState.get(agent.key);
+    if (a) a.spriteState = agent.spriteState;
     if (!PLACEHOLDER_MODE) return; // textures handled in P4
     const body = node.getChildByLabel('body') as Graphics | null;
     const badge = node.getChildByLabel('badge') as Graphics | null;
@@ -156,9 +190,113 @@ export class OfficeScene {
     }
   }
 
-  /** No-op stub — implemented in Phase 3 (motion). */
-  applyEffects(_effects: OfficeEffect[]): void {
-    /* Implemented in Phase 3 (motion). */
+  applyEffects(effects: OfficeEffect[]): void {
+    if (!this.ready) return;
+    for (const e of effects) {
+      if (e.kind === 'message') {
+        const g = new Graphics();
+        this.pulseLayer.addChild(g);
+        const to = this.deskCoordsForRole(e.toRole);
+        this.pulses.push({ g, from: { ...ENTRANCE }, to, t: 0, dur: 0.9 });
+      } else if (e.kind === 'marquee-quote') {
+        this.marqueeToMaxance();
+      } else if (e.kind === 'attention') {
+        const g = new Graphics();
+        this.pulseLayer.addChild(g);
+        const to = this.deskCoordsForRole('human-router');
+        this.pulses.push({ g, from: { ...ENTRANCE }, to, t: 0, dur: 0.9 });
+      }
+    }
+  }
+
+  private tick(deltaMs: number): void {
+    const dt = deltaMs / 1000;
+    for (const [key, node] of this.sprites) {
+      const a = this.animState.get(key);
+      if (!a) continue;
+      a.bobPhase += dt * (a.spriteState === 'working' ? 4 : 2);
+      const body = node.getChildByLabel('body');
+      if (body) {
+        const amp = a.spriteState === 'idle' ? 1.2 : a.spriteState === 'working' ? 2.2 : 1.6;
+        body.y = Math.sin(a.bobPhase) * amp;
+        if (a.spriteState === 'blocked') body.x = Math.sin(a.bobPhase * 8) * 1.5;
+        else body.x = 0;
+      }
+    }
+    this.advanceWalks(dt);
+    this.advancePulses(dt);
+  }
+
+  private advanceWalks(dt: number): void {
+    for (const [key, w] of this.walks) {
+      w.t += dt;
+      const k = Math.min(1, w.t / w.dur);
+      const node = this.sprites.get(key);
+      if (node) {
+        node.position.set(
+          w.from.x + (w.to.x - w.from.x) * k,
+          w.from.y + (w.to.y - w.from.y) * k - 14,
+        );
+      }
+      if (k >= 1) {
+        this.walks.delete(key);
+        w.then?.();
+      }
+    }
+  }
+
+  private advancePulses(dt: number): void {
+    for (let i = this.pulses.length - 1; i >= 0; i -= 1) {
+      const p = this.pulses[i];
+      if (!p) continue;
+      p.t += dt;
+      const k = Math.min(1, p.t / p.dur);
+      p.g.clear();
+      const x = p.from.x + (p.to.x - p.from.x) * k;
+      const y = p.from.y + (p.to.y - p.from.y) * k;
+      p.g.circle(x, y - 14, 4).fill({ color: 0x7dd3fc, alpha: 1 - k });
+      if (k >= 1) {
+        p.g.destroy();
+        this.pulses.splice(i, 1);
+      }
+    }
+  }
+
+  private walkIn(key: string): void {
+    const node = this.sprites.get(key);
+    if (!node) return;
+    const dest = this.deskFor(key);
+    this.walks.set(key, { from: { ...ENTRANCE }, to: dest, t: 0, dur: 1.2 });
+  }
+
+  private deskFor(key: string): { x: number; y: number } {
+    const cached = this.lastDeskByKey.get(key);
+    return cached ? deskCoords(cached) : { x: 0, y: 0 };
+  }
+
+  marqueeToMaxance(): void {
+    const salesKey = [...this.sprites.keys()].reverse().find((k) => k.startsWith('sales-agent#'));
+    if (!salesKey) return;
+    const node = this.sprites.get(salesKey);
+    if (!node) return;
+    const home = this.deskFor(salesKey);
+    const booth = deskCoords(homeDeskFor('maxance-operator').deskId);
+    this.walks.set(salesKey, {
+      from: home,
+      to: booth,
+      t: 0,
+      dur: 1.0,
+      then: () => {
+        this.walks.set(salesKey, { from: booth, to: home, t: 0, dur: 1.0 });
+      },
+    });
+  }
+
+  private deskCoordsForRole(role: string): { x: number; y: number } {
+    for (const [key, deskId] of this.lastDeskByKey) {
+      if (key.startsWith(`${role}#`)) return deskCoords(deskId);
+    }
+    return deskCoords(homeDeskFor(role).deskId);
   }
 
   /** Re-center on container resize. */
