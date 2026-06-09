@@ -19,7 +19,6 @@ import {
   deskCoords,
   ENTRANCE,
   homeDeskFor,
-  SALES_DESKS,
   PERSISTENT_HOME,
 } from './layout';
 import type { ZoneDef } from './layout';
@@ -44,10 +43,9 @@ const ALL_ROLES = [
   'lead-scorer',
 ] as const;
 
-/** Plant placement: 3 tasteful spots — one per corner zone (not maxance to avoid crowding). */
+/** Plant placement: 2 tasteful spots so the floor doesn't read busy. */
 const PLANT_POSITIONS: Array<{ col: number; row: number }> = [
   { col: 3, row: 0 }, // ads-wing inner edge
-  { col: 11, row: 1 }, // supervisor-corner inner edge
   { col: 11, row: 10 }, // reporter-office inner edge
 ];
 
@@ -57,6 +55,7 @@ export class OfficeScene {
   private floorLayer: Container;
   private propLayer: Container = new Container();
   private spriteLayer: Container = new Container();
+  private labelLayer: Container = new Container();
   private sprites = new Map<string, Container>();
   private animState = new Map<string, { spriteState: string; bobPhase: number }>();
   private lastDeskByKey = new Map<string, string>();
@@ -100,6 +99,7 @@ export class OfficeScene {
     this.world.addChild(this.floorLayer);
     this.world.addChild(this.propLayer);
     this.world.addChild(this.spriteLayer);
+    this.world.addChild(this.labelLayer); // labels render on top of props/sprites
     this.world.addChild(this.pulseLayer);
     this.world.eventMode = 'static';
     this.world.on('pointertap', () => this.opts.onSelect?.(null)); // background tap clears
@@ -111,6 +111,7 @@ export class OfficeScene {
     this.ready = true;
     this.drawFloor();
     this.drawProps();
+    this.drawZoneLabels();
     this.centerCamera(host);
     this.app.ticker.add((ticker) => this.tick(ticker.deltaMS));
   }
@@ -147,31 +148,33 @@ export class OfficeScene {
     g.fill({ color: zone.accent, alpha: 0.14 });
     g.stroke({ color: zone.accent, alpha: 0.5, width: 1 });
     this.floorLayer.addChild(g);
+  }
 
-    // Zone label at the top corner of its rect.
-    const labelPos = isoToScreen(zone.rect.col0, zone.rect.row0);
+  /** Zone labels live on a top layer so props/sprites never occlude them. */
+  private drawZoneLabels(): void {
+    this.labelLayer.removeChildren();
     const style = new TextStyle({ fill: 0xe2e8f0, fontSize: 12, fontWeight: '700' });
-    const label = new Text({ text: zone.label, style });
-    label.position.set(labelPos.x - TILE_W / 2, labelPos.y - TILE_H);
-    this.floorLayer.addChild(label);
+    for (const zone of Object.values(ZONES)) {
+      const labelPos = isoToScreen(zone.rect.col0, zone.rect.row0);
+      const label = new Text({ text: zone.label, style });
+      // Raise higher above the zone so it sits clearly above the props.
+      label.position.set(labelPos.x - TILE_W / 2, labelPos.y - TILE_H * 2);
+      this.labelLayer.addChild(label);
+    }
   }
 
   /** Populate the static props layer. Best-effort — EMPTY textures are skipped. */
   private drawProps(): void {
     this.propLayer.removeChildren();
 
-    // Desks at every sales-floor slot.
-    for (const desk of SALES_DESKS) {
-      this.addPropSprite(ENV_TEXTURES.desk, desk.col, desk.row, 0.22, 8);
-    }
-
-    // Desks at every persistent home except maxance-operator (gets the booth instead).
+    // No desks on the sales floor — sales agents stand on the open colored rug.
+    // Desks only at persistent homes, except maxance-operator (gets the booth instead).
     for (const [role, home] of Object.entries(PERSISTENT_HOME)) {
       if (role === 'maxance-operator') {
         // Maxance booth replaces the desk here.
         this.addPropSprite(ENV_TEXTURES.maxanceBooth, home.col, home.row, 0.26, 6);
       } else {
-        this.addPropSprite(ENV_TEXTURES.desk, home.col, home.row, 0.22, 8);
+        this.addPropSprite(ENV_TEXTURES.desk, home.col, home.row, 0.15, 8);
       }
     }
 
@@ -181,7 +184,7 @@ export class OfficeScene {
     if (doorTex.label !== Texture.EMPTY.label) {
       const spr = new Sprite(doorTex);
       spr.anchor.set(0.5, 1);
-      spr.scale.set(0.24);
+      spr.scale.set(0.16);
       spr.position.set(ENTRANCE.x, ENTRANCE.y);
       this.propLayer.addChild(spr);
     }
@@ -264,7 +267,7 @@ export class OfficeScene {
         const spr = new Sprite(tex);
         spr.label = 'body';
         spr.anchor.set(0.5, 1);
-        spr.scale.set(0.26); // ~48px tall at 32px tile height ≈ 1.5 tiles
+        spr.scale.set(0.38); // characters are the focus — taller than the desks
         node.addChild(spr);
         const badge = new Graphics();
         badge.label = 'badge';
