@@ -446,3 +446,48 @@ export function searchKnowledge(query: string, limit = 10): Promise<KnowledgeSea
   const params = new URLSearchParams({ q: query, limit: String(limit) });
   return apiGet<KnowledgeSearchResponse>(`/v1/admin/knowledge/search?${params.toString()}`);
 }
+
+// ----- M14.T6: agent prompt editor ------------------------------------------
+
+async function apiSend<T>(method: 'PUT' | 'DELETE', path: string, body?: unknown): Promise<T> {
+  const res = await fetch(path, {
+    method,
+    headers: { Accept: 'application/json', 'Content-Type': 'application/json', ...authHeaders() },
+    credentials: 'same-origin',
+    ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+  });
+  if (!res.ok) {
+    let detail = '';
+    try {
+      detail = (await res.text()).slice(0, 240);
+    } catch {
+      /* noop */
+    }
+    throw new ApiError(`HTTP ${res.status} on ${path}${detail ? ` — ${detail}` : ''}`, res.status);
+  }
+  return (await res.json()) as T;
+}
+
+export interface PromptInfo {
+  key: string;
+  label: string;
+  agentRole: string;
+  description: string;
+  default: string;
+  override: string | null;
+  isOverridden: boolean;
+  updatedAt: string | null;
+  updatedBy: string | null;
+}
+
+export function listPrompts(): Promise<{ prompts: PromptInfo[] }> {
+  return apiGet<{ prompts: PromptInfo[] }>('/v1/admin/prompts');
+}
+
+export function savePrompt(key: string, content: string): Promise<{ ok: boolean; key: string }> {
+  return apiSend('PUT', `/v1/admin/prompts/${encodeURIComponent(key)}`, { content });
+}
+
+export function resetPrompt(key: string): Promise<{ ok: boolean; key: string }> {
+  return apiSend('DELETE', `/v1/admin/prompts/${encodeURIComponent(key)}`);
+}

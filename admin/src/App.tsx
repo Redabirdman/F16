@@ -10,6 +10,7 @@ import IntegrationsPage from '@/pages/Integrations';
 import AgentsPage from '@/pages/Agents';
 import AdsPage from '@/pages/Ads';
 import KnowledgePage from '@/pages/Knowledge';
+import PromptsPage from '@/pages/Prompts';
 import { useRealtime } from '@/lib/use-realtime';
 
 function navItemClass({ isActive }: { isActive: boolean }): string {
@@ -37,6 +38,9 @@ function Nav(): ReactElement {
         </NavLink>
         <NavLink to="/agents" className={navItemClass}>
           Agents
+        </NavLink>
+        <NavLink to="/prompts" className={navItemClass}>
+          Prompts
         </NavLink>
         <NavLink to="/ads" className={navItemClass}>
           Publicités
@@ -124,6 +128,7 @@ export default function App(): ReactElement {
         <Route path="/leads/:id" element={<LeadDetailPage />} />
         <Route path="/queue" element={<HumanActionsPage />} />
         <Route path="/agents" element={<AgentsPage />} />
+        <Route path="/prompts" element={<PromptsPage />} />
         <Route path="/ads" element={<AdsPage />} />
         <Route path="/knowledge" element={<KnowledgePage />} />
         <Route path="/integrations" element={<IntegrationsPage />} />
