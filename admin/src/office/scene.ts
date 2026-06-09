@@ -219,8 +219,11 @@ export class OfficeScene {
       if (body) {
         const amp = a.spriteState === 'idle' ? 1.2 : a.spriteState === 'working' ? 2.2 : 1.6;
         body.y = Math.sin(a.bobPhase) * amp;
-        if (a.spriteState === 'blocked') body.x = Math.sin(a.bobPhase * 8) * 1.5;
-        else body.x = 0;
+        if (a.spriteState === 'blocked') {
+          body.x = Math.sin(a.bobPhase * 8) * 1.5;
+        } else if (body.x !== 0) {
+          body.x = 0;
+        }
       }
     }
     this.advanceWalks(dt);
@@ -228,6 +231,7 @@ export class OfficeScene {
   }
 
   private advanceWalks(dt: number): void {
+    const completed: string[] = [];
     for (const [key, w] of this.walks) {
       w.t += dt;
       const k = Math.min(1, w.t / w.dur);
@@ -238,10 +242,12 @@ export class OfficeScene {
           w.from.y + (w.to.y - w.from.y) * k - 14,
         );
       }
-      if (k >= 1) {
-        this.walks.delete(key);
-        w.then?.();
-      }
+      if (k >= 1) completed.push(key);
+    }
+    for (const key of completed) {
+      const w = this.walks.get(key);
+      this.walks.delete(key);
+      w?.then?.();
     }
   }
 
@@ -271,6 +277,7 @@ export class OfficeScene {
 
   private deskFor(key: string): { x: number; y: number } {
     const cached = this.lastDeskByKey.get(key);
+    // defensive fallback; unreachable in normal flow (lastDeskByKey is set before deskFor is called)
     return cached ? deskCoords(cached) : { x: 0, y: 0 };
   }
 
