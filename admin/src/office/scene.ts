@@ -98,6 +98,9 @@ export class OfficeScene {
 
   destroy(): void {
     // Pixi v8: destroy removes the canvas + frees GPU resources.
+    // Guard against StrictMode dev cleanup firing before async mount() resolves
+    // (the renderer would be undefined and destroy() would throw).
+    if (!this.ready) return;
     this.app.destroy(true, { children: true, texture: true });
     this.ready = false;
   }

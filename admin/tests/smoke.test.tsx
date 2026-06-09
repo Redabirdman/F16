@@ -106,9 +106,7 @@ describe('build artifact (shape)', () => {
       expect(entryBytes).toBeLessThan(800_000); // ~lean entry; pixi lives elsewhere
 
       // A separate (lazy) chunk must carry the office/pixi code.
-      const hasLazyChunk = files.some(
-        (f) => /Office|pixi|index-[A-Za-z0-9_-]+\.js/.test(f) && f !== entryFile,
-      );
+      const hasLazyChunk = files.some((f) => /Office|pixi/.test(f) && f !== entryFile);
       expect(hasLazyChunk).toBe(true);
     },
   );

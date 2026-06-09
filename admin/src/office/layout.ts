@@ -128,8 +128,11 @@ export function assignSalesDesk(instanceId: string, taken: ReadonlySet<string>):
   const n = SALES_DESKS.length;
   const start = hashString(instanceId) % n;
   for (let i = 0; i < n; i += 1) {
+    // (start + i) % n is always in [0, n-1]; the narrowing is only for
+    // noUncheckedIndexedAccess (strict mode), never hit at runtime.
     const slot = SALES_DESKS[(start + i) % n];
-    if (slot && !taken.has(slot.deskId)) return slot.deskId;
+    if (!slot) continue;
+    if (!taken.has(slot.deskId)) return slot.deskId;
   }
   // All slots taken — synthesize a stable overflow id.
   return `sales-overflow-${hashString(instanceId) % 1000}`;
