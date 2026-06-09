@@ -120,23 +120,19 @@ function hashString(s: string): number {
 
 /**
  * Deterministically assign an ephemeral sales-agent to a desk slot.
- * Always returns the hash-derived (preferred) slot for a given instanceId,
- * making the assignment fully idempotent: calling with the same instanceId
- * always yields the same deskId regardless of what `taken` contains.
- * The `taken` set is honoured only as a tie-breaker when another instanceId's
- * hash collides with the preferred — in practice reconcileAgents only passes
- * OTHER agents' desks as taken, not the current agent's own.
+ * Prefers the hash-derived slot; if that slot is already taken, scans forward
+ * to the next free slot so distinct concurrent sales agents land on distinct
+ * desks; overflow falls back to a synthetic id so we never collide.
  */
-export function assignSalesDesk(instanceId: string, _taken: ReadonlySet<string>): string {
+export function assignSalesDesk(instanceId: string, taken: ReadonlySet<string>): string {
   const n = SALES_DESKS.length;
   const start = hashString(instanceId) % n;
-  // Always return the preferred (hash-derived) slot — idempotent for same instanceId.
-  // `_taken` is accepted for caller convenience (reconcileAgents passes other agents'
-  // desks); a future refactor may use it for spill-over once >8 sales agents coexist.
-  const slot = SALES_DESKS[start];
-  // `start` is always in [0, n-1] because we use `% n`, so slot is always defined.
-  if (!slot) return `sales-overflow-${hashString(instanceId) % 1000}`;
-  return slot.deskId;
+  for (let i = 0; i < n; i += 1) {
+    const slot = SALES_DESKS[(start + i) % n];
+    if (slot && !taken.has(slot.deskId)) return slot.deskId;
+  }
+  // All slots taken — synthesize a stable overflow id.
+  return `sales-overflow-${hashString(instanceId) % 1000}`;
 }
 
 /** Resolve a deskId to its grid coordinates (for rendering position). */

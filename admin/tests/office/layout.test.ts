@@ -51,15 +51,14 @@ describe('layout: persistent home desks', () => {
 });
 
 describe('layout: assignSalesDesk', () => {
-  it('is deterministic for the same instanceId across calls', () => {
-    const taken = new Set<string>();
-    const a = assignSalesDesk('inst-abc', taken);
-    const a2 = assignSalesDesk('inst-abc', new Set([a]));
-    expect(a2).toBe(a); // same instance keeps its preferred slot when free
+  it('is deterministic: same instance + same taken set returns the same desk', () => {
+    expect(assignSalesDesk('inst-abc', new Set())).toBe(assignSalesDesk('inst-abc', new Set()));
   });
   it('avoids collisions: a taken preferred slot yields a different free slot', () => {
-    const first = assignSalesDesk('inst-abc', new Set());
-    const second = assignSalesDesk('inst-xyz', new Set([first]));
+    // 'inst-0' and 'inst-8' are VERIFIED to hash to the same preferred slot
+    // (slot 7 → 'sales-8'): hashString(id) % SALES_DESKS.length === 7 for both.
+    const first = assignSalesDesk('inst-0', new Set());
+    const second = assignSalesDesk('inst-8', new Set([first]));
     expect(second).not.toBe(first);
   });
   it('always returns a non-empty desk id', () => {
