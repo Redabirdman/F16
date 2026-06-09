@@ -9,6 +9,7 @@ import DashboardPage from '@/pages/Dashboard';
 import IntegrationsPage from '@/pages/Integrations';
 import AgentsPage from '@/pages/Agents';
 import AdsPage from '@/pages/Ads';
+import KnowledgePage from '@/pages/Knowledge';
 import { useRealtime } from '@/lib/use-realtime';
 
 function navItemClass({ isActive }: { isActive: boolean }): string {
@@ -39,6 +40,9 @@ function Nav(): ReactElement {
         </NavLink>
         <NavLink to="/ads" className={navItemClass}>
           Publicités
+        </NavLink>
+        <NavLink to="/knowledge" className={navItemClass}>
+          Connaissances
         </NavLink>
         <NavLink to="/integrations" className={navItemClass}>
           Intégrations
@@ -84,6 +88,12 @@ function Home(): ReactElement {
           — campagnes Meta, créatifs et apprentissages créatifs.
         </li>
         <li>
+          <Link className="text-sky-700 hover:underline" to="/knowledge">
+            Connaissances
+          </Link>{' '}
+          — recherche sémantique sur ce que les agents savent.
+        </li>
+        <li>
           <Link className="text-sky-700 hover:underline" to="/integrations">
             Intégrations
           </Link>{' '}
@@ -115,6 +125,7 @@ export default function App(): ReactElement {
         <Route path="/queue" element={<HumanActionsPage />} />
         <Route path="/agents" element={<AgentsPage />} />
         <Route path="/ads" element={<AdsPage />} />
+        <Route path="/knowledge" element={<KnowledgePage />} />
         <Route path="/integrations" element={<IntegrationsPage />} />
         <Route path="/audit" element={<AuditPage />} />
       </Routes>

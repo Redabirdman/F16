@@ -422,3 +422,27 @@ export interface AdsResponse {
 export function getAds(): Promise<AdsResponse> {
   return apiGet<AdsResponse>('/v1/admin/ads');
 }
+
+// ----- M14.T8: knowledge semantic search ------------------------------------
+
+export interface KnowledgeSearchHit {
+  id: string;
+  source: string;
+  sourcePath: string | null;
+  sourceUrl: string | null;
+  chunkText: string;
+  distance: number;
+  similarity: number;
+  ingestedAt: string | null;
+}
+
+export interface KnowledgeSearchResponse {
+  query: string;
+  generatedAt: string;
+  results: KnowledgeSearchHit[];
+}
+
+export function searchKnowledge(query: string, limit = 10): Promise<KnowledgeSearchResponse> {
+  const params = new URLSearchParams({ q: query, limit: String(limit) });
+  return apiGet<KnowledgeSearchResponse>(`/v1/admin/knowledge/search?${params.toString()}`);
+}
