@@ -22,6 +22,7 @@ import { buildAdminDashboardRouter } from './admin/dashboard.js';
 import { buildAdminIntegrationsRouter } from './admin/integrations-health.js';
 import { buildAdminRealtimeRouter } from './admin/realtime-sse.js';
 import { buildAdminAgentsRouter } from './admin/agents.js';
+import { buildAdminAdsRouter } from './admin/ads.js';
 import { requireAdminAuth } from './admin/auth.js';
 import type { RealtimeListener } from './realtime/notify.js';
 import { metrics, registerDefaultMetrics } from './metrics/index.js';
@@ -231,6 +232,9 @@ export function buildApp(opts: BuildAppOptions = {}): Hono {
     // M15.T2 — agents registry view + kill / setPriority.
     const adminAgentsApp = buildAdminAgentsRouter({ db: opts.db });
     app.route('/', adminAgentsApp);
+    // M14 V2.5 — ads surface (campaigns / creatives / creative_learnings).
+    const adminAdsApp = buildAdminAdsRouter({ db: opts.db });
+    app.route('/', adminAdsApp);
     // M14.T2 — SSE realtime stream, only when a listener was provided.
     if (opts.realtime) {
       const adminRealtimeApp = buildAdminRealtimeRouter({ realtime: opts.realtime });

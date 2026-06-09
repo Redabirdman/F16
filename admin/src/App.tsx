@@ -8,6 +8,7 @@ import AuditPage from '@/pages/Audit';
 import DashboardPage from '@/pages/Dashboard';
 import IntegrationsPage from '@/pages/Integrations';
 import AgentsPage from '@/pages/Agents';
+import AdsPage from '@/pages/Ads';
 import { useRealtime } from '@/lib/use-realtime';
 
 function navItemClass({ isActive }: { isActive: boolean }): string {
@@ -35,6 +36,9 @@ function Nav(): ReactElement {
         </NavLink>
         <NavLink to="/agents" className={navItemClass}>
           Agents
+        </NavLink>
+        <NavLink to="/ads" className={navItemClass}>
+          Publicités
         </NavLink>
         <NavLink to="/integrations" className={navItemClass}>
           Intégrations
@@ -74,10 +78,16 @@ function Home(): ReactElement {
           — actions agent en attente de validation Ridaa/Achraf.
         </li>
         <li>
+          <Link className="text-sky-700 hover:underline" to="/ads">
+            Publicités
+          </Link>{' '}
+          — campagnes Meta, créatifs et apprentissages créatifs.
+        </li>
+        <li>
           <Link className="text-sky-700 hover:underline" to="/integrations">
             Intégrations
           </Link>{' '}
-          — état WAHA, HubSpot, Pipecat, etc.
+          — état WAHA, HubSpot, voix (OVH + OpenAI SIP), etc.
         </li>
         <li>
           <Link className="text-sky-700 hover:underline" to="/audit">
@@ -104,6 +114,7 @@ export default function App(): ReactElement {
         <Route path="/leads/:id" element={<LeadDetailPage />} />
         <Route path="/queue" element={<HumanActionsPage />} />
         <Route path="/agents" element={<AgentsPage />} />
+        <Route path="/ads" element={<AdsPage />} />
         <Route path="/integrations" element={<IntegrationsPage />} />
         <Route path="/audit" element={<AuditPage />} />
       </Routes>

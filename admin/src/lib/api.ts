@@ -369,3 +369,56 @@ export function setAgentPriority(
     { priority, by: 'admin-ui' },
   );
 }
+
+// ----- M14 V2.5: ads surface (campaigns / creatives / creative_learnings) ---
+
+export interface AdminCampaign {
+  id: string;
+  metaCampaignId: string;
+  name: string;
+  objective: string | null;
+  status: string | null;
+  productLine: string | null;
+  dailyBudgetCents: number | null;
+  lifetimeBudgetCents: number | null;
+  currency: string;
+  adsetCount: number;
+  adCount: number;
+  createdAt: string;
+  startedAt: string | null;
+  endedAt: string | null;
+}
+
+export interface AdminCreative {
+  id: string;
+  name: string;
+  angle: string;
+  productLine: string | null;
+  format: string;
+  headline: string | null;
+  subCopy: string | null;
+  ctaText: string | null;
+  fileUrl: string;
+  generatedBy: string | null;
+  createdAt: string;
+}
+
+export interface AdminCreativeLearning {
+  id: string;
+  angle: string | null;
+  guidance: string;
+  sourceFeedback: string | null;
+  createdByAgent: string | null;
+  createdAt: string;
+}
+
+export interface AdsResponse {
+  generatedAt: string;
+  campaigns: AdminCampaign[];
+  creatives: AdminCreative[];
+  learnings: AdminCreativeLearning[];
+}
+
+export function getAds(): Promise<AdsResponse> {
+  return apiGet<AdsResponse>('/v1/admin/ads');
+}

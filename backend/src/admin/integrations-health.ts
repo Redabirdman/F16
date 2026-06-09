@@ -22,7 +22,9 @@
  *   - HubSpot        — GET /crm/v3/owners?limit=1 with API token
  *   - OpenAI-SIP     — env-presence of OPENAI_API_KEY (live voice path);
  *                      reports whether webhook signature verification is on
- *   - Pipecat (legacy) — GET /health; the cascade fallback, never required
+ *   - Voice          — OVH SIP trunk registration health, read from the
+ *                      self-healing watchdog's last tick (no extra wsl.exe
+ *                      spawn). Only probed when ASTERISK_OVH_TRUNK is set.
  *   - Maxance        — env-presence only (MAXANCE_DRIVER); the live
  *                      extension WS state is owned by the maxance-operator
  *                      agent and surfaced separately on /agents (M14 V2)
@@ -37,6 +39,7 @@
  */
 import { Hono } from 'hono';
 import { logger } from '../logger.js';
+import { getVoiceWatchdogHealth } from '../voice/watchdog.js';
 
 export interface AdminIntegrationsRouterOptions {
   /** Override the probe timeout (ms). Default 2500. */
@@ -71,7 +74,7 @@ export function buildAdminIntegrationsRouter(opts: AdminIntegrationsRouterOption
       probeWaha(f, timeoutMs),
       probeHubspot(f, timeoutMs),
       probeOpenAiSip(),
-      probePipecat(f, timeoutMs),
+      Promise.resolve(probeVoice()),
       envPresenceProbe('maxance', 'MAXANCE_DRIVER'),
       envPresenceProbe('anthropic', 'ANTHROPIC_API_KEY'),
       envPresenceProbe('openrouter', 'OPENROUTER_API_KEY'),
@@ -193,38 +196,52 @@ function probeOpenAiSip(): IntegrationHealth {
 }
 
 /**
- * Pipecat cascade voice — LEGACY. The live voice path is OpenAI native SIP
- * (probeOpenAiSip); Pipecat is the fallback cascade and is no longer required.
- * Probed only when PIPECAT_BASE_URL is explicitly set; never `required`.
+ * Voice — OVH SIP trunk registration health (the live outbound voice path).
+ *
+ * There's nothing external to ping (Asterisk lives in WSL, reached via the
+ * wsl.exe CLI, not a network port). Instead we surface the self-healing
+ * watchdog's last reading: it checks the OVH registration every 60s and
+ * restarts Asterisk when the binding goes stale. Reusing that value keeps this
+ * probe instant (no extra wsl.exe spawn inside the 2.5s panel budget).
+ *
+ * Gated on ASTERISK_OVH_TRUNK — the same env that enables the watchdog and
+ * native-SIP origination. Without it, voice isn't deployed on this host.
+ *
+ * The legacy Pipecat cascade probe was removed: native SIP (probeOpenAiSip) is
+ * the V1 voice path; Pipecat is a dead fallback and no longer surfaced.
  */
-async function probePipecat(f: typeof fetch, timeoutMs: number): Promise<IntegrationHealth> {
-  const base = process.env.PIPECAT_BASE_URL;
-  if (!base) {
-    return { name: 'pipecat (legacy)', status: 'unconfigured', required: false };
+function probeVoice(): IntegrationHealth {
+  const trunk = process.env.ASTERISK_OVH_TRUNK;
+  if (!trunk) {
+    return { name: 'voice', status: 'unconfigured', required: false };
   }
-  const t0 = Date.now();
-  try {
-    const res = await fetchWithTimeout(f, `${base.replace(/\/$/, '')}/health`, {}, timeoutMs);
-    const durationMs = Date.now() - t0;
-    if (!res.ok) {
-      return {
-        name: 'pipecat (legacy)',
-        status: 'unreachable',
-        detail: `HTTP ${res.status}`,
-        durationMs,
-        required: false,
-      };
-    }
-    return { name: 'pipecat (legacy)', status: 'ok', durationMs, required: false };
-  } catch (err) {
+  const h = getVoiceWatchdogHealth();
+  if (!h) {
+    // Trunk configured but no watchdog tick yet — booting, or the watchdog is
+    // disabled on this host (non-Windows / no WSL). Soft-amber, not a failure.
     return {
-      name: 'pipecat (legacy)',
-      status: 'unreachable',
-      detail: truncate(err instanceof Error ? err.message : String(err)),
-      durationMs: Date.now() - t0,
-      required: false,
+      name: 'voice',
+      status: 'degraded',
+      detail: 'OVH trunk configured; watchdog not reporting yet',
+      required: true,
     };
   }
+  if (h.healthy) {
+    return {
+      name: 'voice',
+      status: 'ok',
+      detail: `OVH trunk registered (checked ${h.checkedAt})`,
+      required: true,
+    };
+  }
+  // Unhealthy → the watchdog is actively self-healing (restarting Asterisk), so
+  // this is degraded/recovering rather than a hard outage.
+  return {
+    name: 'voice',
+    status: 'degraded',
+    detail: `OVH ${h.reason} — watchdog self-healing (checked ${h.checkedAt})`,
+    required: true,
+  };
 }
 
 /**

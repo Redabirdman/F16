@@ -33,7 +33,7 @@ const ENV_KEYS = [
   'WAHA_API_KEY',
   'WAHA_SESSION',
   'HUBSPOT_API_KEY',
-  'PIPECAT_BASE_URL',
+  'ASTERISK_OVH_TRUNK',
   'MAXANCE_DRIVER',
   'ANTHROPIC_API_KEY',
   'OPENROUTER_API_KEY',
@@ -138,6 +138,32 @@ describe('GET /v1/admin/integrations/health', () => {
     };
     const anthropic = body.integrations.find((i) => i.name === 'anthropic');
     expect(anthropic?.status).toBe('ok');
+  });
+
+  it('marks voice unconfigured when ASTERISK_OVH_TRUNK is unset, and never surfaces pipecat', async () => {
+    const app = buildAdminIntegrationsRouter({ fetchImpl: makeFetch({}) });
+    const res = await app.request('/v1/admin/integrations/health');
+    const body = (await res.json()) as {
+      integrations: Array<{ name: string; status: string }>;
+    };
+    const voice = body.integrations.find((i) => i.name === 'voice');
+    expect(voice?.status).toBe('unconfigured');
+    // The legacy Pipecat probe was removed — it must not appear at all.
+    expect(body.integrations.some((i) => /pipecat/i.test(i.name))).toBe(false);
+  });
+
+  it('reports voice degraded (watchdog not reporting) when the OVH trunk is configured', async () => {
+    process.env.ASTERISK_OVH_TRUNK = 'ovh-trunk';
+    const app = buildAdminIntegrationsRouter({ fetchImpl: makeFetch({}) });
+    const res = await app.request('/v1/admin/integrations/health');
+    const body = (await res.json()) as {
+      integrations: Array<{ name: string; status: string; detail?: string; required?: boolean }>;
+    };
+    const voice = body.integrations.find((i) => i.name === 'voice');
+    // No watchdog tick has run in this pure test → degraded + required.
+    expect(voice?.status).toBe('degraded');
+    expect(voice?.required).toBe(true);
+    expect(voice?.detail).toMatch(/watchdog not reporting/);
   });
 
   it('reports openai_sip ok + signature ON when key + webhook secret are set', async () => {

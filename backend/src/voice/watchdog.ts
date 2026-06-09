@@ -42,6 +42,26 @@ export interface HealDecision {
   reason: 'ok' | 'asterisk_not_active' | 'ovh_stale';
 }
 
+/** Last observed voice health — surfaced on the admin integrations panel. */
+export interface VoiceWatchdogHealth {
+  healthy: boolean;
+  reason: HealDecision['reason'];
+  /** ISO timestamp of the tick that produced this reading. */
+  checkedAt: string;
+}
+
+let lastHealth: VoiceWatchdogHealth | null = null;
+
+/**
+ * The most recent watchdog reading, or null when no tick has run yet (just
+ * booted, or the watchdog is disabled on this host). Read by the admin
+ * integrations-health probe — it avoids spawning its own (slow) wsl.exe check
+ * by reusing the value the 60s watchdog loop already computes.
+ */
+export function getVoiceWatchdogHealth(): VoiceWatchdogHealth | null {
+  return lastHealth;
+}
+
 /**
  * Pure heal-decision from the probe outputs (kept separate so it's unit-testable
  * without WSL). `active` = `systemctl is-active asterisk` output; `regLine` =
@@ -121,6 +141,11 @@ export async function watchdogTick(run: WslRunner): Promise<HealDecision> {
   const decision = decideHeal(active, regLine);
 
   voiceOvhRegisteredGauge().set(decision.reason === 'ok' ? 1 : 0);
+  lastHealth = {
+    healthy: decision.reason === 'ok',
+    reason: decision.reason,
+    checkedAt: new Date().toISOString(),
+  };
 
   if (decision.heal) {
     recordVoiceWatchdogHeal(decision.reason);

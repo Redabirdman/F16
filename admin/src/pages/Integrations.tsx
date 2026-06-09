@@ -35,7 +35,8 @@ const STATUS_PRESENTATION: Record<
 const INTEGRATION_LABELS: Record<string, string> = {
   waha: 'WhatsApp (WAHA)',
   hubspot: 'HubSpot CRM',
-  pipecat: 'Pipecat (voix)',
+  openai_sip: 'Voix IA (OpenAI SIP)',
+  voice: 'Voix (OVH / Asterisk)',
   maxance: 'Maxance (broker)',
   anthropic: 'Anthropic API',
   openrouter: 'OpenRouter',
