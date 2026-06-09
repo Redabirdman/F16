@@ -184,11 +184,20 @@ export class VoiceOperatorAgent extends BaseAgent {
       );
     }
 
+    // VOICE.CALL_STARTED is a lifecycle/telemetry event on the `voice` queue.
+    // It has no separate consumer in V1 (the live conversation runs through
+    // /v1/voice/turn + reply-core, not this intent), and the durable origination
+    // fact is already in the audit log above. We address it to `voice-operator`
+    // — the SOLE consumer of the `voice` queue — which skip-acks any non-
+    // SCHEDULED intent. Addressing it to `sales-agent` (which never subscribes
+    // to `voice`) made it unconsumable → the dispatcher re-routed it forever.
+    // Do NOT put sales-agent on the `voice` queue to "fix" it: that would make
+    // SCHEDULED (→voice-operator) and STARTED/FAILED (→sales-agent) ping-pong
+    // between the two roles on the shared queue.
     await this.send({
-      toRole: 'sales-agent',
+      toRole: 'voice-operator',
+      toInstance: this.instanceId,
       intent: 'VOICE.CALL_STARTED',
-      // channelId is the new Asterisk ARI identifier; customerId is retained so
-      // downstream consumers (sales-agent) keep the lead correlation they had.
       payload: { callId, customerId, channelId },
       correlationId: callId,
     });
@@ -232,8 +241,12 @@ export class VoiceOperatorAgent extends BaseAgent {
       }
     }
 
+    // Same routing rationale as VOICE.CALL_STARTED above: a lifecycle event on
+    // the `voice` queue, self-addressed to the voice-operator (its only
+    // consumer) so it is durably recorded + cleanly skip-acked, never requeued.
     await this.send({
-      toRole: 'sales-agent',
+      toRole: 'voice-operator',
+      toInstance: this.instanceId,
       intent: 'VOICE.CALL_FAILED',
       payload: { callId, reason },
       correlationId: callId,

@@ -41,6 +41,15 @@ import { validateIntentPayload, listIntents } from '../intents/index.js';
 import * as agentMessages from '../db/repositories/agent-messages.js';
 import { getQueue, createWorker } from '../queue/index.js';
 
+/**
+ * Max times a single message may be re-routed between workers on a shared
+ * queue before the dispatcher gives up. A queue shared by N roles needs at
+ * most N-1 hops for the right consumer to claim a job; 3 covers realistic
+ * multi-role queues while killing an unbounded loop (a message addressed to a
+ * role with no consumer on the queue) within ~75ms instead of forever.
+ */
+const MAX_REROUTES = 3;
+
 /** Routing — which BullMQ queue handles a given intent. */
 const INTENT_TO_QUEUE: Record<string, string> = {
   // lead
@@ -225,7 +234,10 @@ export function consume(
   return createWorker(
     opts.queue,
     async (jobName, data: unknown) => {
-      const { messageId } = data as { messageId: string };
+      const { messageId, rerouteCount = 0 } = data as {
+        messageId: string;
+        rerouteCount?: number;
+      };
 
       // Atomically claim the specific row. Returns null when:
       //   - the row was already consumed (duplicate BullMQ delivery)
@@ -242,16 +254,47 @@ export function consume(
         // re-route. Without this, the message would sit unclaimed forever.
         const row = await agentMessages.getById(opts.db, messageId);
         if (row && row.consumedAt === null && row.toRole !== opts.role) {
+          // BOUND the re-route. A queue shared by N roles can legitimately
+          // bounce a job a few times before the right consumer claims it — but
+          // a message addressed to a role with NO consumer on this queue would
+          // otherwise spin forever, re-adding a fresh job every 25ms. That hot
+          // loop starves the worker event loop and surfaces as BullMQ
+          // "Missing lock for job …" warnings (lock renewal misses its window).
+          // The re-route count rides in the job data (each add increments it);
+          // once it exceeds MAX_REROUTES we stop, mark the row errored so the
+          // misroute is visible (admin/audit), and log loudly — that's a
+          // routing bug to fix in INTENT_TO_QUEUE / the emitter's toRole.
+          if (rerouteCount >= MAX_REROUTES) {
+            logger.error(
+              {
+                messageId,
+                jobName,
+                role: opts.role,
+                toRole: row.toRole,
+                intent: row.intent,
+                queue: opts.queue,
+                rerouteCount,
+              },
+              'agent_message exceeded max re-routes — no consumer for to_role on this queue; dropping (fix INTENT_TO_QUEUE + emitter toRole)',
+            );
+            await agentMessages
+              .markError(
+                opts.db,
+                row.id,
+                `unroutable: no consumer for role '${row.toRole}' on queue '${opts.queue}' after ${rerouteCount} re-routes`,
+              )
+              .catch(() => {
+                /* best-effort annotation — never let it mask the drop */
+              });
+            return;
+          }
           logger.debug(
-            { messageId, jobName, role: opts.role, toRole: row.toRole },
+            { messageId, jobName, role: opts.role, toRole: row.toRole, rerouteCount },
             'agent_message wrong role on this worker — requeueing for correct consumer',
           );
-          // Cap re-routes: when a queue has N roles, a stray job can ping-pong
-          // between workers. The job's attemptsMade isn't visible here, so we
-          // rely on BullMQ removeOnFail to bound it; we still re-enqueue once.
           await getQueue(opts.queue).add(
             row.intent,
-            { messageId: row.id },
+            { messageId: row.id, rerouteCount: rerouteCount + 1 },
             {
               priority: row.priority,
               removeOnComplete: { count: 1000 },

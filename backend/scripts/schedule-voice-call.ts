@@ -8,12 +8,14 @@
  * autonomous test without the manual ARI script.
  *
  * Usage (run from backend/, with the backend + workers already running):
- *   npx tsx scripts/schedule-voice-call.ts reda        # dial the real Reda lead's DB phone
- *   npx tsx scripts/schedule-voice-call.ts test         # dial TEST_DIAL_NUMBER (a dedicated voice-test customer)
+ *   npx tsx scripts/schedule-voice-call.ts voicetest   # dial the dedicated VOICE test line (+33757818787) — use this for voice tests
+ *   npx tsx scripts/schedule-voice-call.ts test         # dial TEST_DIAL_NUMBER, falling back to the voice test line
+ *   npx tsx scripts/schedule-voice-call.ts reda         # dial the real Reda lead's DB phone (212… = WhatsApp; NOT a voice line)
  *
  * NOTE: the voice-operator dials the CUSTOMER'S DB phone (production-correct).
- * `test` mode uses a customer whose phone == TEST_DIAL_NUMBER so it rings your
- * test handset; `reda`/`achraf` would dial their real (212…) numbers.
+ * `voicetest`/`test` use a customer whose phone is the voice test handset so it
+ * rings the right device; `reda`/`achraf` dial their real 212… numbers, which
+ * are WhatsApp-only and NOT reachable for voice — the script warns if you do.
  */
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -52,9 +54,19 @@ const { eq, desc } = await import('drizzle-orm');
 
 type Db = ReturnType<typeof createDb>;
 
-const REAL_LEADS: Record<string, { fullName: string; phone: string }> = {
+/**
+ * The dedicated VOICE test line — +33 7 57 81 87 87, in OVH 00-international
+ * form. This is the number to call for voice tests. The 212… numbers below are
+ * WhatsApp-only and are NOT reachable over the voice trunk.
+ */
+const VOICE_TEST_NUMBER = '0033757818787';
+
+const NAMED_TARGETS: Record<string, { fullName: string; phone: string }> = {
   reda: { fullName: 'Reda Lefriyekh', phone: '212650012403' },
   achraf: { fullName: 'Achraf Mortady', phone: '212603576574' },
+  // Explicit, env-independent voice-test target → always dials the real voice
+  // line, regardless of whether TEST_DIAL_NUMBER is set in the environment.
+  voicetest: { fullName: 'Voice Test', phone: VOICE_TEST_NUMBER },
 };
 
 async function ensure(
@@ -96,16 +108,26 @@ async function main(): Promise<void> {
 
   let ids: { leadId: string; customerId: string };
   let toNumber: string;
-  if (arg in REAL_LEADS) {
-    const info = REAL_LEADS[arg];
+  if (arg in NAMED_TARGETS) {
+    const info = NAMED_TARGETS[arg];
     ids = await ensure(db, info.fullName, info.phone);
     toNumber = info.phone;
   } else {
-    // `test` → a dedicated customer whose phone is the test handset.
-    const testPhone = process.env.TEST_DIAL_NUMBER;
-    if (!testPhone) throw new Error('TEST_DIAL_NUMBER not set (pipecat/.env)');
+    // `test` → a dedicated customer whose phone is the test handset. Prefer
+    // TEST_DIAL_NUMBER from the env, but fall back to the canonical voice test
+    // line so a missing env var doesn't block a voice test.
+    const testPhone = process.env.TEST_DIAL_NUMBER ?? VOICE_TEST_NUMBER;
     ids = await ensure(db, 'Voice Test', testPhone);
     toNumber = testPhone;
+  }
+
+  // Guardrail: 212… numbers are WhatsApp-only on this stack and will not ring
+  // over the voice trunk. Warn loudly rather than silently placing a dead call.
+  if (toNumber.replace(/[^\d]/g, '').startsWith('212')) {
+    console.warn(
+      `⚠️  ${toNumber} is a 212 (WhatsApp-only) number — it is NOT reachable for voice. ` +
+        `Use 'voicetest' (dials ${VOICE_TEST_NUMBER}) for a real voice test.`,
+    );
   }
 
   const callId = randomUUID();

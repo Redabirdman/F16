@@ -457,6 +457,57 @@ d('dispatcher (live)', () => {
   });
 
   // -------------------------------------------------------------------------
+  // bounded re-route (regression: VOICE.CALL_STARTED infinite requeue loop)
+  // -------------------------------------------------------------------------
+
+  it('test 8b (bounded reroute): a message with no consumer for its role is dropped, not looped', async () => {
+    // A worker consumes the `lead` queue as 'present-consumer', but the message
+    // is addressed to 'absent-consumer' (which has NO worker on this queue).
+    // Before the fix this re-enqueued a fresh job every 25ms forever; now it is
+    // capped at MAX_REROUTES (3) and then terminated with an 'unroutable' error.
+    const w = consume({
+      db,
+      queue: 'lead',
+      role: 'present-consumer',
+      handler: async () => ({ ok: true }),
+    });
+    workers.push(w);
+    // Count how many times the worker actually processes the job — proves the
+    // loop is bounded (a handful of hops), not unbounded.
+    let processed = 0;
+    w.on('completed', () => {
+      processed += 1;
+    });
+    await w.waitUntilReady();
+
+    const id = await sendMessage(
+      { db },
+      {
+        fromRole: 'src',
+        toRole: 'absent-consumer',
+        intent: 'LEAD.NEW',
+        payload: leadNewPayload(),
+      },
+    );
+
+    // The row should be annotated 'unroutable' once the reroute budget is spent.
+    await waitFor(async () => {
+      const [row] = await db.select().from(agentMessages).where(eq(agentMessages.id, id));
+      return Boolean(row && row.error && /unroutable/.test(row.error));
+    }, 5000);
+
+    const [row] = await db.select().from(agentMessages).where(eq(agentMessages.id, id));
+    expect(row!.error).toMatch(/unroutable/);
+    // Never claimed by the wrong consumer.
+    expect(row!.consumedAt).toBeNull();
+
+    // Give it a moment to prove it does NOT keep spinning after termination.
+    await new Promise((r) => setTimeout(r, 400));
+    // MAX_REROUTES=3 → at most ~4 job pickups total; assert it's small + stable.
+    expect(processed).toBeLessThanOrEqual(5);
+  });
+
+  // -------------------------------------------------------------------------
   // multi-queue routing
   // -------------------------------------------------------------------------
 
