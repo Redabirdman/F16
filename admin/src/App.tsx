@@ -1,4 +1,4 @@
-import type { ReactElement } from 'react';
+import { lazy, Suspense, type ReactElement } from 'react';
 import { Link, NavLink, Route, Routes } from 'react-router-dom';
 
 import LeadsPage from '@/pages/Leads';
@@ -13,6 +13,8 @@ import KnowledgePage from '@/pages/Knowledge';
 import PromptsPage from '@/pages/Prompts';
 import TeamChatPage from '@/pages/TeamChat';
 import { useRealtime } from '@/lib/use-realtime';
+
+const OfficePage = lazy(() => import('@/pages/Office'));
 
 function navItemClass({ isActive }: { isActive: boolean }): string {
   return [
@@ -30,6 +32,9 @@ function Nav(): ReactElement {
         </Link>
         <NavLink to="/dashboard" className={navItemClass}>
           Tableau de bord
+        </NavLink>
+        <NavLink to="/office" className={navItemClass}>
+          Bureau
         </NavLink>
         <NavLink to="/leads" className={navItemClass}>
           Leads
@@ -128,6 +133,18 @@ export default function App(): ReactElement {
       <Routes>
         <Route path="/" element={<Home />} />
         <Route path="/dashboard" element={<DashboardPage />} />
+        <Route
+          path="/office"
+          element={
+            <Suspense
+              fallback={
+                <div className="p-6 text-sm text-muted-foreground">Chargement du bureau…</div>
+              }
+            >
+              <OfficePage />
+            </Suspense>
+          }
+        />
         <Route path="/leads" element={<LeadsPage />} />
         <Route path="/leads/:id" element={<LeadDetailPage />} />
         <Route path="/queue" element={<HumanActionsPage />} />
