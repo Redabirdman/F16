@@ -491,3 +491,38 @@ export function savePrompt(key: string, content: string): Promise<{ ok: boolean;
 export function resetPrompt(key: string): Promise<{ ok: boolean; key: string }> {
   return apiSend('DELETE', `/v1/admin/prompts/${encodeURIComponent(key)}`);
 }
+
+// ----- M14.T10: team-chat ---------------------------------------------------
+
+export type TeamChatEntry =
+  | {
+      kind: 'request';
+      at: string;
+      id: string;
+      intent: string;
+      severity: number;
+      summary: string;
+      correlationId: string | null;
+    }
+  | {
+      kind: 'resolved';
+      at: string;
+      id: string;
+      choice: string | null;
+      by: string | null;
+      source: string | null;
+    }
+  | { kind: 'sent'; at: string; text: string };
+
+export interface TeamChatResponse {
+  generatedAt: string;
+  entries: TeamChatEntry[];
+}
+
+export function getTeamChat(limit = 50): Promise<TeamChatResponse> {
+  return apiGet<TeamChatResponse>(`/v1/admin/team-chat?limit=${limit}`);
+}
+
+export function sendTeamChat(text: string): Promise<{ ok: boolean }> {
+  return apiPost<{ ok: boolean }>('/v1/admin/team-chat/send', { text });
+}

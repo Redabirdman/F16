@@ -11,6 +11,7 @@ import AgentsPage from '@/pages/Agents';
 import AdsPage from '@/pages/Ads';
 import KnowledgePage from '@/pages/Knowledge';
 import PromptsPage from '@/pages/Prompts';
+import TeamChatPage from '@/pages/TeamChat';
 import { useRealtime } from '@/lib/use-realtime';
 
 function navItemClass({ isActive }: { isActive: boolean }): string {
@@ -32,6 +33,9 @@ function Nav(): ReactElement {
         </NavLink>
         <NavLink to="/leads" className={navItemClass}>
           Leads
+        </NavLink>
+        <NavLink to="/team-chat" className={navItemClass}>
+          Équipe
         </NavLink>
         <NavLink to="/queue" className={navItemClass}>
           File humaine
@@ -129,6 +133,7 @@ export default function App(): ReactElement {
         <Route path="/queue" element={<HumanActionsPage />} />
         <Route path="/agents" element={<AgentsPage />} />
         <Route path="/prompts" element={<PromptsPage />} />
+        <Route path="/team-chat" element={<TeamChatPage />} />
         <Route path="/ads" element={<AdsPage />} />
         <Route path="/knowledge" element={<KnowledgePage />} />
         <Route path="/integrations" element={<IntegrationsPage />} />
