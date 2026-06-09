@@ -49,3 +49,4 @@ stagehand/data/
 
 # Local tooling (cloudflared tunnel binary for OpenAI SIP webhook — M10 V2)
 .tools/
+.superpowers/
