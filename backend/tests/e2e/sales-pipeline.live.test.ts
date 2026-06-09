@@ -67,7 +67,11 @@ const REQUIRED = [
   'PII_ENCRYPTION_KEY',
   'ANTHROPIC_API_KEY',
 ] as const;
-const skip = REQUIRED.some((k) => !process.env[k]);
+// Opt-in: this test calls the REAL Anthropic API (~$0.02-0.05 + ~1-3 min per
+// run) and is occasionally flaky on real-API latency. It is EXCLUDED from the
+// default `pnpm test` (kept deterministic + green) and runs only via
+// `pnpm test:live`, which sets RUN_LIVE_TESTS through vitest.live.config.ts.
+const skip = !process.env.RUN_LIVE_TESTS || REQUIRED.some((k) => !process.env[k]);
 
 interface HubSpotCall {
   method: string;
@@ -430,7 +434,6 @@ describe.skipIf(skip)('M6.T8 — end-to-end sales pipeline (LIVE Claude)', () =>
       .from(agentsState)
       .where(eq(agentsState.role, 'sales-agent'));
     expect(stateRow?.status).toBe('running');
-  }, // 3-minute timeout for the whole pipeline. Live Claude is the long
-  // tail — Haiku scorer + Haiku compliance × 2 + Sonnet reply.
+  }, // tail — Haiku scorer + Haiku compliance × 2 + Sonnet reply. // 3-minute timeout for the whole pipeline. Live Claude is the long
   180_000);
 });

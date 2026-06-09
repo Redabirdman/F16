@@ -21,6 +21,7 @@
     "pretest": "tsc --noEmit -p tsconfig.test.json",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:live": "vitest run -c vitest.live.config.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "lint": "eslint src tests --max-warnings 0",
     "db:generate": "drizzle-kit generate",
