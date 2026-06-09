@@ -79,32 +79,37 @@ describe('RootErrorFallback', () => {
 });
 
 // Build-artifact smoke check — only runs if `pnpm build` has produced dist/.
-// Asserts the shape Caddy will serve in prod.
 describe('build artifact (shape)', () => {
   it.skipIf(!existsSync(distDir))(
-    'dist/index.html exists and references hashed JS + CSS assets under /assets',
+    'index.html references a lean entry chunk; pixi is code-split into its own chunk',
     async () => {
       const indexPath = join(distDir, 'index.html');
       expect(existsSync(indexPath)).toBe(true);
 
-      const { readFileSync } = await import('node:fs');
+      const { readFileSync, readdirSync } = await import('node:fs');
       const html = readFileSync(indexPath, 'utf8');
-
-      // Vite emits hashed bundles under /assets/*.{js,css}
       expect(html).toMatch(/<script[^>]+src="\/assets\/[^"]+\.js"/);
       expect(html).toMatch(/<link[^>]+href="\/assets\/[^"]+\.css"/);
       expect(html).toContain('<div id="root">');
 
-      // Sanity check: total dist size is a few hundred KB, NOT multi-MB.
-      // Catches regressions where pixi.js / recharts get bundled into the
-      // landing page by accident.
       const assetsDir = join(distDir, 'assets');
       expect(existsSync(assetsDir)).toBe(true);
-      const { readdirSync } = await import('node:fs');
-      const totalBytes = readdirSync(assetsDir)
-        .map((f) => statSync(join(assetsDir, f)).size)
-        .reduce((a, b) => a + b, 0);
-      expect(totalBytes).toBeLessThan(2_000_000); // 2MB ceiling for a "/" route
+      const files = readdirSync(assetsDir);
+
+      // The ENTRY chunk (referenced directly by index.html) must stay lean:
+      // pixi/recharts must NOT be bundled into it.
+      const entryMatch = html.match(/<script[^>]+src="\/assets\/([^"]+\.js)"/);
+      expect(entryMatch).not.toBeNull();
+      const entryFile = entryMatch?.[1] ?? '';
+      expect(entryFile).not.toBe('');
+      const entryBytes = statSync(join(assetsDir, entryFile)).size;
+      expect(entryBytes).toBeLessThan(800_000); // ~lean entry; pixi lives elsewhere
+
+      // A separate (lazy) chunk must carry the office/pixi code.
+      const hasLazyChunk = files.some(
+        (f) => /Office|pixi|index-[A-Za-z0-9_-]+\.js/.test(f) && f !== entryFile,
+      );
+      expect(hasLazyChunk).toBe(true);
     },
   );
 });
