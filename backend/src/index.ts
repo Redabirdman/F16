@@ -25,6 +25,8 @@ import { buildAdminAgentsRouter } from './admin/agents.js';
 import { buildAdminAdsRouter } from './admin/ads.js';
 import { buildAdminKnowledgeRouter } from './admin/knowledge-search.js';
 import { buildAdminPromptsRouter } from './admin/prompts.js';
+import { buildAdminTeamChatRouter } from './admin/team-chat.js';
+import { WahaClient } from './channels/whatsapp/waha-client.js';
 import { requireAdminAuth } from './admin/auth.js';
 import type { RealtimeListener } from './realtime/notify.js';
 import { metrics, registerDefaultMetrics } from './metrics/index.js';
@@ -243,6 +245,22 @@ export function buildApp(opts: BuildAppOptions = {}): Hono {
     // M14.T6 — agent prompt editor (registry-backed overrides).
     const adminPromptsApp = buildAdminPromptsRouter({ db: opts.db });
     app.route('/', adminPromptsApp);
+    // M14.T10 — team-chat: operator timeline + send-to-WA-group.
+    const teamChatWaha = process.env.WAHA_BASE_URL
+      ? new WahaClient({
+          baseUrl: process.env.WAHA_BASE_URL,
+          ...(process.env.WAHA_API_KEY ? { apiKey: process.env.WAHA_API_KEY } : {}),
+          ...(process.env.WAHA_SESSION ? { session: process.env.WAHA_SESSION } : {}),
+        })
+      : undefined;
+    const adminTeamChatApp = buildAdminTeamChatRouter({
+      db: opts.db,
+      ...(teamChatWaha ? { waha: teamChatWaha } : {}),
+      ...(process.env.HUMAN_ACTION_GROUP_CHAT_ID
+        ? { groupChatId: process.env.HUMAN_ACTION_GROUP_CHAT_ID }
+        : {}),
+    });
+    app.route('/', adminTeamChatApp);
     // M14.T2 — SSE realtime stream, only when a listener was provided.
     if (opts.realtime) {
       const adminRealtimeApp = buildAdminRealtimeRouter({ realtime: opts.realtime });
