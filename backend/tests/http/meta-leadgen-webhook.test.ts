@@ -27,7 +27,6 @@ function sign(body: string): string {
 function fakeClient(lead: Partial<LeadgenData> & { id: string }): MetaGraphClient {
   return {
     getLeadgenData: async (id: string): Promise<LeadgenData> => ({
-      id,
       createdTime: '2026-06-07T10:00:00+0000',
       fieldData: [],
       adId: 'AD1',
@@ -40,6 +39,8 @@ function fakeClient(lead: Partial<LeadgenData> & { id: string }): MetaGraphClien
       platform: 'fb',
       raw: {},
       ...lead,
+      // The requested id wins over any id carried on the canned lead.
+      id,
     }),
   } as unknown as MetaGraphClient;
 }

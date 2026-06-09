@@ -35,7 +35,6 @@ const sampleAction1: HumanAction = {
   resolvedSource: null,
   resolution: null,
   createdAt: new Date('2026-05-24T08:00:00Z'),
-  updatedAt: new Date('2026-05-24T08:00:00Z'),
   resolvedAt: null,
   escalatedAt: null,
 };

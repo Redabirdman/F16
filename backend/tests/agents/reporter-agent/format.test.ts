@@ -29,7 +29,6 @@ const baseAction: HumanAction = {
   resolvedSource: null,
   resolution: null,
   createdAt: new Date('2026-05-23T20:30:00Z'),
-  updatedAt: new Date('2026-05-23T20:30:00Z'),
   resolvedAt: null,
   escalatedAt: null,
 };
