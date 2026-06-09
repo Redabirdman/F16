@@ -32,6 +32,7 @@ import { spawn } from '../agents/registry.js';
 import { registerMaxanceOperatorClass } from '../agents/maxance-operator/index.js';
 import { registerReporterAgentClass } from '../agents/reporter-agent/index.js';
 import { registerVoiceOperatorClass } from '../agents/voice-operator/index.js';
+import { startVoiceWatchdog, type VoiceWatchdogHandle } from '../voice/watchdog.js';
 import {
   registerEngagementAgentClass,
   startEngagementScheduler,
@@ -83,6 +84,8 @@ export interface WorkerSet {
   supervisorArbitration: ArbitrationHandle | null;
   /** Supervisor strategy review scheduler handle, if started (M15.T3). */
   supervisorStrategy: StrategyReviewHandle | null;
+  /** Self-healing voice watchdog (OVH re-register + keepalive), if started. */
+  voiceWatchdog: VoiceWatchdogHandle | null;
   /** Stop every worker + agent. Idempotent. */
   stop(): Promise<void>;
 }
@@ -110,6 +113,7 @@ export interface StartWorkersOptions {
     supervisorAgent?: boolean;
     supervisorArbitration?: boolean;
     supervisorStrategy?: boolean;
+    voiceWatchdog?: boolean;
   };
 }
 
@@ -152,6 +156,11 @@ export async function startWorkers(opts: StartWorkersOptions): Promise<WorkerSet
     // explicit flag once the dedicated PC is up.
     supervisorStrategy:
       opts.flags?.supervisorStrategy ?? process.env.SUPERVISOR_STRATEGY_ENABLED === 'true',
+    // Voice watchdog — on when the OVH trunk is configured (it self-disables on
+    // non-Windows / no WSL). Opt out with F16_VOICE_WATCHDOG=false.
+    voiceWatchdog:
+      opts.flags?.voiceWatchdog ??
+      (Boolean(process.env.ASTERISK_OVH_TRUNK) && process.env.F16_VOICE_WATCHDOG !== 'false'),
   };
 
   let knowledgeCurator: KnowledgeCuratorHandle | null = null;
@@ -162,6 +171,7 @@ export async function startWorkers(opts: StartWorkersOptions): Promise<WorkerSet
   let adsApproval: DraftApprovalSchedulerHandle | null = null;
   let supervisorArbitration: ArbitrationHandle | null = null;
   let supervisorStrategy: StrategyReviewHandle | null = null;
+  let voiceWatchdog: VoiceWatchdogHandle | null = null;
 
   // 1. lead-scorer (always — LLM-driven scoring on LEAD.NEW).
   if (flags.leadScorer) {
@@ -273,6 +283,24 @@ export async function startWorkers(opts: StartWorkersOptions): Promise<WorkerSet
     }
   } else {
     logger.info('supervisor: voice-operator SKIPPED (no ASTERISK_ARI_URL set)');
+  }
+
+  // 5c. voice watchdog — self-heals the OVH SIP registration (the #1 silent
+  //     voice failure: registration goes stale → "403 not registered" → no
+  //     ring) by restarting Asterisk, and holds the WSL distro open via a
+  //     keepalive. Network-independent (wsl.exe); self-disables off-Windows.
+  if (flags.voiceWatchdog) {
+    try {
+      voiceWatchdog = startVoiceWatchdog();
+      logger.info('supervisor: voice watchdog started');
+    } catch (err) {
+      logger.error(
+        { err: err instanceof Error ? err.message : String(err) },
+        'supervisor: voice watchdog failed to start',
+      );
+    }
+  } else {
+    logger.info('supervisor: voice watchdog SKIPPED (no ASTERISK_OVH_TRUNK / disabled)');
   }
 
   // 6. knowledge-curator (option B). Consumes KNOWLEDGE.REINDEX_REQUESTED
@@ -495,6 +523,7 @@ export async function startWorkers(opts: StartWorkersOptions): Promise<WorkerSet
     adsApproval,
     supervisorArbitration,
     supervisorStrategy,
+    voiceWatchdog,
     stop: async () => {
       // Close BullMQ workers first (they drain in-flight jobs); then
       // stop the BaseAgent singletons. Order matters: workers may emit
@@ -525,6 +554,9 @@ export async function startWorkers(opts: StartWorkersOptions): Promise<WorkerSet
       }
       if (supervisorStrategy) {
         supervisorStrategy.stop();
+      }
+      if (voiceWatchdog) {
+        voiceWatchdog.stop();
       }
       logger.info(
         {

@@ -55,3 +55,21 @@ export function recordWsReconnect(kind: string): void {
 export function queueDepthGauge() {
   return metrics.gauge('f16_queue_depth', 'BullMQ jobs per queue per state (scrape-time snapshot)');
 }
+
+/** reason ∈ {asterisk_not_active, ovh_stale} — voice watchdog restarted Asterisk. */
+export function recordVoiceWatchdogHeal(reason: string): void {
+  metrics
+    .counter(
+      'f16_voice_watchdog_heals_total',
+      'Times the voice watchdog restarted Asterisk to self-heal',
+    )
+    .inc({ reason });
+}
+
+/** OVH SIP trunk registration health: 1 = registered+valid, 0 = stale/rejected/down. */
+export function voiceOvhRegisteredGauge() {
+  return metrics.gauge(
+    'f16_voice_ovh_registered',
+    'OVH SIP trunk registration health (1=ok, 0=stale)',
+  );
+}
