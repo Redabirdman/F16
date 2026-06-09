@@ -67,6 +67,24 @@ describe('reconcileAgents', () => {
     expect(s.agents.get('supervisor#i1')?.spriteState).toBe('blocked');
   });
 
+  it('maps starting status to walking', () => {
+    const s = reconcileAgents(
+      emptyState(),
+      [row({ role: 'supervisor', instanceId: 'i1', status: 'starting' })],
+      1000,
+    );
+    expect(s.agents.get('supervisor#i1')?.spriteState).toBe('walking');
+  });
+
+  it('maps stopping status to walking', () => {
+    const s = reconcileAgents(
+      emptyState(),
+      [row({ role: 'supervisor', instanceId: 'i1', status: 'stopping' })],
+      1000,
+    );
+    expect(s.agents.get('supervisor#i1')?.spriteState).toBe('walking');
+  });
+
   it('removes agents that disappear from the roster', () => {
     const s1 = reconcileAgents(emptyState(), [row({ role: 'sales-agent', instanceId: 'a' })], 1000);
     const s2 = reconcileAgents(s1, [], 2000);

@@ -77,6 +77,17 @@ export class OfficeScene {
     t: number;
     dur: number;
   }[] = [];
+  /** Sprites of stopped agents currently walking out + fading toward the exit. */
+  private departing = new Map<
+    string,
+    {
+      node: Container;
+      t: number;
+      dur: number;
+      from: { x: number; y: number };
+      to: { x: number; y: number };
+    }
+  >();
   private ready = false;
 
   constructor(private readonly opts: OfficeSceneOptions = {}) {
@@ -165,7 +176,7 @@ export class OfficeScene {
 
   /** Populate the static props layer. Best-effort — EMPTY textures are skipped. */
   private drawProps(): void {
-    this.propLayer.removeChildren();
+    for (const c of this.propLayer.removeChildren()) c.destroy();
 
     // No desks on the sales floor — sales agents stand on the open colored rug.
     // Desks only at persistent homes, except maxance-operator (gets the booth instead).
@@ -219,18 +230,40 @@ export class OfficeScene {
   /** Reconcile the sprite set to a new state snapshot. */
   applySnapshot(state: OfficeState): void {
     if (!this.ready) return;
-    // Remove sprites no longer present.
+    // Remove sprites no longer present — animate a walk-out toward the exit.
     for (const [key, node] of this.sprites) {
       if (!state.agents.has(key)) {
-        node.destroy({ children: true });
+        // Detach from all live registries so tick()/walks ignore the node…
         this.sprites.delete(key);
-        this.lastDeskByKey.delete(key);
         this.animState.delete(key);
         this.walks.delete(key);
+        const fromDesk = this.lastDeskByKey.get(key);
+        this.lastDeskByKey.delete(key);
+        // …but keep the node on spriteLayer and tween it out to the entrance.
+        // Only walk out sprites with a known last position; else just destroy.
+        if (fromDesk) {
+          const from = deskCoords(fromDesk);
+          this.departing.set(key, {
+            node,
+            t: 0,
+            dur: 1.0,
+            from: { x: from.x, y: from.y - 14 },
+            to: { x: ENTRANCE.x, y: ENTRANCE.y - 14 },
+          });
+        } else {
+          node.destroy({ children: true });
+        }
       }
     }
     // Add / update.
     for (const agent of state.agents.values()) {
+      // If this agent re-appears while still fading out (restart), cancel the
+      // departure and let it be recreated fresh below.
+      const leaving = this.departing.get(agent.key);
+      if (leaving) {
+        leaving.node.destroy({ children: true });
+        this.departing.delete(agent.key);
+      }
       let node = this.sprites.get(agent.key);
       const wasNew = !this.lastDeskByKey.has(agent.key);
       if (!node) {
@@ -368,6 +401,23 @@ export class OfficeScene {
     }
     this.advanceWalks(dt);
     this.advancePulses(dt);
+    this.advanceDeparting(dt);
+  }
+
+  private advanceDeparting(dt: number): void {
+    const completed: string[] = [];
+    for (const [key, d] of this.departing) {
+      d.t += dt;
+      const k = Math.min(1, d.t / d.dur);
+      d.node.position.set(d.from.x + (d.to.x - d.from.x) * k, d.from.y + (d.to.y - d.from.y) * k);
+      d.node.alpha = 1 - k;
+      if (k >= 1) completed.push(key);
+    }
+    for (const key of completed) {
+      const d = this.departing.get(key);
+      this.departing.delete(key);
+      d?.node.destroy({ children: true });
+    }
   }
 
   private advanceWalks(dt: number): void {
@@ -465,6 +515,9 @@ export class OfficeScene {
     // Guard against StrictMode dev cleanup firing before async mount() resolves
     // (the renderer would be undefined and destroy() would throw).
     if (!this.ready) return;
+    // Departing nodes are still spriteLayer children, so app.destroy frees them;
+    // just clear the registry so we hold no dangling references.
+    this.departing.clear();
     this.app.destroy(true, { children: true, texture: true });
     this.ready = false;
   }
