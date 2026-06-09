@@ -67,10 +67,18 @@ export default function OfficePage(): ReactElement {
   return (
     <div className="relative h-[calc(100vh-57px)] w-full overflow-hidden bg-slate-900">
       <div ref={hostRef} className="absolute inset-0" />
+      {!state && (
+        <div className="absolute inset-0 flex items-center justify-center text-sm text-slate-400">
+          Connexion au bureau en direct…
+        </div>
+      )}
       <div className="pointer-events-none absolute left-4 top-4 rounded-md bg-slate-900/70 px-3 py-1.5 text-xs font-medium text-slate-200">
         Bureau F16 — {state ? state.agents.size : 0} agents
       </div>
       {selected && <AgentPanel agent={selected} onClose={() => setSelectedKey(null)} />}
+      <a href="/agents" className="sr-only">
+        Vue accessible : registre des agents
+      </a>
     </div>
   );
 }
