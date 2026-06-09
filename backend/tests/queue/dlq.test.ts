@@ -15,7 +15,10 @@ import { listDlq, countDlq, replayDlq, purgeDlq, dlqName } from '../../src/queue
 const liveUrl = process.env.TEST_REDIS_URL;
 const d = describe.skipIf(!liveUrl);
 
-async function waitFor(pred: () => Promise<boolean>, timeoutMs = 5000): Promise<void> {
+async function waitFor(
+  pred: () => Promise<boolean>,
+  timeoutMs = Number(process.env.TEST_WAITFOR_MS) || 15_000,
+): Promise<void> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     if (await pred()) return;

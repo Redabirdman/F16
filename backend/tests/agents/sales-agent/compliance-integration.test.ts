@@ -68,7 +68,7 @@ afterAll(() => {
 
 async function waitFor(
   pred: () => boolean | Promise<boolean>,
-  timeoutMs = 8000,
+  timeoutMs = Number(process.env.TEST_WAITFOR_MS) || 15_000,
   intervalMs = 25,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;

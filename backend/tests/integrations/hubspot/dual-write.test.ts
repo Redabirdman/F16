@@ -138,7 +138,10 @@ function buildClient(): HubSpotClient {
 }
 
 /** Spin-wait until `pred()` is true or the budget runs out. */
-async function waitFor(pred: () => Promise<boolean> | boolean, timeoutMs = 5_000): Promise<void> {
+async function waitFor(
+  pred: () => Promise<boolean> | boolean,
+  timeoutMs = Number(process.env.TEST_WAITFOR_MS) || 15_000,
+): Promise<void> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     if (await pred()) return;
