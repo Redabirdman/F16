@@ -285,18 +285,38 @@ export class EngagementAgent extends BaseAgent {
     now: Date;
   }): Promise<MessageHandlerResult> {
     const { lead, now } = args;
+    // Use the customer's name in the operator message — never a raw lead UUID
+    // fragment ("Lead b66fc9ef" meant nothing to Ridaa). Best-effort: fall back
+    // to a short reference if the customer/name can't be resolved.
+    let who = `Un lead (réf ${lead.id.slice(0, 8)})`;
+    if (lead.customerId) {
+      try {
+        const [cust] = await this.db
+          .select()
+          .from(customers)
+          .where(eq(customers.id, lead.customerId))
+          .limit(1);
+        const name = cust ? (decryptPII(cust.fullName) ?? '').trim() : '';
+        if (name) who = name;
+      } catch {
+        // keep the reference fallback — a name lookup failure must not block the
+        // escalation (the human action + dormant flip are what matter).
+      }
+    }
     const action = await humanActions.createAction(this.db, {
       createdByAgent: `${this.role}#${this.instanceId}`,
       correlationId: lead.id,
       intent: 'LEAD_DORMANT',
       severity: 2,
       summary:
-        `Lead ${lead.id.slice(0, 8)} silencieux depuis 7 jours malgré 2 relances. ` +
-        `Marqué dormant. Souhaitez-vous reprendre contact manuellement ou clôturer ?`,
+        `${who} n'a plus répondu depuis 7 jours malgré 2 relances. ` +
+        `Le lead est passé en sommeil. Souhaitez-vous reprendre contact ou clôturer ?`,
       options: [
         { id: 'manual_followup', label: 'Reprendre contact manuellement', kind: 'approve' },
         { id: 'close_lost', label: 'Clôturer (lead perdu)', kind: 'reject' },
-        { id: 'wait', label: 'Laisser dormant', kind: 'approve' },
+        // 'custom' (not a 2nd 'approve'): keeps the text-alias matcher from
+        // ambiguously resolving a typed "approuve" to two different options.
+        { id: 'wait', label: 'Laisser en sommeil', kind: 'custom' },
       ],
     });
 

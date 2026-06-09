@@ -52,6 +52,7 @@ import type { AgentMessageEnvelope, MessageHandlerResult } from '../../messaging
 import { logger } from '../../logger.js';
 import { getActionById } from '../../db/repositories/human-actions.js';
 import { getCampaignTree } from '../../db/repositories/ads.js';
+import type { HumanActionOption } from '../../db/schema/agent-runtime.js';
 import type { WahaClient } from '../../channels/whatsapp/waha-client.js';
 import { formatHumanActionRequest, formatHumanActionResolved } from './format.js';
 
@@ -190,7 +191,25 @@ export class ReporterAgent extends BaseAgent {
       choice: string;
       source: 'admin' | 'whatsapp';
     };
-    const text = formatHumanActionResolved(payload);
+    // Re-load the row so the closure can show the HUMAN option label + the
+    // French intent label instead of the raw option id / kind. `choice` is the
+    // chosen option's id. Best-effort: if the row is gone, fall back to a
+    // minimal human line (still no UUID / raw kind).
+    const action = await getActionById(this.db, payload.humanActionId);
+    let text: string;
+    if (action) {
+      const options = action.options as readonly HumanActionOption[];
+      const chosen = options.find((o) => o.id === payload.choice);
+      text = formatHumanActionResolved({
+        intent: action.intent,
+        optionLabel: chosen?.label ?? payload.choice,
+        kind: chosen?.kind ?? 'custom',
+        source: payload.source,
+      });
+    } else {
+      const sourceLabel = payload.source === 'admin' ? "l'admin" : 'WhatsApp';
+      text = `✅ Action résolue via ${sourceLabel}.`;
+    }
     await this.waha.sendText({ chatId: this.groupChatId, text });
     logger.info(
       {

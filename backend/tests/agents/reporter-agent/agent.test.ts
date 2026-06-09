@@ -158,28 +158,34 @@ describe('ReporterAgent — HUMAN_ACTION.REQUESTED', () => {
 });
 
 describe('ReporterAgent — HUMAN_ACTION.RESOLVED', () => {
-  it('posts a closure message in the group with the chosen option', async () => {
+  it('re-loads the action and posts a human closure (option label, no UUID/kind)', async () => {
+    mockedGetActionById.mockResolvedValueOnce(sampleAction);
     const waha = buildFakeWaha();
     const agent = newAgent({ waha });
 
     const result = await agent.callOnMessage(
       buildEnvelope('HUMAN_ACTION.RESOLVED', {
         humanActionId: sampleAction.id,
-        choice: 'approve',
+        choice: 'approve', // the chosen option id
         source: 'admin',
       }),
     );
 
     expect(result).toMatchObject({ ok: true });
+    // The row is re-loaded so the closure can show the human option label.
+    expect(mockedGetActionById).toHaveBeenCalledWith(expect.anything(), sampleAction.id);
     expect(waha.sent).toHaveLength(1);
     expect(waha.sent[0]?.chatId).toBe(GROUP_CHAT_ID);
     expect(waha.sent[0]?.text).toContain('✅');
-    expect(waha.sent[0]?.text).toContain(sampleAction.id);
-    expect(waha.sent[0]?.text).toContain('admin');
-    expect(waha.sent[0]?.text).toContain('approve');
+    expect(waha.sent[0]?.text).toContain('Validé');
+    expect(waha.sent[0]?.text).toContain("l'admin");
+    expect(waha.sent[0]?.text).toContain('Approuver'); // option label, not the id "approve"
+    // No raw UUID / raw kind leaks.
+    expect(waha.sent[0]?.text).not.toContain(sampleAction.id);
   });
 
-  it('does NOT re-load the action row on RESOLVED (closure payload is self-sufficient)', async () => {
+  it('falls back to a minimal human line when the action row is gone', async () => {
+    mockedGetActionById.mockResolvedValueOnce(null);
     const waha = buildFakeWaha();
     const agent = newAgent({ waha });
 
@@ -191,7 +197,10 @@ describe('ReporterAgent — HUMAN_ACTION.RESOLVED', () => {
       }),
     );
 
-    expect(mockedGetActionById).not.toHaveBeenCalled();
+    expect(waha.sent).toHaveLength(1);
+    expect(waha.sent[0]?.text).toContain('✅');
+    expect(waha.sent[0]?.text).toContain('WhatsApp');
+    expect(waha.sent[0]?.text).not.toContain(sampleAction.id);
   });
 });
 

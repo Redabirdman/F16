@@ -159,7 +159,7 @@ export async function scanDraftApprovals(opts: DraftApprovalOptions): Promise<Ap
           correlationId: r.campaignId,
           intent: 'CAMPAIGN_LAUNCH_FAILED',
           severity: 2,
-          summary: `Échec du lancement de la campagne : ${msg.slice(0, 240)}`,
+          summary: humanizeLaunchError(msg),
           options: [{ id: 'ack', label: 'Compris', kind: 'approve' }],
         });
         await sendMessage(
@@ -216,4 +216,31 @@ export function startDraftApprovalScanner(
     },
     tickOnce: tick,
   };
+}
+
+/**
+ * Turn a raw Meta Graph error (e.g. `Meta POST /act_…/adsets -> 400:
+ * {"error":{…}}`) into a plain-French operator message. The WhatsApp group must
+ * never see raw JSON. The full technical string is still logged (logger.error
+ * above) for debugging; this is only what Ridaa/Achraf read.
+ *
+ * Exported for unit testing.
+ */
+export function humanizeLaunchError(raw: string): string {
+  // Lead Ads ToS — the recurring one (Meta subcode 1815089).
+  if (/1815089/.test(raw) || /Terms of Service Not Accepted/i.test(raw)) {
+    return (
+      "Lancement impossible : la Page n'a pas accepté les Conditions des " +
+      'publicités à formulaire (Lead Ads) de Meta. À accepter sur ' +
+      'https://www.facebook.com/legal/leadgen/tos, puis relancer la campagne.'
+    );
+  }
+  // Otherwise surface Meta's own user-facing message if it carried one.
+  const m =
+    /"error_user_msg":"([^"]+)"/.exec(raw) ??
+    /"error_user_title":"([^"]+)"/.exec(raw) ??
+    /"message":"([^"]+)"/.exec(raw);
+  if (m?.[1]) return `Lancement de la campagne impossible : ${m[1]}`;
+  // Last resort — never dump raw JSON to the operator.
+  return 'Lancement de la campagne impossible (erreur Meta). Détail technique dans les logs.';
 }

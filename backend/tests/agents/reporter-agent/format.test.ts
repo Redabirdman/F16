@@ -8,6 +8,7 @@ import {
   formatHumanActionRequest,
   formatHumanActionResolved,
   formatOptionsBlock,
+  intentLabel,
   severityBadge,
 } from '../../../src/agents/reporter-agent/format.js';
 import type { HumanAction } from '../../../src/db/schema/agent-runtime.js';
@@ -59,14 +60,17 @@ describe('formatOptionsBlock', () => {
   it('returns null when options are empty', () => {
     expect(formatOptionsBlock([])).toBeNull();
   });
-  it('annotates kind for non-custom options', () => {
-    const text = formatOptionsBlock([{ id: 'a', label: 'Approuver', kind: 'approve' }]);
-    expect(text).toContain('(approve)');
-  });
-  it('omits the kind annotation for custom options', () => {
-    const text = formatOptionsBlock([{ id: 'choice1', label: 'Option spéciale', kind: 'custom' }]);
-    expect(text).toContain('Option spéciale');
-    expect(text).not.toContain('(custom)');
+  it('renders only the human label — never the raw kind', () => {
+    const text = formatOptionsBlock([
+      { id: 'a', label: 'Approuver', kind: 'approve' },
+      { id: 'r', label: 'Refuser', kind: 'reject' },
+    ]);
+    expect(text).toContain('1. Approuver');
+    expect(text).toContain('2. Refuser');
+    // The internal kind must NOT leak into the operator message (it confused
+    // operators — a list could even show "(approve)" twice).
+    expect(text).not.toContain('(approve)');
+    expect(text).not.toContain('(reject)');
   });
 });
 
@@ -85,13 +89,12 @@ describe('formatHumanActionRequest', () => {
     expect(text).toContain('1. Approuver');
     expect(text).toContain('2. Refuser');
   });
-  it('includes the correlation reference when present', () => {
+  it('does NOT leak the correlation id (lead/campaign UUID) into the message', () => {
+    // The old "Réf : <correlationId>" line was dropped — it was a confusing
+    // second UUID and a reply-routing hazard (the parser grabs the first UUID).
     const text = formatHumanActionRequest(baseAction);
-    expect(text).toContain('Réf : lead-1234');
-  });
-  it('omits the correlation line when correlationId is null', () => {
-    const text = formatHumanActionRequest({ ...baseAction, correlationId: null });
-    expect(text).not.toContain('Réf :');
+    expect(text).not.toContain('lead-1234');
+    expect(text).not.toContain('Réf : ');
   });
   it('always includes the action ID at the bottom for parser fallback', () => {
     const text = formatHumanActionRequest(baseAction);
@@ -113,24 +116,42 @@ describe('formatHumanActionRequest', () => {
 });
 
 describe('formatHumanActionResolved', () => {
-  it('renders an admin-source closure', () => {
+  it('renders a human admin-source closure — option label + French intent, no UUID/kind', () => {
     const text = formatHumanActionResolved({
-      humanActionId: baseAction.id,
-      choice: 'approve',
+      intent: 'LEAD_DORMANT',
+      optionLabel: 'Reprendre contact manuellement',
+      kind: 'approve',
       source: 'admin',
     });
     expect(text).toContain('✅');
-    expect(text).toContain(baseAction.id);
-    expect(text).toContain('admin');
-    expect(text).toContain('approve');
+    expect(text).toContain('Lead en sommeil'); // French intent label, not the raw code
+    expect(text).toContain('Validé');
+    expect(text).toContain("l'admin");
+    expect(text).toContain('Reprendre contact manuellement'); // the human option label
+    // No raw UUID, no raw kind word.
+    expect(text).not.toContain(baseAction.id);
+    expect(text).not.toContain('approve');
   });
-  it('renders a whatsapp-source closure', () => {
+  it('renders a whatsapp-source rejection with the right verb', () => {
     const text = formatHumanActionResolved({
-      humanActionId: baseAction.id,
-      choice: 'reject',
+      intent: 'LEAD_DORMANT',
+      optionLabel: 'Clôturer (lead perdu)',
+      kind: 'reject',
       source: 'whatsapp',
     });
     expect(text).toContain('WhatsApp');
-    expect(text).toContain('reject');
+    expect(text).toContain('Refusé');
+    expect(text).toContain('Clôturer (lead perdu)');
+    expect(text).not.toContain('reject');
+  });
+});
+
+describe('intentLabel', () => {
+  it('maps known intent codes to French labels', () => {
+    expect(intentLabel('LEAD_DORMANT')).toBe('Lead en sommeil');
+    expect(intentLabel('CAMPAIGN_LAUNCH_FAILED')).toBe('Lancement de campagne échoué');
+  });
+  it('falls back to the raw code for unknown intents', () => {
+    expect(intentLabel('SOMETHING_NEW')).toBe('SOMETHING_NEW');
   });
 });
