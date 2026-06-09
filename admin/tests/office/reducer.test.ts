@@ -58,6 +58,15 @@ describe('reconcileAgents', () => {
     expect(s.agents.get('supervisor#i1')?.spriteState).toBe('blocked');
   });
 
+  it('maps running + non-null error to blocked', () => {
+    const s = reconcileAgents(
+      emptyState(),
+      [row({ role: 'supervisor', instanceId: 'i1', status: 'running', error: 'OOM' })],
+      1000,
+    );
+    expect(s.agents.get('supervisor#i1')?.spriteState).toBe('blocked');
+  });
+
   it('removes agents that disappear from the roster', () => {
     const s1 = reconcileAgents(emptyState(), [row({ role: 'sales-agent', instanceId: 'a' })], 1000);
     const s2 = reconcileAgents(s1, [], 2000);

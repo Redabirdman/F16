@@ -77,6 +77,7 @@ describe('OfficeBridge', () => {
       priority: 5,
     });
 
+    await vi.waitFor(() => expect(seen.length).toBeGreaterThan(1));
     const last = seen.at(-1)!;
     expect(last.state.agents.get('maxance-operator#m')?.spriteState).toBe('talking');
     expect(last.effects.some((e: { kind: string }) => e.kind === 'marquee-quote')).toBe(true);
