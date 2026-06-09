@@ -1,5 +1,7 @@
 import { lazy, Suspense, type ReactElement } from 'react';
-import { Link, NavLink, Route, Routes } from 'react-router-dom';
+import { Link, NavLink, Route, Routes, useNavigate } from 'react-router-dom';
+
+import { Button } from '@/components/ui/button';
 
 import LeadsPage from '@/pages/Leads';
 import LeadDetailPage from '@/pages/LeadDetail';
@@ -69,18 +71,28 @@ function Nav(): ReactElement {
 }
 
 function Home(): ReactElement {
+  const navigate = useNavigate();
   return (
     <main className="mx-auto flex w-full max-w-6xl flex-col gap-4 p-6">
       <h1 className="text-3xl font-semibold tracking-tight">F16 admin</h1>
       <p className="text-base text-muted-foreground">
         Autonomous AI organization for Assuryal Conseil. Choisis un onglet en haut pour commencer.
       </p>
+      <div>
+        <Button onClick={() => navigate('/dashboard')}>Get Started</Button>
+      </div>
       <ul className="list-inside list-disc text-sm text-slate-600">
         <li>
           <Link className="text-sky-700 hover:underline" to="/dashboard">
             Tableau de bord
           </Link>{' '}
           — KPI 24 h, pipeline leads + devis, file humaine.
+        </li>
+        <li>
+          <Link className="text-sky-700 hover:underline" to="/office">
+            Bureau
+          </Link>{' '}
+          {`— vue isométrique live de l'équipe d'agents.`}
         </li>
         <li>
           <Link className="text-sky-700 hover:underline" to="/leads">
