@@ -1,10 +1,29 @@
 // admin/src/office/scene.ts
 // PixiJS renderer for the isometric office. Reads OfficeState, never fetches.
 // V2 (Three.js) replaces THIS file only — the state core stays untouched.
-import { Application, Container, Graphics, Text, TextStyle } from 'pixi.js';
-import { ZONES, isoToScreen, TILE_W, TILE_H, deskCoords, ENTRANCE, homeDeskFor } from './layout';
+import {
+  Application,
+  Assets,
+  Container,
+  Graphics,
+  Sprite,
+  Text,
+  TextStyle,
+  Texture,
+} from 'pixi.js';
+import {
+  ZONES,
+  isoToScreen,
+  TILE_W,
+  TILE_H,
+  deskCoords,
+  ENTRANCE,
+  homeDeskFor,
+  SALES_DESKS,
+  PERSISTENT_HOME,
+} from './layout';
 import type { ZoneDef } from './layout';
-import { roleColor, PLACEHOLDER_MODE } from './assets';
+import { ENV_TEXTURES, PLACEHOLDER_MODE, roleColor, textureUrl } from './assets';
 import type { OfficeAgent, OfficeEffect, OfficeState } from './types';
 
 export interface OfficeSceneOptions {
@@ -12,10 +31,31 @@ export interface OfficeSceneOptions {
   onSelect?: (agentKey: string | null) => void;
 }
 
+/** All roles with character PNGs. */
+const ALL_ROLES = [
+  'sales-agent',
+  'voice-operator',
+  'maxance-operator',
+  'supervisor',
+  'human-router',
+  'engagement-agent',
+  'ads-manager-agent',
+  'creative-agent',
+  'lead-scorer',
+] as const;
+
+/** Plant placement: 3 tasteful spots — one per corner zone (not maxance to avoid crowding). */
+const PLANT_POSITIONS: Array<{ col: number; row: number }> = [
+  { col: 3, row: 0 }, // ads-wing inner edge
+  { col: 11, row: 1 }, // supervisor-corner inner edge
+  { col: 11, row: 10 }, // reporter-office inner edge
+];
+
 export class OfficeScene {
   private app: Application;
   private world: Container;
   private floorLayer: Container;
+  private propLayer: Container = new Container();
   private spriteLayer: Container = new Container();
   private sprites = new Map<string, Container>();
   private animState = new Map<string, { spriteState: string; bobPhase: number }>();
@@ -58,12 +98,19 @@ export class OfficeScene {
     host.appendChild(this.app.canvas);
     this.app.stage.addChild(this.world);
     this.world.addChild(this.floorLayer);
+    this.world.addChild(this.propLayer);
     this.world.addChild(this.spriteLayer);
     this.world.addChild(this.pulseLayer);
     this.world.eventMode = 'static';
     this.world.on('pointertap', () => this.opts.onSelect?.(null)); // background tap clears
+
+    // Preload all textures best-effort — a missing file must not throw.
+    const textureUrls = [...Object.values(ENV_TEXTURES), ...ALL_ROLES.map((r) => textureUrl(r))];
+    await Promise.all(textureUrls.map((u) => Assets.load(u).catch(() => null)));
+
     this.ready = true;
     this.drawFloor();
+    this.drawProps();
     this.centerCamera(host);
     this.app.ticker.add((ticker) => this.tick(ticker.deltaMS));
   }
@@ -97,7 +144,7 @@ export class OfficeScene {
         g.closePath();
       }
     }
-    g.fill({ color: zone.accent, alpha: 0.16 });
+    g.fill({ color: zone.accent, alpha: 0.14 });
     g.stroke({ color: zone.accent, alpha: 0.5, width: 1 });
     this.floorLayer.addChild(g);
 
@@ -107,6 +154,63 @@ export class OfficeScene {
     const label = new Text({ text: zone.label, style });
     label.position.set(labelPos.x - TILE_W / 2, labelPos.y - TILE_H);
     this.floorLayer.addChild(label);
+  }
+
+  /** Populate the static props layer. Best-effort — EMPTY textures are skipped. */
+  private drawProps(): void {
+    this.propLayer.removeChildren();
+
+    // Desks at every sales-floor slot.
+    for (const desk of SALES_DESKS) {
+      this.addPropSprite(ENV_TEXTURES.desk, desk.col, desk.row, 0.22, 8);
+    }
+
+    // Desks at every persistent home except maxance-operator (gets the booth instead).
+    for (const [role, home] of Object.entries(PERSISTENT_HOME)) {
+      if (role === 'maxance-operator') {
+        // Maxance booth replaces the desk here.
+        this.addPropSprite(ENV_TEXTURES.maxanceBooth, home.col, home.row, 0.26, 6);
+      } else {
+        this.addPropSprite(ENV_TEXTURES.desk, home.col, home.row, 0.22, 8);
+      }
+    }
+
+    // Door at ENTRANCE grid position (ENTRANCE is already a ScreenPoint, use grid row 11 col 6).
+    // ENTRANCE = isoToScreen(6,11) — place door sprite directly at that screen point.
+    const doorTex = Texture.from(ENV_TEXTURES.door);
+    if (doorTex.label !== Texture.EMPTY.label) {
+      const spr = new Sprite(doorTex);
+      spr.anchor.set(0.5, 1);
+      spr.scale.set(0.24);
+      spr.position.set(ENTRANCE.x, ENTRANCE.y);
+      this.propLayer.addChild(spr);
+    }
+
+    // Plants at 3 tasteful spots.
+    for (const pos of PLANT_POSITIONS) {
+      this.addPropSprite(ENV_TEXTURES.plant, pos.col, pos.row, 0.18, 4);
+    }
+  }
+
+  /**
+   * Helper: create a Sprite prop at the given grid coords.
+   * liftPx = extra upward shift so the sprite sits on the tile surface.
+   */
+  private addPropSprite(
+    url: string,
+    col: number,
+    row: number,
+    scale: number,
+    liftPx: number,
+  ): void {
+    const tex = Texture.from(url);
+    if (tex.label === Texture.EMPTY.label) return;
+    const spr = new Sprite(tex);
+    spr.anchor.set(0.5, 1);
+    spr.scale.set(scale);
+    const p = isoToScreen(col, row);
+    spr.position.set(p.x, p.y - liftPx);
+    this.propLayer.addChild(spr);
   }
 
   /** Reconcile the sprite set to a new state snapshot. */
@@ -152,14 +256,31 @@ export class OfficeScene {
       spriteState: agent.spriteState,
       bobPhase: (agent.key.length % 10) * 0.6,
     });
-    if (PLACEHOLDER_MODE) {
-      const body = new Graphics();
-      body.label = 'body';
-      node.addChild(body);
-      const badge = new Graphics();
-      badge.label = 'badge';
-      node.addChild(badge);
+
+    if (!PLACEHOLDER_MODE) {
+      const tex = Texture.from(textureUrl(agent.role));
+      if (tex.label !== Texture.EMPTY.label) {
+        // Warm art sprite.
+        const spr = new Sprite(tex);
+        spr.label = 'body';
+        spr.anchor.set(0.5, 1);
+        spr.scale.set(0.26); // ~48px tall at 32px tile height ≈ 1.5 tiles
+        node.addChild(spr);
+        const badge = new Graphics();
+        badge.label = 'badge';
+        node.addChild(badge);
+        return node;
+      }
+      // Texture loaded as EMPTY — fall through to placeholder so the scene never breaks.
     }
+
+    // Placeholder (PLACEHOLDER_MODE=true OR texture missing).
+    const body = new Graphics();
+    body.label = 'body';
+    node.addChild(body);
+    const badge = new Graphics();
+    badge.label = 'badge';
+    node.addChild(badge);
     return node;
   }
 
@@ -171,9 +292,25 @@ export class OfficeScene {
   private styleSprite(node: Container, agent: OfficeAgent): void {
     const a = this.animState.get(agent.key);
     if (a) a.spriteState = agent.spriteState;
-    if (!PLACEHOLDER_MODE) return; // textures handled in P4
-    const body = node.getChildByLabel('body') as Graphics | null;
+
     const badge = node.getChildByLabel('badge') as Graphics | null;
+    const bodyChild = node.getChildByLabel('body');
+
+    if (!PLACEHOLDER_MODE && bodyChild instanceof Sprite) {
+      // Warm-art path: only update the badge.
+      if (badge) {
+        badge.clear();
+        if (agent.spriteState === 'blocked') {
+          badge.circle(10, -28, 5).fill({ color: 0xef4444 });
+        } else if (agent.spriteState === 'talking') {
+          badge.circle(11, -30, 4).fill({ color: 0x38bdf8 });
+        }
+      }
+      return;
+    }
+
+    // Placeholder / fallback path.
+    const body = bodyChild as Graphics | null;
     if (body) {
       body.clear();
       body.roundRect(-9, -22, 18, 26, 5).fill({ color: roleColor(agent.role) });

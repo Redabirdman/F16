@@ -1,11 +1,10 @@
 // admin/src/office/assets.ts
-// Maps (role, spriteState) → texture URL. In PLACEHOLDER_MODE the scene draws
+// Maps role → texture URL. In PLACEHOLDER_MODE the scene draws
 // programmatic shapes instead of loading PNGs (P1–P3). P4 flips the flag and
 // drops the warm Nano-Banana art into admin/public/office/.
-import type { SpriteState } from './types';
 
 /** Flip to false in P4 once the warm art lands in public/office/. */
-export const PLACEHOLDER_MODE = true;
+export const PLACEHOLDER_MODE = false;
 
 /** Accent color per role for placeholder sprites + side-panel chips. */
 export const ROLE_COLOR: Record<string, number> = {
@@ -24,10 +23,9 @@ export function roleColor(role: string): number {
   return ROLE_COLOR[role] ?? 0x94a3b8;
 }
 
-/** Public URL for a character texture. Only used when PLACEHOLDER_MODE=false. */
-export function textureUrl(role: string, state: SpriteState): string {
-  const pose = state === 'walking' || state === 'talking' || state === 'working' ? state : 'idle';
-  return `/office/char-${role}-${pose}.png`;
+/** Public URL for a character texture. One PNG per role (no pose variants). */
+export function textureUrl(role: string): string {
+  return `/office/char-${role}.png`;
 }
 
 /** Public URLs for environment textures (P4). */
