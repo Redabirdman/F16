@@ -44,7 +44,8 @@ import { recordWsReconnect } from '../metrics/index.js';
 import { getSession } from '../voice/session-store.js';
 import { insertTurn } from '../db/repositories/conversation-turns.js';
 import { appendAudit } from '../db/repositories/audit-log.js';
-import { ASSURYAL_VOICE_INSTRUCTIONS } from './voice-persona.js';
+import { ASSURYAL_VOICE_INSTRUCTIONS, VOICE_PERSONA_KEY } from './voice-persona.js';
+import { resolvePrompt } from '../prompts/registry.js';
 import { VOICE_TOOLS, VOICE_TRANSPORT_TOOLS, handleVoiceTool } from './voice-tools.js';
 
 const OPENAI_API = 'https://api.openai.com/v1';
@@ -102,7 +103,6 @@ export function buildOpenAiSipRouter(opts: OpenAiSipRouterOptions): Hono | null 
 
   const model = opts.model ?? 'gpt-realtime';
   const voice = opts.voice ?? 'marin';
-  const instructions = opts.instructions ?? ASSURYAL_VOICE_INSTRUCTIONS;
   const app = new Hono();
 
   app.post('/v1/voice/openai-webhook', async (c) => {
@@ -162,6 +162,10 @@ export function buildOpenAiSipRouter(opts: OpenAiSipRouterOptions): Hono | null 
 
     // 4. Accept with the session config (NO audio formats — SIP negotiates the
     //    codec). server_vad keeps barge-in/turn-taking server-side.
+    //    M14.T6: resolve the (admin-editable) persona per-call.
+    const instructions =
+      opts.instructions ??
+      (await resolvePrompt(opts.db, VOICE_PERSONA_KEY, () => ASSURYAL_VOICE_INSTRUCTIONS));
     const sessionConfig = {
       type: 'realtime',
       model,

@@ -15,6 +15,8 @@
  * tool (the model decides tool calls itself, unlike the WhatsApp tool loop).
  */
 
+import { registerPrompt } from '../prompts/registry.js';
+
 export const ASSURYAL_VOICE_INSTRUCTIONS = `Tu es l'assistante téléphonique d'**Assuryal**, courtier français en assurance (site assuryalconseil.fr). Tu es au téléphone avec un prospect.
 
 # Identité & ton
@@ -69,3 +71,15 @@ Quand tu as les 5, appelle l'outil **demander_devis** avec ces champs. Pendant q
 
 # En cas de doute
 Si tu ne sais pas, ou si la situation sort du cadre : reste rassurante et appelle **transferer_conseiller**. Mieux vaut un transfert inutile qu'une mauvaise réponse.`;
+
+/** M14.T6 — the voice persona is editable from the admin (key `voice.persona`). */
+export const VOICE_PERSONA_KEY = 'voice.persona';
+registerPrompt({
+  key: VOICE_PERSONA_KEY,
+  label: 'Voix — persona téléphonique (OpenAI SIP)',
+  agentRole: 'voice',
+  description:
+    'Instructions de session du bot vocal gpt-realtime (identité, ton, produits, qualification, règles, ' +
+    'outils). Distinct du prompt WhatsApp — garde-les cohérents quand produits/garde-fous changent.',
+  getDefault: () => ASSURYAL_VOICE_INSTRUCTIONS,
+});

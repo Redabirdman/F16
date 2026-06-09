@@ -22,6 +22,7 @@
 import { z } from 'zod';
 import type { Database } from '../db/index.js';
 import { callClaude } from '../llm/claude.js';
+import { registerPrompt, resolvePrompt } from '../prompts/registry.js';
 import { logger } from '../logger.js';
 
 /** Severity escalates from low→high. Reserved for future tunable thresholds. */
@@ -170,7 +171,20 @@ const SentryLLMOutputSchema = z.object({
 });
 type SentryLLMOutput = z.infer<typeof SentryLLMOutputSchema>;
 
+// M14.T6 — editable compliance rubric (the LLM sentry's system prompt).
+const COMPLIANCE_SENTRY_KEY = 'compliance.sentry';
+registerPrompt({
+  key: COMPLIANCE_SENTRY_KEY,
+  label: 'Compliance Sentry — rubrique',
+  agentRole: 'compliance',
+  description:
+    'Rubrique de conformité ACPR/éthique jugeant chaque message client (verdict pass/block + raisons, JSON). ' +
+    'Le message à juger est fourni dans le prompt utilisateur. ⚠️ Garde-fou réglementaire — éditer avec prudence.',
+  getDefault: () => SENTRY_SYSTEM,
+});
+
 async function llmSentryCheck(
+  db: Database,
   draft: string,
   ctx: ComplianceCheckInput['ctx'],
   serverHits: ServerRule[],
@@ -201,7 +215,9 @@ async function llmSentryCheck(
   try {
     const out = await callClaude({
       tier: 'haiku',
-      systemFragments: [{ text: SENTRY_SYSTEM, cache: true }],
+      systemFragments: [
+        { text: await resolvePrompt(db, COMPLIANCE_SENTRY_KEY, () => SENTRY_SYSTEM), cache: true },
+      ],
       userPrompt,
       maxTokens: 200,
       structured: false,
@@ -249,12 +265,10 @@ async function llmSentryCheck(
  * Fast-paths to block when a hard server rule matches (no LLM call).
  * Defaults to block on any LLM error (fail-closed).
  *
- * The `_db` arg is reserved for future audit-log persistence (M13+); the
- * sentry today is stateless so we just accept it for API symmetry with the
- * rest of the M6 layer.
+ * `db` is used to resolve the (admin-editable) sentry rubric override (M14.T6).
  */
 export async function checkComplianceFor(
-  _db: Database,
+  db: Database,
   input: ComplianceCheckInput,
   options: { rulesOnly?: boolean } = {},
 ): Promise<ComplianceCheckOutput> {
@@ -284,7 +298,7 @@ export async function checkComplianceFor(
   }
 
   // LLM check — soft hits surface to the LLM as a hint.
-  const llm = await llmSentryCheck(input.draft, input.ctx, softHits);
+  const llm = await llmSentryCheck(db, input.draft, input.ctx, softHits);
   if (!llm.pass) {
     return {
       verdict: 'block',

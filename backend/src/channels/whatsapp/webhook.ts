@@ -343,7 +343,7 @@ async function tryResolveHumanActionFromGroup(
   ) {
     const action = pending.find((a) => a.id === outcome.actionId);
     if (action) {
-      const interp = await interpretHumanReply({ action, message: msg.body });
+      const interp = await interpretHumanReply({ action, message: msg.body, db: opts.db });
       if (interp) {
         chosen = (action.options as HumanActionOption[]).find((o) => o.id === interp.optionId);
         resolverPhone = outcome.resolverPhone;

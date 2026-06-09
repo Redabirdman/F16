@@ -12,6 +12,8 @@
  * broker — keeping the prompt monolingual avoids translation drift.
  */
 import type { SystemFragment } from '../../llm/cache.js';
+import type { Database } from '../../db/index.js';
+import { registerPrompt, resolvePrompt } from '../../prompts/registry.js';
 
 /** Stable cacheable prefix — brand voice + scoring rubric. */
 const ASSURYAL_LEAD_SCORER_BASE = `Tu es un évaluateur de prospects pour Assuryal, un courtier en assurance français spécialisé en :
@@ -60,6 +62,24 @@ Tu DOIS répondre SEULEMENT par le JSON, sans markdown, sans préambule.`;
  */
 export function buildLeadScorerSystemPrompt(): SystemFragment[] {
   return [{ text: ASSURYAL_LEAD_SCORER_BASE, cache: true }];
+}
+
+// M14.T6 — editable Lead Scorer rubric.
+const LEAD_SCORER_KEY = 'lead-scorer.score';
+registerPrompt({
+  key: LEAD_SCORER_KEY,
+  label: 'Lead Scorer — rubrique',
+  agentRole: 'lead-scorer',
+  description:
+    'Voix de marque + rubrique de scoring (0-100), choix du canal et message d’ouverture. ' +
+    'Sortie JSON stricte. Le contexte du lead est ajouté dans le message utilisateur.',
+  getDefault: () => ASSURYAL_LEAD_SCORER_BASE,
+});
+
+/** M14.T6 — override-aware system fragments (use from the worker). */
+export async function buildLeadScorerSystemFragments(db: Database): Promise<SystemFragment[]> {
+  const text = await resolvePrompt(db, LEAD_SCORER_KEY, () => ASSURYAL_LEAD_SCORER_BASE);
+  return [{ text, cache: true }];
 }
 
 /** Input shape for the per-lead user prompt. */

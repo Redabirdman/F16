@@ -25,7 +25,7 @@ import { customers, leads } from '../../db/schema/index.js';
 import { decryptPII } from '../../db/crypto.js';
 import { listTurns } from '../../db/repositories/conversation-turns.js';
 import { callClaudeWithTools } from '../../llm/tool-loop.js';
-import { buildSalesAgentSystemPrompt, type SalesAgentTurnContext } from './prompts/index.js';
+import { buildSalesAgentSystemFragments, type SalesAgentTurnContext } from './prompts/index.js';
 import type { ChannelId, ContactRef } from '../../channels/types.js';
 import { checkComplianceFor } from '../../compliance/index.js';
 import * as humanActions from '../../db/repositories/human-actions.js';
@@ -246,7 +246,7 @@ export async function generateSalesReply(
   const _tLlm0 = Date.now();
   const llmResult = await callClaudeWithTools({
     tier: channel === 'voice' ? 'haiku' : 'sonnet',
-    systemFragments: buildSalesAgentSystemPrompt(ctx),
+    systemFragments: await buildSalesAgentSystemFragments(db, ctx),
     userPrompt: content,
     tools,
     toolContext: {

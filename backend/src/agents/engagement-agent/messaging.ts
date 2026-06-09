@@ -22,8 +22,35 @@
  */
 import { callClaude } from '../../llm/claude.js';
 import { logger } from '../../logger.js';
+import type { Database } from '../../db/index.js';
+import { registerPrompt, resolvePrompt } from '../../prompts/registry.js';
 
 const HAIKU_MAX_TOKENS = 220;
+
+// M14.T6 — editable shared tone/rules for the engagement nudges. The
+// cadence-specific objective (step 1 vs 2) is appended automatically after.
+const ENGAGEMENT_NUDGE_KEY = 'engagement.nudge';
+const ENGAGEMENT_NUDGE_RULES = [
+  'Tu es un conseiller Assuryal (assurance en France). Tu écris en français,',
+  'sur un ton chaleureux, naturel, jamais commercial agressif.',
+  '',
+  'Règles strictes :',
+  "- 1 à 2 phrases maximum. Pas de signature, pas d'emojis.",
+  "- Ne JAMAIS répéter un prix, un devis, ou un détail produit que tu n'as pas en contexte.",
+  '- Ne JAMAIS supposer que le client est encore intéressé : pose la question.',
+  '- Si tu connais le prénom, tutoie sans excès. Sinon, dis simplement « Bonjour ».',
+  "- Pas de phrases du type « je voulais simplement m'assurer », « je me permets de revenir vers vous » — trop corporate.",
+  '- Réponds UNIQUEMENT par le message à envoyer (pas de préambule, pas de guillemets).',
+].join('\n');
+registerPrompt({
+  key: ENGAGEMENT_NUDGE_KEY,
+  label: 'Engagement — relances (ton & règles)',
+  agentRole: 'engagement-agent',
+  description:
+    'Ton + règles partagées des relances 24h/72h. L’objectif spécifique à l’étape (1er vs 2e rappel) ' +
+    'est ajouté automatiquement après ce bloc.',
+  getDefault: () => ENGAGEMENT_NUDGE_RULES,
+});
 
 /** Cadence step the agent has decided to act on. */
 export type EngagementStep = 1 | 2;
@@ -36,6 +63,8 @@ export interface NudgeGenInput {
   productLine: 'scooter' | 'car';
   /** Last few inbound + outbound turns, oldest first, for tone context. */
   recentSnippets: Array<{ direction: 'inbound' | 'outbound'; content: string }>;
+  /** When provided, resolves the admin-editable nudge tone/rules override (M14.T6). */
+  db?: Database;
 }
 
 export interface NudgeGenResult {
@@ -74,7 +103,10 @@ export async function generateNudgeText(input: NudgeGenInput): Promise<NudgeGenR
 }
 
 async function callClaudeForNudge(input: NudgeGenInput): Promise<string> {
-  const systemPrompt = buildSystemPrompt(input.step);
+  const rules = input.db
+    ? await resolvePrompt(input.db, ENGAGEMENT_NUDGE_KEY, () => ENGAGEMENT_NUDGE_RULES)
+    : ENGAGEMENT_NUDGE_RULES;
+  const systemPrompt = rules + buildStepIntent(input.step);
   const userPrompt = buildUserPrompt(input);
   // `callClaude` returns `string | ClaudeCallStructuredOutcome`; without
   // `structured: true` the runtime value is always a string. Narrow with a
@@ -93,35 +125,20 @@ async function callClaudeForNudge(input: NudgeGenInput): Promise<string> {
  * System prompt — tone + rules + the cadence-specific intent. Per step so
  * the LLM hits the right register without having to guess from context.
  */
-function buildSystemPrompt(step: EngagementStep): string {
-  const sharedRules = [
-    'Tu es un conseiller Assuryal (assurance en France). Tu écris en français,',
-    'sur un ton chaleureux, naturel, jamais commercial agressif.',
-    '',
-    'Règles strictes :',
-    "- 1 à 2 phrases maximum. Pas de signature, pas d'emojis.",
-    "- Ne JAMAIS répéter un prix, un devis, ou un détail produit que tu n'as pas en contexte.",
-    '- Ne JAMAIS supposer que le client est encore intéressé : pose la question.',
-    '- Si tu connais le prénom, tutoie sans excès. Sinon, dis simplement « Bonjour ».',
-    "- Pas de phrases du type « je voulais simplement m'assurer », « je me permets de revenir vers vous » — trop corporate.",
-    '- Réponds UNIQUEMENT par le message à envoyer (pas de préambule, pas de guillemets).',
-  ].join('\n');
-
-  const stepIntent =
-    step === 1
-      ? [
-          '',
-          'Objectif : premier rappel doux 24h après la dernière interaction.',
-          'Demande simplement si le client a pu prendre un moment pour réfléchir au devis / à sa demande.',
-        ].join('\n')
-      : [
-          '',
-          'Objectif : deuxième et dernier rappel, plus discret encore (72h après la dernière interaction).',
-          "Propose explicitement de clôturer le dossier si le client n'est plus intéressé,",
-          'sans culpabiliser ni insister.',
-        ].join('\n');
-
-  return sharedRules + stepIntent;
+/** The cadence-specific objective appended after the (editable) shared rules. */
+function buildStepIntent(step: EngagementStep): string {
+  return step === 1
+    ? [
+        '',
+        'Objectif : premier rappel doux 24h après la dernière interaction.',
+        'Demande simplement si le client a pu prendre un moment pour réfléchir au devis / à sa demande.',
+      ].join('\n')
+    : [
+        '',
+        'Objectif : deuxième et dernier rappel, plus discret encore (72h après la dernière interaction).',
+        "Propose explicitement de clôturer le dossier si le client n'est plus intéressé,",
+        'sans culpabiliser ni insister.',
+      ].join('\n');
 }
 
 /**

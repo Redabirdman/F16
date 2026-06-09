@@ -10,10 +10,42 @@
  * output — so the prompt cache hits reliably across turns.
  */
 import type { SystemFragment } from '../../../llm/cache.js';
+import type { Database } from '../../../db/index.js';
+import { registerPrompt, resolvePrompt } from '../../../prompts/registry.js';
 import { BRAND_VOICE_FRAGMENT } from './brand.js';
 import { PRODUCTS_FRAGMENT } from './products.js';
 import { PLAYBOOK_FRAGMENT } from './playbook.js';
 import { GUARDRAILS_FRAGMENT } from './guardrails.js';
+
+/** M14.T6 — the editable stable prefix (brand + products + playbook + guardrails). */
+const SALES_SYSTEM_KEY = 'sales-agent.system';
+function salesStableDefault(): string {
+  return [BRAND_VOICE_FRAGMENT, PRODUCTS_FRAGMENT, PLAYBOOK_FRAGMENT, GUARDRAILS_FRAGMENT]
+    .map((f) => f.text)
+    .join('\n\n');
+}
+registerPrompt({
+  key: SALES_SYSTEM_KEY,
+  label: 'Sales Agent — prompt système',
+  agentRole: 'sales-agent',
+  description:
+    'Voix de marque + produits + playbook + garde-fous du Sales Agent (WhatsApp/email/SMS). ' +
+    'Le contexte de chaque tour (client, lead, historique, canal) est ajouté automatiquement APRÈS.',
+  getDefault: salesStableDefault,
+});
+
+/**
+ * M14.T6 — resolve the editable stable prefix (override-aware) + append the
+ * per-turn context. Use this from the runtime path; `buildSalesAgentSystemPrompt`
+ * stays as the pure/default builder.
+ */
+export async function buildSalesAgentSystemFragments(
+  db: Database,
+  ctx: SalesAgentTurnContext,
+): Promise<SystemFragment[]> {
+  const stable = await resolvePrompt(db, SALES_SYSTEM_KEY, salesStableDefault);
+  return [{ cache: true, text: stable }, buildTurnContextFragment(ctx)];
+}
 
 /** Per-turn context handed to the prompt — DO NOT cache (varies per turn). */
 export interface SalesAgentTurnContext {

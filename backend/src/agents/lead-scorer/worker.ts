@@ -42,7 +42,7 @@ import {
 } from '../../messaging/dispatcher.js';
 import { callClaude } from '../../llm/claude.js';
 import { logger } from '../../logger.js';
-import { buildLeadScorerSystemPrompt, buildLeadScorerUserPrompt } from './prompt.js';
+import { buildLeadScorerSystemFragments, buildLeadScorerUserPrompt } from './prompt.js';
 
 /**
  * Schema for the LLM's JSON output. We VALIDATE before trusting — the
@@ -164,7 +164,7 @@ export async function handleLeadNew(
   try {
     const out = await call({
       tier: 'haiku',
-      systemFragments: buildLeadScorerSystemPrompt(),
+      systemFragments: await buildLeadScorerSystemFragments(opts.db),
       userPrompt,
       maxTokens: 300,
       structured: false,

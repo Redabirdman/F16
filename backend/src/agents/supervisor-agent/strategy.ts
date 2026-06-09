@@ -27,6 +27,7 @@ import type { Database } from '../../db/index.js';
 import { conversationTurns, humanActions, leads, quotes } from '../../db/schema/index.js';
 import { auditLog } from '../../db/schema/index.js';
 import { callClaude } from '../../llm/claude.js';
+import { registerPrompt, resolvePrompt } from '../../prompts/registry.js';
 import { createAction } from '../../db/repositories/human-actions.js';
 import { appendAudit } from '../../db/repositories/audit-log.js';
 import { logger } from '../../logger.js';
@@ -85,7 +86,7 @@ export function startStrategyReview(opts: StrategyReviewOptions): StrategyReview
   const tick = async (): Promise<StrategyReviewResult> => {
     try {
       const digest = await buildDigest(opts.db);
-      const proposals = await proposeConfigChanges(digest);
+      const proposals = await proposeConfigChanges(digest, opts.db);
       for (const p of proposals) {
         await emitProposalAsHumanAction(opts.db, p, digest);
       }
@@ -258,8 +259,38 @@ export async function buildDigest(db: Database): Promise<StrategyDigest> {
  *   - zero-activity window (the digest carries nothing actionable) —
  *     we short-circuit to skip the Opus call entirely.
  */
+// M14.T6 — editable strategy-review instruction.
+const SUPERVISOR_STRATEGY_KEY = 'supervisor.strategy';
+const SUPERVISOR_STRATEGY_SYSTEM = [
+  "Tu es le superviseur stratégique de l'organisation F16 (Assuryal).",
+  'À partir du résumé 24h des KPIs et des observations, propose 0 à 5',
+  'ajustements de configuration. Si tout va bien, propose une liste vide.',
+  '',
+  'Catégories de propositions :',
+  "- prompt_tweak  : ajuster le prompt système d'un agent",
+  "- model_swap    : changer le tier de modèle d'un agent",
+  "- kill_agent    : arrêter une instance qui boucle ou s'égare",
+  "- boost_priority: hausser la priorité d'un agent saturé",
+  '- other         : autre suggestion (décrire dans rationale)',
+  '',
+  'Réponds STRICTEMENT en JSON, sans markdown, sans préambule :',
+  '{"proposals": [{"kind": "...", "target": "agent ou autre", "rationale": "..."}]}',
+  '',
+  'Sois conservateur — propose une action seulement si les données la justifient.',
+].join('\n');
+registerPrompt({
+  key: SUPERVISOR_STRATEGY_KEY,
+  label: 'Superviseur — revue stratégique',
+  agentRole: 'supervisor-agent',
+  description:
+    'Instruction de la revue stratégique quotidienne (Opus) qui propose 0-5 ajustements de config à partir ' +
+    'du digest 24h. Le digest KPIs est fourni dans le prompt utilisateur.',
+  getDefault: () => SUPERVISOR_STRATEGY_SYSTEM,
+});
+
 export async function proposeConfigChanges(
   digest: StrategyDigest,
+  db?: Database,
 ): Promise<z.infer<typeof ProposalSchema>[]> {
   // Skip entirely on zero-activity windows — saves the Opus token spend.
   if (digest.leads.total === 0 && digest.humanActions.created === 0) {
@@ -267,23 +298,9 @@ export async function proposeConfigChanges(
     return [];
   }
 
-  const systemPrompt = [
-    "Tu es le superviseur stratégique de l'organisation F16 (Assuryal).",
-    'À partir du résumé 24h des KPIs et des observations, propose 0 à 5',
-    'ajustements de configuration. Si tout va bien, propose une liste vide.',
-    '',
-    'Catégories de propositions :',
-    "- prompt_tweak  : ajuster le prompt système d'un agent",
-    "- model_swap    : changer le tier de modèle d'un agent",
-    "- kill_agent    : arrêter une instance qui boucle ou s'égare",
-    "- boost_priority: hausser la priorité d'un agent saturé",
-    '- other         : autre suggestion (décrire dans rationale)',
-    '',
-    'Réponds STRICTEMENT en JSON, sans markdown, sans préambule :',
-    '{"proposals": [{"kind": "...", "target": "agent ou autre", "rationale": "..."}]}',
-    '',
-    'Sois conservateur — propose une action seulement si les données la justifient.',
-  ].join('\n');
+  const systemPrompt = db
+    ? await resolvePrompt(db, SUPERVISOR_STRATEGY_KEY, () => SUPERVISOR_STRATEGY_SYSTEM)
+    : SUPERVISOR_STRATEGY_SYSTEM;
 
   const userPrompt = JSON.stringify(digest, null, 2);
 

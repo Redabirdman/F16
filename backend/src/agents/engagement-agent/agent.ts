@@ -228,6 +228,7 @@ export class EngagementAgent extends BaseAgent {
       firstName,
       productLine: (lead.productLine ?? 'car') as 'scooter' | 'car',
       recentSnippets,
+      db: this.db,
     };
     const nudge = await generateNudgeText(nudgeInput);
 

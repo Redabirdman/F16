@@ -11,6 +11,7 @@
 import { desc, eq, isNull, or } from 'drizzle-orm';
 import type { Database } from '../../db/index.js';
 import { callClaude } from '../../llm/claude.js';
+import { registerPrompt, resolvePrompt } from '../../prompts/registry.js';
 import { logger } from '../../logger.js';
 import { creativeLearnings } from '../../db/schema/index.js';
 import type { CreativeAngle } from './brand.js';
@@ -36,21 +37,38 @@ function parseJsonLoose(text: string): Record<string, unknown> | null {
   }
 }
 
+// M14.T6 — editable creative-director distillation instruction.
+const CREATIVE_DISTILL_KEY = 'creative.learnings-distill';
+const CREATIVE_DISTILL_SYSTEM =
+  "Tu es le directeur créatif d'Assuryal (assurance pour trottinettes électriques en France). " +
+  "À partir d'un retour de Ridaa sur un visuel publicitaire, formule UNE consigne créative claire, " +
+  "précise et RÉUTILISABLE (en français) que le générateur d'images devra TOUJOURS respecter ensuite. " +
+  'Décide si la consigne est GLOBALE (vaut pour tous les visuels) ou spécifique à cet angle. ' +
+  'Exemple — feedback "le scooter a une selle, nous on assure des trottinettes où on se tient debout" ' +
+  '→ consigne globale: "Le véhicule doit être une trottinette électrique sur laquelle le rider se tient ' +
+  'DEBOUT (plateau plat, guidon vertical, deux petites roues), JAMAIS un scooter/cyclomoteur avec une ' +
+  'selle ou sur lequel on s\'assoit." Réponds UNIQUEMENT en JSON.';
+registerPrompt({
+  key: CREATIVE_DISTILL_KEY,
+  label: 'Créatif — distillation des retours',
+  agentRole: 'creative-agent',
+  description:
+    'Instruction du directeur créatif qui transforme un retour libre de Ridaa en UNE consigne créative ' +
+    'réutilisable (JSON {guidance, scope}). Le feedback + l’angle sont fournis dans le prompt utilisateur.',
+  getDefault: () => CREATIVE_DISTILL_SYSTEM,
+});
+
 /** LLM-distil a piece of feedback into one reusable creative constraint. */
 export async function distillFeedbackToGuidance(args: {
   feedback: string;
   angle: CreativeAngle;
   callImpl?: typeof callClaude;
+  /** When provided, resolves the admin-editable distillation prompt (M14.T6). */
+  db?: Database;
 }): Promise<DistilledLearning | null> {
-  const systemPrompt =
-    "Tu es le directeur créatif d'Assuryal (assurance pour trottinettes électriques en France). " +
-    "À partir d'un retour de Ridaa sur un visuel publicitaire, formule UNE consigne créative claire, " +
-    "précise et RÉUTILISABLE (en français) que le générateur d'images devra TOUJOURS respecter ensuite. " +
-    'Décide si la consigne est GLOBALE (vaut pour tous les visuels) ou spécifique à cet angle. ' +
-    'Exemple — feedback "le scooter a une selle, nous on assure des trottinettes où on se tient debout" ' +
-    '→ consigne globale: "Le véhicule doit être une trottinette électrique sur laquelle le rider se tient ' +
-    'DEBOUT (plateau plat, guidon vertical, deux petites roues), JAMAIS un scooter/cyclomoteur avec une ' +
-    'selle ou sur lequel on s\'assoit." Réponds UNIQUEMENT en JSON.';
+  const systemPrompt = args.db
+    ? await resolvePrompt(args.db, CREATIVE_DISTILL_KEY, () => CREATIVE_DISTILL_SYSTEM)
+    : CREATIVE_DISTILL_SYSTEM;
   const userPrompt =
     `ANGLE DU VISUEL: ${args.angle}\nFEEDBACK DE RIDAA: "${args.feedback}"\n\n` +
     'JSON strict: {"guidance":"<consigne claire et réutilisable>","scope":"global"|"angle"}';
@@ -118,7 +136,11 @@ export async function learnFromFeedback(
   db: Database,
   args: { feedback: string; angle: CreativeAngle; createdByAgent?: string },
 ): Promise<DistilledLearning | null> {
-  const distilled = await distillFeedbackToGuidance({ feedback: args.feedback, angle: args.angle });
+  const distilled = await distillFeedbackToGuidance({
+    feedback: args.feedback,
+    angle: args.angle,
+    db,
+  });
   if (!distilled) return null;
   await storeLearning(db, {
     guidance: distilled.guidance,
