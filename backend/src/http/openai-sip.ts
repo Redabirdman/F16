@@ -174,7 +174,14 @@ export function buildOpenAiSipRouter(opts: OpenAiSipRouterOptions): Hono | null 
       audio: {
         output: { voice },
         input: {
-          turn_detection: { type: 'server_vad' },
+          // Wait ~1s of silence before responding so she doesn't talk over the
+          // caller (default 500ms was cutting people off — Achraf feedback).
+          turn_detection: {
+            type: 'server_vad',
+            threshold: 0.5,
+            prefix_padding_ms: 300,
+            silence_duration_ms: 1000,
+          },
           transcription: { model: 'whisper-1', language: 'fr' },
         },
       },
@@ -254,16 +261,10 @@ function openControlSocket(ctx: CallContext, apiKey: string, db: Database, greet
       return;
     }
     logger.info({ callId }, 'openai-sip: control WS open → greeting');
-    ws.send(
-      JSON.stringify({
-        type: 'response.create',
-        response: {
-          input: [],
-          instructions:
-            "Salue chaleureusement, présente-toi comme l'assistante d'Assuryal, glisse en une demi-phrase que l'appel peut être enregistré pour la qualité du service, puis demande en quoi tu peux aider — le tout en une à deux phrases courtes.",
-        },
-      }),
-    );
+    // Trigger the model's FIRST turn with NO per-response instructions so the
+    // opening comes solely from the session persona (avoids a duplicate /
+    // conflicting greeting — the persona owns the exact opening line).
+    ws.send(JSON.stringify({ type: 'response.create', response: { input: [] } }));
   });
 
   ws.on('message', (raw: Buffer) => {
