@@ -31,7 +31,7 @@ if (-not $pwsh) { $pwsh = (Get-Command powershell).Source }
 $vbs = @"
 ' F16 voice stack — auto-start at logon (hidden). Installed by register-startup-task.ps1.
 Set s = CreateObject("WScript.Shell")
-s.Run "$pwsh -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ""$start""", 0, False
+s.Run """$pwsh"" -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ""$start""", 0, False
 "@
 Set-Content -Path $dest -Value $vbs -Encoding ASCII
 

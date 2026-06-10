@@ -37,8 +37,15 @@ if (Test-Port 3001) {
   Write-Host '[2/3] Starting backend on :3001…'
   $env:ANTHROPIC_API_KEY = $null   # boot gotcha: shell key shadows the .env one
   $env:PORT = '3001'
-  Start-Process -WindowStyle Hidden -WorkingDirectory $backend `
-    -FilePath 'npx.exe' -ArgumentList 'tsx','src/index.ts'
+  # npm ships npx as a .cmd shim on Windows — 'npx.exe' does not exist, so
+  # resolve the real shim (reboot gotcha found 2026-06-10).
+  $npx = (Get-Command npx.cmd -ErrorAction SilentlyContinue) ?? (Get-Command npx -ErrorAction SilentlyContinue)
+  if (-not $npx) {
+    Write-Host '  ⚠️  npx not found on PATH — backend NOT started'
+  } else {
+    Start-Process -WindowStyle Hidden -WorkingDirectory $backend `
+      -FilePath $npx.Source -ArgumentList 'tsx','src/index.ts'
+  }
 }
 
 # 3. cloudflared NAMED tunnel (stable hostname). Token from backend\.env.
