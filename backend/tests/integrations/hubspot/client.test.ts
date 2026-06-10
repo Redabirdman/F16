@@ -236,12 +236,12 @@ describe('HubSpotClient.createDeal', () => {
 // 4. associateContactDeal — PUT default association
 // ---------------------------------------------------------------------------
 describe('HubSpotClient.associateContactDeal', () => {
-  it('PUTs /crm/v3/objects/contacts/<id>/associations/default/deals/<id>', async () => {
+  it('PUTs /crm/v4/objects/contacts/<id>/associations/default/deals/<id>', async () => {
     await buildClient().associateContactDeal('111', '222');
     expect(seenRequests).toHaveLength(1);
     expect(seenRequests[0]!.method).toBe('PUT');
     expect(seenRequests[0]!.url).toBe(
-      '/crm/v3/objects/contacts/111/associations/default/deals/222',
+      '/crm/v4/objects/contacts/111/associations/default/deals/222',
     );
     expect(seenRequests[0]!.headers['authorization']).toBe('Bearer pat-test-token-DO-NOT-USE');
   });

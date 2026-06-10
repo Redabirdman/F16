@@ -129,6 +129,13 @@ export async function ensureSchema(client: HubSpotClient): Promise<ResolvedSchem
     if (match) stageIdByKey[s.key] = match.id;
   }
 
+  // Surface a partial/failed label match — an unresolved stage key means deals
+  // would be created with no stage. Visible, not silent.
+  const missing = STAGES.filter((s) => !stageIdByKey[s.key]).map((s) => s.key);
+  if (missing.length > 0) {
+    logger.warn({ pipelineId, missing }, 'hubspot: some pipeline stages did not resolve by label');
+  }
+
   cache = { pipelineId, stageIdByKey };
   logger.info(
     { pipelineId, stageCount: Object.keys(stageIdByKey).length },

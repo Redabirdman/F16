@@ -35,8 +35,8 @@ describe('ensureSchema', () => {
     __resetSchemaCacheForTests();
     const client = fakeClient([]);
     const res = await ensureSchema(client as never);
-    // contact props (4) + deal props (6) = at least 10 ensureProperty calls
-    expect(client.ensureProperty.mock.calls.length).toBeGreaterThanOrEqual(10);
+    // contact props (4) + deal props (7) = at least 11 ensureProperty calls
+    expect(client.ensureProperty.mock.calls.length).toBeGreaterThanOrEqual(11);
     expect(client.createPipeline).toHaveBeenCalledOnce();
     expect(res.pipelineId).toBe('pipe-new');
     expect(res.stageIdByKey.nouveau).toBe('s-nouveau');
