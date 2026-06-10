@@ -103,23 +103,35 @@ export async function ensureSchema(client: HubSpotClient): Promise<ResolvedSchem
     await client.ensureProperty('deals', { ...p, groupName: 'dealinformation' });
   }
 
-  // 3. Pipeline — reuse the Assuryal pipeline if it already exists, else create.
+  // 3. Pipeline — HubSpot free tier allows only ONE deal pipeline, so we ADOPT
+  //    the single existing pipeline: rename it to 'Assuryal' + overwrite its
+  //    stages when needed. Falls back to create only when no pipeline exists.
   const pipelines = await client.listPipelines();
-  const existing = pipelines.find((p) => p.label === ASSURYAL_PIPELINE_LABEL);
+  const target = pipelines.find((p) => p.label === ASSURYAL_PIPELINE_LABEL) ?? pipelines[0];
 
   let pipelineId: string;
   let stages: Array<{ id: string; label: string }>;
+  const stageDefs = STAGES.map((s, i) => ({
+    label: s.label,
+    displayOrder: i,
+    metadata: s.metadata,
+  }));
 
-  if (existing) {
-    pipelineId = existing.id;
-    stages = existing.stages;
-  } else {
-    const created = await client.createPipeline(
-      ASSURYAL_PIPELINE_LABEL,
-      STAGES.map((s, i) => ({ label: s.label, displayOrder: i, metadata: s.metadata })),
-    );
+  if (!target) {
+    // No pipeline at all (unexpected) — create one.
+    const created = await client.createPipeline(ASSURYAL_PIPELINE_LABEL, stageDefs);
     pipelineId = created.id;
     stages = created.stages;
+  } else {
+    const hasAllStages = STAGES.every((s) => target.stages.some((hs) => hs.label === s.label));
+    if (target.label !== ASSURYAL_PIPELINE_LABEL || !hasAllStages) {
+      const updated = await client.updatePipeline(target.id, ASSURYAL_PIPELINE_LABEL, stageDefs);
+      pipelineId = updated.id;
+      stages = updated.stages;
+    } else {
+      pipelineId = target.id;
+      stages = target.stages;
+    }
   }
 
   // 4. Resolve stage IDs by our stable key → label mapping.

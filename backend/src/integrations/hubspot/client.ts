@@ -366,6 +366,24 @@ export class HubSpotClient {
     return { id: json.id, stages: json.stages ?? [] };
   }
 
+  /** Replace a deal pipeline's label + stages (free tier: we adopt the single existing pipeline). */
+  async updatePipeline(
+    pipelineId: string,
+    label: string,
+    stages: Array<{ label: string; displayOrder: number; metadata: Record<string, string> }>,
+  ): Promise<{ id: string; stages: Array<{ id: string; label: string }> }> {
+    const json = await this.request<{
+      id?: string;
+      stages?: Array<{ id: string; label: string }>;
+    }>('PUT', `/crm/v3/pipelines/deals/${encodeURIComponent(pipelineId)}`, {
+      label,
+      displayOrder: 0,
+      stages,
+    });
+    if (!json.id) throw new Error('HubSpot updatePipeline: no id in response');
+    return { id: json.id, stages: json.stages ?? [] };
+  }
+
   /** PATCH deal properties. */
   async updateDeal(dealId: string, properties: Record<string, string | number>): Promise<void> {
     await this.request<unknown>('PATCH', `/crm/v3/objects/deals/${encodeURIComponent(dealId)}`, {
