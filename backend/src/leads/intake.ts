@@ -25,6 +25,7 @@ import { leads } from '../db/schema/index.js';
 import { logger } from '../logger.js';
 import { sendMessage } from '../messaging/dispatcher.js';
 import { insertCustomer, getCustomerByPhone } from '../db/repositories/customers.js';
+import { emitHubSpotSync } from '../db/repositories/leads.js';
 
 /**
  * Inbound lead shape — the WIRE format we accept from any source (website
@@ -259,31 +260,15 @@ export async function ingestLead(db: Database, payload: LeadIntakePayload): Prom
     messageIds.push(id);
   }
 
-  // 4b. Route the lead to HubSpot via its own queue + dedicated intent. Gated
-  //     on HUBSPOT_API_KEY (no-op when the integration is off). Wrapped so a
-  //     HubSpot routing hiccup never breaks lead intake — the lead is already
-  //     persisted and LEAD.NEW dispatched.
-  if (process.env.HUBSPOT_API_KEY) {
-    try {
-      const id = await sendMessage(
-        { db },
-        {
-          fromRole: 'channel.intake',
-          toRole: 'hubspot-sync',
-          intent: 'LEAD.SYNC_HUBSPOT',
-          payload: { leadId: insertedLead.id },
-          correlationId: insertedLead.id,
-          priority: 4,
-        },
-      );
-      messageIds.push(id);
-    } catch (err) {
-      logger.warn(
-        { leadId: insertedLead.id, err: err instanceof Error ? err.message : 'unknown' },
-        'lead intake: failed to enqueue HubSpot sync (non-fatal)',
-      );
-    }
-  }
+  // 4b. Route the lead to HubSpot via the centralized emitter (dedicated
+  //     `hubspot` queue + LEAD.SYNC_HUBSPOT intent). Gated on HUBSPOT_API_KEY
+  //     and never throws — a HubSpot routing hiccup can't break lead intake;
+  //     the lead is already persisted and LEAD.NEW dispatched.
+  const hubspotMessageId = await emitHubSpotSync(db, insertedLead.id, {
+    fromRole: 'channel.intake',
+    priority: 4,
+  });
+  if (hubspotMessageId) messageIds.push(hubspotMessageId);
 
   // Log without payload — `formAnswers` may contain plaintext PII the
   // upstream form happened to include (DOB, address, etc.).

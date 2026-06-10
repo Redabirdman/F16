@@ -5,15 +5,22 @@
  *   - default status / nullable score on insert
  *   - state transitions through the lifecycle enum
  *   - common query shapes (by status, by customer, by created_at range)
+ *
+ * The `setLeadStatus (live)` block below additionally needs TEST_REDIS_URL:
+ * the repository helper emits a LEAD.SYNC_HUBSPOT via the dispatcher, which
+ * enqueues a BullMQ job alongside the agent_messages row.
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
-import { randomBytes } from 'node:crypto';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { sql, and, eq, gte, lte, desc } from 'drizzle-orm';
-import { createDb } from '../../src/db/index.js';
-import { leads } from '../../src/db/schema/index.js';
+import { createDb, type Database } from '../../src/db/index.js';
+import { agentMessages, leads } from '../../src/db/schema/index.js';
 import { insertCustomer } from '../../src/db/repositories/customers.js';
+import { setLeadStatus } from '../../src/db/repositories/leads.js';
+import { __resetForTests, shutdownQueues } from '../../src/queue/index.js';
 
 const liveUrl = process.env.TEST_DATABASE_URL;
+const redisUrl = process.env.TEST_REDIS_URL;
 const d = describe.skipIf(!liveUrl);
 
 let savedKey: string | undefined;
@@ -126,5 +133,105 @@ d('leads (live)', () => {
       );
     expect(range).toHaveLength(1);
     expect(range[0]!.score).toBe(92);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// setLeadStatus / emitHubSpotSync — the single chokepoint for lead status
+// writes (HubSpot rich mirror, Phase 2). Needs Redis too: the dispatcher
+// enqueues a BullMQ job for every agent_messages row.
+// ---------------------------------------------------------------------------
+const dd = describe.skipIf(!liveUrl || !redisUrl);
+
+dd('setLeadStatus (live)', () => {
+  let db: Database;
+  let savedRedisUrl: string | undefined;
+  let savedPrefix: string | undefined;
+  let savedHubspotKey: string | undefined;
+
+  beforeAll(() => {
+    savedRedisUrl = process.env.REDIS_URL;
+    savedPrefix = process.env.BULLMQ_PREFIX;
+    // Force HUBSPOT_API_KEY ON so setLeadStatus deterministically emits the
+    // LEAD.SYNC_HUBSPOT row regardless of whether .env has the key.
+    savedHubspotKey = process.env.HUBSPOT_API_KEY;
+    process.env.HUBSPOT_API_KEY = 'pat-test';
+  });
+
+  afterAll(() => {
+    if (savedRedisUrl === undefined) delete process.env.REDIS_URL;
+    else process.env.REDIS_URL = savedRedisUrl;
+    if (savedPrefix === undefined) delete process.env.BULLMQ_PREFIX;
+    else process.env.BULLMQ_PREFIX = savedPrefix;
+    if (savedHubspotKey === undefined) delete process.env.HUBSPOT_API_KEY;
+    else process.env.HUBSPOT_API_KEY = savedHubspotKey;
+  });
+
+  beforeEach(async () => {
+    process.env.REDIS_URL = redisUrl!;
+    process.env.BULLMQ_PREFIX = `f16-test-leadsrepo-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+    __resetForTests();
+
+    db = createDb(liveUrl!);
+    await db.execute(sql`TRUNCATE TABLE agent_messages RESTART IDENTITY CASCADE`);
+    await db.execute(sql`TRUNCATE TABLE leads RESTART IDENTITY CASCADE`);
+  });
+
+  afterEach(async () => {
+    await shutdownQueues().catch(() => {});
+    __resetForTests();
+  });
+
+  it('updates status and enqueues a hubspot sync', async () => {
+    const [row] = await db
+      .insert(leads)
+      .values({ source: 'website', productLine: 'scooter' })
+      .returning();
+    const leadId = row!.id;
+    expect(row!.status).toBe('new');
+
+    const updated = await setLeadStatus(db, leadId, 'qualifying');
+    expect(updated.status).toBe('qualifying');
+
+    // The DB row really changed (not just the returned object).
+    const [fresh] = await db.select().from(leads).where(eq(leads.id, leadId));
+    expect(fresh!.status).toBe('qualifying');
+    expect(fresh!.updatedAt.getTime()).toBeGreaterThanOrEqual(row!.updatedAt.getTime());
+
+    // Exactly one LEAD.SYNC_HUBSPOT for hubspot-sync, correlated to the lead.
+    const msgs = await db
+      .select()
+      .from(agentMessages)
+      .where(eq(agentMessages.correlationId, leadId));
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0]!.intent).toBe('LEAD.SYNC_HUBSPOT');
+    expect(msgs[0]!.toRole).toBe('hubspot-sync');
+    expect((msgs[0]!.payload as Record<string, unknown>)['leadId']).toBe(leadId);
+  });
+
+  it('still updates status (and emits nothing) when HUBSPOT_API_KEY is unset', async () => {
+    delete process.env.HUBSPOT_API_KEY;
+    try {
+      const [row] = await db
+        .insert(leads)
+        .values({ source: 'meta', productLine: 'car' })
+        .returning();
+      const leadId = row!.id;
+
+      const updated = await setLeadStatus(db, leadId, 'scored');
+      expect(updated.status).toBe('scored');
+
+      const msgs = await db
+        .select()
+        .from(agentMessages)
+        .where(eq(agentMessages.correlationId, leadId));
+      expect(msgs).toHaveLength(0);
+    } finally {
+      process.env.HUBSPOT_API_KEY = 'pat-test';
+    }
+  });
+
+  it('throws on an unknown lead id', async () => {
+    await expect(setLeadStatus(db, randomUUID(), 'quoting')).rejects.toThrow(/no lead/);
   });
 });
