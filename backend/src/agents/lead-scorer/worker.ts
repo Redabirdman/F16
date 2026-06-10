@@ -43,6 +43,7 @@ import {
 import { callClaude } from '../../llm/claude.js';
 import { logger } from '../../logger.js';
 import { buildLeadScorerSystemFragments, buildLeadScorerUserPrompt } from './prompt.js';
+import { setLeadStatus } from '../../db/repositories/leads.js';
 
 /**
  * Schema for the LLM's JSON output. We VALIDATE before trusting — the
@@ -200,15 +201,13 @@ async function persistAndEmit(
   channelOverride?: 'whatsapp' | 'voice' | 'email' | 'sms',
 ): Promise<MessageHandlerResult> {
   const channel = channelOverride ?? score.channel;
+  // Persist the score + timestamp first; then flip status via setLeadStatus
+  // so the CRM mirror fires on every scored transition (HubSpot Phase 2).
   await db
     .update(leads)
-    .set({
-      score: score.score,
-      scoredAt: new Date(),
-      status: 'scored',
-      updatedAt: new Date(),
-    })
+    .set({ score: score.score, scoredAt: new Date(), updatedAt: new Date() })
     .where(eq(leads.id, leadId));
+  await setLeadStatus(db, leadId, 'scored');
 
   // Fan-out (M5.T4): emit LEAD.SCORED twice on the same queue, addressed to
   // two different roles:

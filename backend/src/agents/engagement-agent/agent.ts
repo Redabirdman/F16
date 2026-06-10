@@ -44,6 +44,7 @@ import { appendAudit } from '../../db/repositories/audit-log.js';
 import { isQuietNow } from './quiet-hours.js';
 import { generateNudgeText, type EngagementStep, type NudgeGenInput } from './messaging.js';
 import { ELIGIBLE_LEAD_STATUSES } from './candidate.js';
+import { setLeadStatus } from '../../db/repositories/leads.js';
 
 /** Hours between last activity and each cadence step trigger. */
 const THRESHOLD_HOURS: Record<0 | 1 | 2, number> = {
@@ -285,7 +286,7 @@ export class EngagementAgent extends BaseAgent {
     lead: typeof leads.$inferSelect;
     now: Date;
   }): Promise<MessageHandlerResult> {
-    const { lead, now } = args;
+    const { lead } = args;
     // Use the customer's name in the operator message — never a raw lead UUID
     // fragment ("Lead b66fc9ef" meant nothing to Ridaa). Best-effort: fall back
     // to a short reference if the customer/name can't be resolved.
@@ -321,10 +322,8 @@ export class EngagementAgent extends BaseAgent {
       ],
     });
 
-    await this.db
-      .update(leads)
-      .set({ status: 'dormant', updatedAt: now })
-      .where(eq(leads.id, lead.id));
+    // Routes through setLeadStatus so the CRM mirror fires (HubSpot Phase 2).
+    await setLeadStatus(this.db, lead.id, 'dormant');
 
     // M13 — capture the status transition as a discrete audit event.
     // human_action.create already audits the escalation row above; this

@@ -28,7 +28,6 @@
  *   - M11   — Customer Engagement Agent schedules a 24h-no-reply follow-up
  *             from the welcome event-fact recorded by `handleLeadScored`.
  */
-import { eq } from 'drizzle-orm';
 import { BaseAgent } from '../base.js';
 import type { AgentMessageEnvelope, MessageHandlerResult } from '../../messaging/dispatcher.js';
 import { logger } from '../../logger.js';
@@ -45,6 +44,7 @@ import { recordCustomerFact } from '../../memory/index.js';
 // M10 — the customer-message reply pipeline (resolution → LLM → compliance)
 // lives in `reply-core.ts` so the voice route and this agent share one brain.
 import { generateSalesReply, resolveSalesContext } from './reply-core.js';
+import { setLeadStatus } from '../../db/repositories/leads.js';
 
 const MAX_HISTORY_TURNS = 10;
 
@@ -193,11 +193,9 @@ export class SalesAgent extends BaseAgent {
       correlationId: lead.id,
     });
 
-    // Status transition: scored → qualifying. Atomic single-statement update.
-    await this.db
-      .update(leads)
-      .set({ status: 'qualifying', updatedAt: new Date() })
-      .where(eq(leads.id, lead.id));
+    // Status transition: scored → qualifying. Routes through setLeadStatus so
+    // the CRM mirror fires on every transition (HubSpot Phase 2).
+    await setLeadStatus(this.db, lead.id, 'qualifying');
 
     // M13 — audit the welcome transition. Best-effort: a failed audit
     // shouldn't undo the welcome (already sent + status flipped).
