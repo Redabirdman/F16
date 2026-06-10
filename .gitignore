@@ -54,3 +54,7 @@ stagehand/data/
 # office art intermediates (keep only final keyed PNGs)
 admin/public/office/_raw/
 admin/public/office/_qa-*.png
+
+# hubspot/voice test scratch
+backend/.tmp-*
+backend/scripts/.tmp-*

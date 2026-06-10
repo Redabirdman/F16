@@ -202,14 +202,16 @@ export class HubSpotClient {
   }
 
   /**
-   * Associate a contact with a deal using HubSpot V3's default association.
-   * HubSpot V3 uses PUT for "default" (their term for the system-managed
-   * association type between two standard object types).
+   * Associate a contact with a deal using the HubSpot **V4** default
+   * association endpoint. The old V3 `/associations/default/deals/{id}` path
+   * was retired and now 400s with "Unable to infer object type from: default";
+   * V4 `/crm/v4/objects/{from}/{id}/associations/default/{to}/{id}` applies the
+   * system default (primary) association label between the two objects.
    */
   async associateContactDeal(contactId: string, dealId: string): Promise<void> {
     await this.request<unknown>(
       'PUT',
-      `/crm/v3/objects/contacts/${encodeURIComponent(contactId)}` +
+      `/crm/v4/objects/contacts/${encodeURIComponent(contactId)}` +
         `/associations/default/deals/${encodeURIComponent(dealId)}`,
       null,
     );
