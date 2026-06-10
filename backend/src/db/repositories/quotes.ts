@@ -23,6 +23,7 @@ import { sql } from 'drizzle-orm';
 import type { Database } from '../index.js';
 import { quotes, maxanceActions } from '../schema/index.js';
 import type { Quote, MaxanceAction } from '../schema/quotes.js';
+import { emitHubSpotSync } from './leads.js';
 
 /** Input for `insertQuote` — only the fields a freshly-requested quote needs. */
 export interface InsertQuoteInput {
@@ -86,6 +87,14 @@ export async function markQuoteReady(
     .returning();
 
   if (!row) throw new Error(`markQuoteReady: no quote with id=${quoteId}`);
+
+  // Mirror the updated price + devis number to HubSpot. The reconciler will
+  // pick up the new amount / f16_devis_number from the latest quote row.
+  // Non-blocking — a HubSpot hiccup must not break the quote flow.
+  if (row.leadId) {
+    await emitHubSpotSync(db, row.leadId);
+  }
+
   return row;
 }
 

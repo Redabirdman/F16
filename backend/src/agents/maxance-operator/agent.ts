@@ -52,6 +52,7 @@ import {
   getDefaultMaxanceDriverClient,
   readErrorCode,
 } from './driver-client.js';
+import { emitHubSpotSync } from '../../db/repositories/leads.js';
 
 /** Recognised MAXANCE_DRIVER values. Anything else → driver disabled. */
 type MaxanceDriver = 'chrome_extension' | 'stagehand_legacy_DO_NOT_USE_IN_PROD';
@@ -246,6 +247,11 @@ export class MaxanceOperatorAgent extends BaseAgent {
         correlationId: payload.quoteId,
       },
     );
+
+    // Mirror devisNumber + price to HubSpot — the reconciler picks up the
+    // latest quote row (now containing the devis number) to fill the deal's
+    // amount / f16_devis_number. Non-blocking: HubSpot hiccup ≠ quote failure.
+    await emitHubSpotSync(this.db, payload.leadId);
 
     logger.info(
       {
