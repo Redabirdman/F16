@@ -18,7 +18,7 @@
  *   statement over a SERIALIZABLE transaction keeps the common path one
  *   round-trip.
  */
-import { eq, asc } from 'drizzle-orm';
+import { eq, asc, desc } from 'drizzle-orm';
 import { sql } from 'drizzle-orm';
 import type { Database } from '../index.js';
 import { quotes, maxanceActions } from '../schema/index.js';
@@ -175,4 +175,18 @@ export async function getQuoteWithActions(
     .orderBy(asc(maxanceActions.stepIndex));
 
   return { quote, actions };
+}
+
+/** Newest quote for a lead, or null. Used by the HubSpot mirror for amount + devis number. */
+export async function getLatestQuoteForLead(
+  db: Database,
+  leadId: string,
+): Promise<typeof quotes.$inferSelect | null> {
+  const [row] = await db
+    .select()
+    .from(quotes)
+    .where(eq(quotes.leadId, leadId))
+    .orderBy(desc(quotes.requestedAt))
+    .limit(1);
+  return row ?? null;
 }
