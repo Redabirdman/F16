@@ -407,6 +407,44 @@ async function tryResolveHumanActionFromGroup(
     'waha webhook: human-action resolved via WhatsApp',
   );
 
+  // Phase 3: emit HubSpot note for human-action resolve via WA group (gated,
+  // best-effort). Mirrors the admin resolve path (src/admin/human-actions.ts)
+  // but with source:'whatsapp'. Resolve customerId via the action's
+  // correlationId (often a leadId) → lead → customerId. emitHubSpotActivity
+  // self-gates (no-op unless F16_HUBSPOT_ACTIVITIES=true), and the try/catch
+  // ensures a HubSpot hiccup never affects the WA-resolve behaviour.
+  try {
+    const resolvedAction = pending.find((a) => a.id === actionId);
+    const corrId = resolvedAction?.correlationId;
+    if (corrId) {
+      const [leadRow] = await opts.db
+        .select({ id: leads.id, customerId: leads.customerId })
+        .from(leads)
+        .where(eq(leads.id, corrId))
+        .limit(1);
+      if (leadRow?.customerId) {
+        await emitHubSpotActivity(opts.db, {
+          customerId: leadRow.customerId,
+          leadId: leadRow.id,
+          activity: {
+            kind: 'human-action-resolved',
+            customerId: leadRow.customerId,
+            leadId: leadRow.id,
+            humanActionId: actionId,
+            chosenOptionId: chosen.id,
+            source: 'whatsapp',
+            timestamp: new Date(),
+          },
+        });
+      }
+    }
+  } catch (err) {
+    logger.warn(
+      { err: err instanceof Error ? err.message : String(err), humanActionId: actionId },
+      'waha webhook: HubSpot activity emit failed (non-fatal)',
+    );
+  }
+
   return { resolved: true, actionId, choice: chosen.id };
 }
 
