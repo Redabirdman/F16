@@ -7,3 +7,4 @@ export * from './ads.js';
 export * from './knowledge.js';
 export * from './compliance.js';
 export * from './operations.js';
+export * from './hubspot.js';

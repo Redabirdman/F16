@@ -1,5 +1,6 @@
 /**
- * HubSpot integration barrel — REST client + dual-write worker (M5.T2).
+ * HubSpot integration barrel — REST client + dual-write worker (M5.T2) +
+ * Phase 3 activity timeline.
  */
 export {
   HubSpotClient,
@@ -29,3 +30,24 @@ export {
   type StageKey,
   type MirrorInput,
 } from './mirror-map.js';
+
+export {
+  mapActivityToEngagement,
+  type F16ActivityEvent,
+  type VoiceCallEndedEvent,
+  type WhatsAppTurnEvent,
+  type EngagementFollowupEvent,
+  type HumanActionResolvedEvent,
+  type EngagementSpec,
+  type NoteSpec,
+  type CallSpec,
+  type CommunicationSpec,
+} from './activity-map.js';
+
+export {
+  emitHubSpotActivity,
+  isActivityEnabled,
+  handleLogActivity,
+  type EmitHubSpotActivityInput,
+  type ActivityWorkerOptions,
+} from './activity-worker.js';

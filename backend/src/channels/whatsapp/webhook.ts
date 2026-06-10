@@ -49,6 +49,7 @@ import {
   parseAuthorisedResolvers,
   isMatch,
 } from './human-action-router.js';
+import { emitHubSpotActivity } from '../../integrations/hubspot/activity-worker.js';
 
 export interface WhatsAppWebhookOptions {
   db: Database;
@@ -216,6 +217,25 @@ export function buildWhatsAppWebhook(opts: WhatsAppWebhookOptions): Hono {
         correlationId,
       },
     );
+
+    // Phase 3: emit HubSpot communication engagement (gated — no-op unless
+    // F16_HUBSPOT_ACTIVITIES=true). Wrapped try/catch — never blocks the webhook.
+    try {
+      await emitHubSpotActivity(opts.db, {
+        customerId: customer.id,
+        ...(activeLead ? { leadId: activeLead.id } : {}),
+        activity: {
+          kind: 'whatsapp-turn',
+          customerId: customer.id,
+          ...(activeLead ? { leadId: activeLead.id } : {}),
+          body: msg.body,
+          direction: 'inbound',
+          timestamp: occurredAt,
+        },
+      });
+    } catch {
+      // best-effort — never break the webhook flow
+    }
 
     return c.json({ accepted: true, customerId: customer.id }, 200);
   });

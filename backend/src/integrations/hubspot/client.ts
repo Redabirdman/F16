@@ -119,6 +119,33 @@ export class HubSpotApiError extends Error {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the HubSpot v3 associations array for object-create calls.
+ * Each entry references a "to" object by id and applies the given
+ * HUBSPOT_DEFINED association typeId.
+ *
+ * Shape expected by POST /crm/v3/objects/<type>:
+ *   associations: [{
+ *     to: { id: "<objectId>" },
+ *     types: [{ associationCategory: "HUBSPOT_DEFINED", associationTypeId: <n> }]
+ *   }]
+ */
+function buildAssociations(
+  links: Array<{ toId: string; typeId: number }>,
+): Array<{
+  to: { id: string };
+  types: Array<{ associationCategory: string; associationTypeId: number }>;
+}> {
+  return links.map(({ toId, typeId }) => ({
+    to: { id: toId },
+    types: [{ associationCategory: 'HUBSPOT_DEFINED', associationTypeId: typeId }],
+  }));
+}
+
 export class HubSpotClient {
   private readonly token: string;
   private readonly baseUrl: string;
@@ -398,6 +425,139 @@ export class HubSpotClient {
       `/crm/v3/objects/contacts/${encodeURIComponent(contactId)}`,
       { properties },
     );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 3 — Activity timeline engagements
+  //
+  // All three methods use the HubSpot v3 CRM objects API.
+  // Docs: https://developers.hubspot.com/docs/api/crm/engagements
+  //
+  // Association typeIds (HUBSPOT_DEFINED category):
+  //   Notes  → contact: 202,  deal: 214
+  //   Calls  → contact: 194,  deal: 206
+  //   Comms  → contact: 82,   deal: 86
+  //
+  // These are the HubSpot-standard (built-in) association type IDs from the
+  // public docs. If live-verify finds a mismatch, check:
+  //   GET /crm/v4/associations/{fromObjectType}/{toObjectType}/labels
+  //
+  // PII note: activity BODIES contain message text — that is the point of
+  // the timeline. We NEVER log the body content; only ids + booleans surface
+  // to our logger.
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Create a HubSpot Note engagement and associate it to a contact + deal.
+   *
+   * Endpoint: POST /crm/v3/objects/notes
+   * Properties:
+   *   hs_note_body  — plain-text note content (may contain transcript summary)
+   *   hs_timestamp  — ISO-8601 / milliseconds epoch (both accepted by HubSpot)
+   * Associations:
+   *   contact typeId 202 (HUBSPOT_DEFINED), deal typeId 214 (HUBSPOT_DEFINED)
+   */
+  async createNote(input: {
+    body: string;
+    contactId: string;
+    dealId: string;
+    timestamp: Date;
+  }): Promise<{ noteId: string }> {
+    const associations = buildAssociations([
+      { toId: input.contactId, typeId: 202 },
+      { toId: input.dealId, typeId: 214 },
+    ]);
+    const json = await this.request<{ id?: string }>('POST', '/crm/v3/objects/notes', {
+      properties: {
+        hs_note_body: input.body,
+        hs_timestamp: input.timestamp.toISOString(),
+      },
+      associations,
+    });
+    if (!json.id) throw new Error('HubSpot createNote: no id in response');
+    logger.debug({ noteId: json.id }, 'hubspot: note created');
+    return { noteId: json.id };
+  }
+
+  /**
+   * Create a HubSpot Call engagement and associate it to a contact + deal.
+   *
+   * Endpoint: POST /crm/v3/objects/calls
+   * Properties:
+   *   hs_call_title     — short label shown in the timeline header
+   *   hs_call_body      — transcript summary or notes (never logged on our end)
+   *   hs_timestamp      — ISO-8601 datetime
+   *   hs_call_duration  — optional, milliseconds integer
+   *   hs_call_direction — OUTBOUND (we always originate calls)
+   * Associations:
+   *   contact typeId 194 (HUBSPOT_DEFINED), deal typeId 206 (HUBSPOT_DEFINED)
+   */
+  async createCall(input: {
+    title: string;
+    body: string;
+    durationMs?: number;
+    contactId: string;
+    dealId: string;
+    timestamp: Date;
+  }): Promise<{ callId: string }> {
+    const properties: Record<string, string | number> = {
+      hs_call_title: input.title,
+      hs_call_body: input.body,
+      hs_timestamp: input.timestamp.toISOString(),
+      hs_call_direction: 'OUTBOUND',
+    };
+    if (typeof input.durationMs === 'number') {
+      properties.hs_call_duration = input.durationMs;
+    }
+    const associations = buildAssociations([
+      { toId: input.contactId, typeId: 194 },
+      { toId: input.dealId, typeId: 206 },
+    ]);
+    const json = await this.request<{ id?: string }>('POST', '/crm/v3/objects/calls', {
+      properties,
+      associations,
+    });
+    if (!json.id) throw new Error('HubSpot createCall: no id in response');
+    logger.debug({ callId: json.id }, 'hubspot: call engagement created');
+    return { callId: json.id };
+  }
+
+  /**
+   * Create a HubSpot Communication engagement (WhatsApp / SMS) and associate
+   * it to a contact + deal.
+   *
+   * Endpoint: POST /crm/v3/objects/communications
+   * Properties:
+   *   hs_communication_channel_type — WHATSAPP | SMS
+   *   hs_communication_body         — message body (never logged on our end)
+   *   hs_timestamp                  — ISO-8601 datetime
+   * Associations:
+   *   contact typeId 82 (HUBSPOT_DEFINED), deal typeId 86 (HUBSPOT_DEFINED)
+   *
+   * Requires scope: crm.objects.communications.write (not yet on Service Key).
+   */
+  async createCommunication(input: {
+    channel: 'WHATSAPP' | 'SMS';
+    body: string;
+    contactId: string;
+    dealId: string;
+    timestamp: Date;
+  }): Promise<{ communicationId: string }> {
+    const associations = buildAssociations([
+      { toId: input.contactId, typeId: 82 },
+      { toId: input.dealId, typeId: 86 },
+    ]);
+    const json = await this.request<{ id?: string }>('POST', '/crm/v3/objects/communications', {
+      properties: {
+        hs_communication_channel_type: input.channel,
+        hs_communication_body: input.body,
+        hs_timestamp: input.timestamp.toISOString(),
+      },
+      associations,
+    });
+    if (!json.id) throw new Error('HubSpot createCommunication: no id in response');
+    logger.debug({ communicationId: json.id }, 'hubspot: communication engagement created');
+    return { communicationId: json.id };
   }
 
   // ---------------------------------------------------------------------------

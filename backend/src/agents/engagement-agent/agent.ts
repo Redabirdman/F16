@@ -45,6 +45,7 @@ import { isQuietNow } from './quiet-hours.js';
 import { generateNudgeText, type EngagementStep, type NudgeGenInput } from './messaging.js';
 import { ELIGIBLE_LEAD_STATUSES } from './candidate.js';
 import { setLeadStatus } from '../../db/repositories/leads.js';
+import { emitHubSpotActivity } from '../../integrations/hubspot/activity-worker.js';
 
 /** Hours between last activity and each cadence step trigger. */
 const THRESHOLD_HOURS: Record<0 | 1 | 2, number> = {
@@ -256,6 +257,26 @@ export class EngagementAgent extends BaseAgent {
       },
       'engagement-agent: nudge sent',
     );
+
+    // Phase 3: emit HubSpot note for the follow-up nudge (gated).
+    // step (EngagementStep = 1|2) maps to cadence index (0|1) for the activity kind.
+    try {
+      const activityStep = (step - 1) as 0 | 1 | 2;
+      await emitHubSpotActivity(this.db, {
+        customerId: resolved.customer.id,
+        leadId: lead.id,
+        activity: {
+          kind: 'engagement-followup',
+          customerId: resolved.customer.id,
+          leadId: lead.id,
+          nudgeText: nudge.text,
+          step: activityStep,
+          timestamp: new Date(),
+        },
+      });
+    } catch {
+      // best-effort — never block the nudge flow
+    }
 
     return {
       ok: true,

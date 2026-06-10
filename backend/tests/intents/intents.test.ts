@@ -71,6 +71,7 @@ const KNOWN_INTENTS: ReadonlyArray<[string, z.ZodTypeAny]> = [
   ['SESSION.LOGGED_OUT', intents.SessionLoggedOutPayload],
   ['ORG.STATE_TICK', intents.OrgStateTickPayload],
   ['ENGAGEMENT.TICK', intents.EngagementTickPayload],
+  ['HUBSPOT.LOG_ACTIVITY', intents.HubSpotLogActivityPayload],
 ];
 
 function repopulateRegistry(): void {

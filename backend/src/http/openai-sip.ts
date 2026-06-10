@@ -47,6 +47,7 @@ import { appendAudit } from '../db/repositories/audit-log.js';
 import { ASSURYAL_VOICE_INSTRUCTIONS, VOICE_PERSONA_KEY } from './voice-persona.js';
 import { resolvePrompt } from '../prompts/registry.js';
 import { VOICE_TOOLS, VOICE_TRANSPORT_TOOLS, handleVoiceTool } from './voice-tools.js';
+import { emitHubSpotActivity } from '../integrations/hubspot/activity-worker.js';
 
 const OPENAI_API = 'https://api.openai.com/v1';
 const OPENAI_WS = 'wss://api.openai.com/v1/realtime';
@@ -479,6 +480,32 @@ async function persistTranscripts(db: Database, ctx: CallContext): Promise<void>
     { callId: ctx.sipCallId, turns: ctx.transcripts.length },
     'openai-sip: transcripts persisted',
   );
+
+  // Phase 3: emit HubSpot call engagement (gated — no-op unless F16_HUBSPOT_ACTIVITIES=true).
+  // Build a brief transcript summary from the outbound turns (no raw PII in logs).
+  try {
+    const summaryLines = ctx.transcripts
+      .filter((t) => t.direction === 'outbound')
+      .slice(0, 5)
+      .map((t) => t.content)
+      .join(' / ');
+    const transcriptSummary = summaryLines.slice(0, 500) || 'Appel vocal Assuryal';
+    const durationMs = ctx.transcripts.length > 0 ? Date.now() - base : undefined;
+    await emitHubSpotActivity(db, {
+      customerId: ctx.customerId,
+      ...(ctx.leadId !== undefined ? { leadId: ctx.leadId } : {}),
+      activity: {
+        kind: 'voice-call-ended',
+        customerId: ctx.customerId,
+        ...(ctx.leadId !== undefined ? { leadId: ctx.leadId } : {}),
+        transcriptSummary,
+        ...(durationMs !== undefined ? { durationMs } : {}),
+        timestamp: new Date(base),
+      },
+    });
+  } catch {
+    // never block transcript persistence on HubSpot emit
+  }
 }
 
 /**

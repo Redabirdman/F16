@@ -44,6 +44,7 @@ import {
 } from './mirror-map.js';
 import { getLatestQuoteForLead } from '../../db/repositories/quotes.js';
 import { logger } from '../../logger.js';
+import { handleLogActivity } from './activity-worker.js';
 
 export interface HubSpotSyncWorkerOptions {
   db: Database;
@@ -69,6 +70,10 @@ export function startHubSpotSyncWorker(opts: HubSpotSyncWorkerOptions): Worker {
     queue: 'hubspot',
     role: 'hubspot-sync',
     handler: async (envelope: AgentMessageEnvelope): Promise<MessageHandlerResult> => {
+      // Phase 3: activity timeline — gated by F16_HUBSPOT_ACTIVITIES flag.
+      if (envelope.intent === 'HUBSPOT.LOG_ACTIVITY') {
+        return handleLogActivity({ db: opts.db, client: opts.client }, envelope);
+      }
       if (envelope.intent !== 'LEAD.NEW' && envelope.intent !== 'LEAD.SYNC_HUBSPOT') {
         return { ok: true, result: { skipped: 'wrong-intent' } };
       }

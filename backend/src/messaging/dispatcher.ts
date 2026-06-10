@@ -60,6 +60,9 @@ const INTENT_TO_QUEUE: Record<string, string> = {
   // hubspot mirror — dedicated queue so hubspot-sync is the SOLE consumer
   // (no wrong-role race against lead-scorer on the shared 'lead' queue).
   'LEAD.SYNC_HUBSPOT': 'hubspot',
+  // Phase 3 activity timeline — same dedicated hubspot queue, same consumer.
+  // Gated: the worker no-ops unless F16_HUBSPOT_ACTIVITIES==='true'.
+  'HUBSPOT.LOG_ACTIVITY': 'hubspot',
   // customer
   'CUSTOMER.MESSAGE_RECEIVED': 'customer',
   'CUSTOMER.MESSAGE_SENT': 'customer',

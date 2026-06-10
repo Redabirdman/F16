@@ -32,9 +32,12 @@ import { z } from 'zod';
 import type { Database } from '../db/index.js';
 import { getActionById, listPending, resolveAction } from '../db/repositories/human-actions.js';
 import type { HumanAction, HumanActionOption } from '../db/schema/agent-runtime.js';
+import { leads } from '../db/schema/index.js';
+import { eq } from 'drizzle-orm';
 import { sendMessage } from '../messaging/dispatcher.js';
 import { appendAudit } from '../db/repositories/audit-log.js';
 import { logger } from '../logger.js';
+import { emitHubSpotActivity } from '../integrations/hubspot/activity-worker.js';
 
 export interface AdminHumanActionsRouterOptions {
   db: Database;
@@ -164,6 +167,39 @@ export function buildAdminHumanActionsRouter(opts: AdminHumanActionsRouterOption
             humanActionId: actionId,
           },
           'admin/human-actions: HUMAN_ACTION.RESOLVED emit failed — WA closure not posted',
+        );
+      }
+
+      // Phase 3: emit HubSpot note for human-action resolve (gated, best-effort).
+      // Try to resolve customerId via the correlationId (often a leadId).
+      try {
+        const corrId = action.correlationId;
+        if (corrId) {
+          const [leadRow] = await opts.db
+            .select({ id: leads.id, customerId: leads.customerId })
+            .from(leads)
+            .where(eq(leads.id, corrId))
+            .limit(1);
+          if (leadRow?.customerId) {
+            await emitHubSpotActivity(opts.db, {
+              customerId: leadRow.customerId,
+              leadId: leadRow.id,
+              activity: {
+                kind: 'human-action-resolved',
+                customerId: leadRow.customerId,
+                leadId: leadRow.id,
+                humanActionId: actionId,
+                chosenOptionId: chosen.id,
+                source: 'admin',
+                timestamp: new Date(),
+              },
+            });
+          }
+        }
+      } catch (err) {
+        logger.warn(
+          { err: err instanceof Error ? err.message : String(err), humanActionId: actionId },
+          'admin/human-actions: HubSpot activity emit failed (non-fatal)',
         );
       }
 
