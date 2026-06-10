@@ -70,7 +70,7 @@ export interface CreateDealInput {
   dealStage?: string;
   /** Passes through to the `product_line` custom property if it exists. */
   productLine?: 'scooter' | 'car';
-  properties?: Record<string, string>;
+  properties?: Record<string, string | number>;
 }
 
 export interface CreateDealOutput {
@@ -281,6 +281,105 @@ export class HubSpotClient {
       const detail = err instanceof Error ? err.message.slice(0, 200) : 'unknown';
       return { healthy: false, detail };
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 1 additions — property management, pipeline management, updates
+  // ---------------------------------------------------------------------------
+
+  /** Idempotently ensure a custom property exists on an object type. */
+  async ensureProperty(
+    objectType: 'contacts' | 'deals',
+    prop: {
+      name: string;
+      label: string;
+      type: 'string' | 'number' | 'enumeration';
+      groupName: string;
+      options?: Array<{ label: string; value: string }>;
+    },
+  ): Promise<void> {
+    try {
+      await this.request<unknown>(
+        'GET',
+        `/crm/v3/properties/${objectType}/${encodeURIComponent(prop.name)}`,
+        null,
+      );
+      return; // already exists
+    } catch (err) {
+      if (!(err instanceof HubSpotApiError) || err.status !== 404) throw err;
+    }
+    const fieldType =
+      prop.type === 'number' ? 'number' : prop.type === 'enumeration' ? 'select' : 'text';
+    const body: Record<string, unknown> = {
+      name: prop.name,
+      label: prop.label,
+      type: prop.type,
+      fieldType,
+      groupName: prop.groupName,
+    };
+    if (prop.options) body.options = prop.options;
+    try {
+      await this.request<unknown>('POST', `/crm/v3/properties/${objectType}`, body);
+    } catch (err) {
+      // A concurrent create (or pre-existing) → treat "already exists" as success.
+      if (
+        err instanceof HubSpotApiError &&
+        (err.status === 409 || /already exists/i.test(err.message))
+      )
+        return;
+      throw err;
+    }
+  }
+
+  /** List all deal pipelines. */
+  async listPipelines(): Promise<
+    Array<{ id: string; label: string; stages: Array<{ id: string; label: string }> }>
+  > {
+    const json = await this.request<{
+      results?: Array<{
+        id: string;
+        label: string;
+        stages?: Array<{ id: string; label: string }>;
+      }>;
+    }>('GET', '/crm/v3/pipelines/deals', null);
+    return (json.results ?? []).map((p) => ({
+      id: p.id,
+      label: p.label,
+      stages: p.stages ?? [],
+    }));
+  }
+
+  /** Create a deal pipeline with the given stages. Returns the created pipeline. */
+  async createPipeline(
+    label: string,
+    stages: Array<{
+      label: string;
+      displayOrder: number;
+      metadata: Record<string, string>;
+    }>,
+  ): Promise<{ id: string; stages: Array<{ id: string; label: string }> }> {
+    const json = await this.request<{
+      id?: string;
+      stages?: Array<{ id: string; label: string }>;
+    }>('POST', '/crm/v3/pipelines/deals', { label, displayOrder: 99, stages });
+    if (!json.id) throw new Error('HubSpot createPipeline: no id in response');
+    return { id: json.id, stages: json.stages ?? [] };
+  }
+
+  /** PATCH deal properties. */
+  async updateDeal(dealId: string, properties: Record<string, string | number>): Promise<void> {
+    await this.request<unknown>('PATCH', `/crm/v3/objects/deals/${encodeURIComponent(dealId)}`, {
+      properties,
+    });
+  }
+
+  /** PATCH contact properties. */
+  async updateContact(contactId: string, properties: Record<string, string>): Promise<void> {
+    await this.request<unknown>(
+      'PATCH',
+      `/crm/v3/objects/contacts/${encodeURIComponent(contactId)}`,
+      { properties },
+    );
   }
 
   // ---------------------------------------------------------------------------
