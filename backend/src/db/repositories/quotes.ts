@@ -98,6 +98,56 @@ export async function markQuoteReady(
   return row;
 }
 
+/** Fields known at Maxance confirm time. Premium/comptant are NOT re-surfaced
+ *  by Maxance at confirm (they came from the earlier PREVIEW_READY), so this
+ *  helper only stamps the devis number + PDF + ready status. */
+export interface MarkQuoteConfirmedInput {
+  /** Maxance's own reference (e.g. "DR0000971882"). */
+  devisNumber: string;
+  /** Where Maxance emailed the devis PDF (recorded; not PII-logged). */
+  pdfUrl?: string | null;
+  rawResponse?: Record<string, unknown> | null;
+}
+
+/**
+ * Persist the confirm-flow outputs onto the quote row, then mirror to HubSpot.
+ *
+ * The Maxance confirm path produces a real devis number but does NOT re-surface
+ * the premium/comptant (those were captured at PREVIEW_READY). This helper
+ * writes the devis number + PDF + ready status and THEN emits the HubSpot sync,
+ * guaranteeing the reconciler reads a quote row that already carries
+ * `maxanceDevisNumber` — so the deal's f16_devis_number populates with the real
+ * value rather than blank. Returns the updated row.
+ */
+export async function markQuoteConfirmed(
+  db: Database,
+  quoteId: string,
+  input: MarkQuoteConfirmedInput,
+): Promise<Quote> {
+  const [row] = await db
+    .update(quotes)
+    .set({
+      status: 'ready',
+      readyAt: new Date(),
+      maxanceDevisNumber: input.devisNumber,
+      ...(input.pdfUrl != null ? { pdfUrl: input.pdfUrl } : {}),
+      ...(input.rawResponse != null ? { rawResponse: input.rawResponse } : {}),
+    })
+    .where(eq(quotes.id, quoteId))
+    .returning();
+
+  if (!row) throw new Error(`markQuoteConfirmed: no quote with id=${quoteId}`);
+
+  // Emit AFTER the devis number is persisted so the reconciler mirrors the
+  // real f16_devis_number, not a blank. Non-blocking — emitHubSpotSync never
+  // throws and a HubSpot hiccup must not break the quote flow.
+  if (row.leadId) {
+    await emitHubSpotSync(db, row.leadId);
+  }
+
+  return row;
+}
+
 /** Optional fields on a Maxance action append. `actionText` is required. */
 export interface AppendMaxanceActionInput {
   actionText: string;

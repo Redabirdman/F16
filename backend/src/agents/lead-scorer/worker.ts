@@ -203,9 +203,11 @@ async function persistAndEmit(
   const channel = channelOverride ?? score.channel;
   // Persist the score + timestamp first; then flip status via setLeadStatus
   // so the CRM mirror fires on every scored transition (HubSpot Phase 2).
+  // updatedAt is intentionally left to setLeadStatus, which stamps it on the
+  // status flip — writing it here too would be immediately overwritten.
   await db
     .update(leads)
-    .set({ score: score.score, scoredAt: new Date(), updatedAt: new Date() })
+    .set({ score: score.score, scoredAt: new Date() })
     .where(eq(leads.id, leadId));
   await setLeadStatus(db, leadId, 'scored');
 

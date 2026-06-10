@@ -52,7 +52,7 @@ import {
   getDefaultMaxanceDriverClient,
   readErrorCode,
 } from './driver-client.js';
-import { emitHubSpotSync } from '../../db/repositories/leads.js';
+import { markQuoteConfirmed } from '../../db/repositories/quotes.js';
 
 /** Recognised MAXANCE_DRIVER values. Anything else → driver disabled. */
 type MaxanceDriver = 'chrome_extension' | 'stagehand_legacy_DO_NOT_USE_IN_PROD';
@@ -248,10 +248,24 @@ export class MaxanceOperatorAgent extends BaseAgent {
       },
     );
 
-    // Mirror devisNumber + price to HubSpot — the reconciler picks up the
-    // latest quote row (now containing the devis number) to fill the deal's
-    // amount / f16_devis_number. Non-blocking: HubSpot hiccup ≠ quote failure.
-    await emitHubSpotSync(this.db, payload.leadId);
+    // Persist the real devis number onto the quote row, THEN mirror to HubSpot.
+    // markQuoteConfirmed emits the sync only after maxanceDevisNumber is in the
+    // DB, so the reconciler fills the deal's f16_devis_number with the real
+    // value (not blank). Best-effort: a persistence/HubSpot hiccup must not turn
+    // a successful confirm (devis already emailed by Maxance) into a failure.
+    try {
+      await markQuoteConfirmed(this.db, payload.quoteId, {
+        devisNumber: confirm.devisNumber,
+      });
+    } catch (err) {
+      logger.warn(
+        {
+          quoteId: payload.quoteId,
+          err: err instanceof Error ? err.message : String(err),
+        },
+        'maxance-operator: failed to persist devis number / mirror to HubSpot (non-fatal)',
+      );
+    }
 
     logger.info(
       {
