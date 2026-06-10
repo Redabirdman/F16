@@ -148,6 +148,62 @@ export async function markQuoteConfirmed(
   return row;
 }
 
+/** Prices surfaced by the Maxance dry-run preview. Both are `number | undefined`
+ *  because the price-scrape can legitimately come back unparsed. */
+export interface MarkQuotePreviewInput {
+  /** preview.pricePreviewEur.monthly */
+  monthlyPremium: number | undefined;
+  /** preview.pricePreviewEur.annual */
+  comptantDue: number | undefined;
+}
+
+/**
+ * Persist the preview price onto the quote row so the HubSpot mirror can fill
+ * the deal amount/comptant before the devis is even confirmed. Emits the sync
+ * after persisting (idempotent). Premium/comptant are stored as numeric(10,2)
+ * decimal strings.
+ *
+ * Does NOT touch `status` — a preview is not 'ready', so the lifecycle stage
+ * logic stays intact. Only finite numbers are written: if a price came back
+ * undefined/NaN it is skipped, and if BOTH are missing the row is returned
+ * untouched with no UPDATE and no HubSpot emit.
+ */
+export async function markQuotePreview(
+  db: Database,
+  quoteId: string,
+  input: MarkQuotePreviewInput,
+): Promise<Quote> {
+  const set: Partial<{ monthlyPremium: string; comptantDue: string }> = {
+    ...(Number.isFinite(input.monthlyPremium)
+      ? { monthlyPremium: (input.monthlyPremium as number).toFixed(2) }
+      : {}),
+    ...(Number.isFinite(input.comptantDue)
+      ? { comptantDue: (input.comptantDue as number).toFixed(2) }
+      : {}),
+  };
+
+  // Nothing parseable to persist — leave the row (and HubSpot) untouched.
+  if (Object.keys(set).length === 0) {
+    const [current] = await db.select().from(quotes).where(eq(quotes.id, quoteId)).limit(1);
+    if (!current) throw new Error(`markQuotePreview: no quote with id=${quoteId}`);
+    return current;
+  }
+
+  const [row] = await db.update(quotes).set(set).where(eq(quotes.id, quoteId)).returning();
+
+  if (!row) throw new Error(`markQuotePreview: no quote with id=${quoteId}`);
+
+  // Mirror the preview price to HubSpot so the deal amount / f16_comptant_due
+  // fill from the latest quote row even before the devis is confirmed.
+  // Non-blocking — emitHubSpotSync never throws and a HubSpot hiccup must not
+  // break the quote flow.
+  if (row.leadId) {
+    await emitHubSpotSync(db, row.leadId);
+  }
+
+  return row;
+}
+
 /** Optional fields on a Maxance action append. `actionText` is required. */
 export interface AppendMaxanceActionInput {
   actionText: string;

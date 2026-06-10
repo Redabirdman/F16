@@ -52,7 +52,7 @@ import {
   getDefaultMaxanceDriverClient,
   readErrorCode,
 } from './driver-client.js';
-import { markQuoteConfirmed } from '../../db/repositories/quotes.js';
+import { markQuoteConfirmed, markQuotePreview } from '../../db/repositories/quotes.js';
 
 /** Recognised MAXANCE_DRIVER values. Anything else → driver disabled. */
 type MaxanceDriver = 'chrome_extension' | 'stagehand_legacy_DO_NOT_USE_IN_PROD';
@@ -452,6 +452,28 @@ export class MaxanceOperatorAgent extends BaseAgent {
         correlationId: payload.quoteId,
       },
     );
+
+    // Persist the preview price onto the quote row so the HubSpot mirror fills
+    // the deal amount / comptant before the devis is confirmed. Best-effort:
+    // the helper guards finiteness and emits the sync internally; a failure
+    // here must not break the customer-facing preview flow.
+    try {
+      await markQuotePreview(this.db, payload.quoteId, {
+        // Maxance surfaces two figures: `monthly` = the monthly premium, and
+        // `annual` = the comptant (pay-the-year-upfront) amount. They map to
+        // the quote's monthlyPremium / comptantDue, matching markQuoteReady.
+        monthlyPremium: preview.pricePreviewEur.monthly,
+        comptantDue: preview.pricePreviewEur.annual,
+      });
+    } catch (err) {
+      logger.warn(
+        {
+          quoteId: payload.quoteId,
+          err: err instanceof Error ? err.message : String(err),
+        },
+        'maxance-operator: failed to persist preview price / mirror to HubSpot (non-fatal)',
+      );
+    }
 
     logger.info(
       {

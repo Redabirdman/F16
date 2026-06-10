@@ -11,20 +11,23 @@
  *   - cascade delete from quotes → maxance_actions
  *   - two distinct quotes per customer coexist
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { sql, eq } from 'drizzle-orm';
-import { createDb } from '../../src/db/index.js';
-import { quotes, maxanceActions, leads } from '../../src/db/schema/index.js';
+import { createDb, type Database } from '../../src/db/index.js';
+import { quotes, maxanceActions, leads, agentMessages } from '../../src/db/schema/index.js';
 import { insertCustomer } from '../../src/db/repositories/customers.js';
 import {
   insertQuote,
   markQuoteReady,
+  markQuotePreview,
   appendMaxanceAction,
   getQuoteWithActions,
 } from '../../src/db/repositories/quotes.js';
+import { __resetForTests, shutdownQueues } from '../../src/queue/index.js';
 
 const liveUrl = process.env.TEST_DATABASE_URL;
+const redisUrl = process.env.TEST_REDIS_URL;
 const d = describe.skipIf(!liveUrl);
 
 let savedKey: string | undefined;
@@ -235,5 +238,139 @@ d('quotes + maxance_actions (live)', () => {
 
     const all = await db.select().from(quotes).where(eq(quotes.customerId, customerId));
     expect(all).toHaveLength(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// markQuotePreview — persists the Maxance dry-run price onto the quote row so
+// the HubSpot mirror can fill the deal amount/comptant before the devis is
+// confirmed. Needs Redis too: emitHubSpotSync goes through the dispatcher,
+// which enqueues a BullMQ job alongside the agent_messages row.
+// ---------------------------------------------------------------------------
+const pp = describe.skipIf(!liveUrl || !redisUrl);
+
+pp('markQuotePreview (live)', () => {
+  let db: Database;
+  let savedRedisUrl: string | undefined;
+  let savedPrefix: string | undefined;
+  let savedHubspotKey: string | undefined;
+
+  beforeAll(() => {
+    savedRedisUrl = process.env.REDIS_URL;
+    savedPrefix = process.env.BULLMQ_PREFIX;
+    // Force HUBSPOT_API_KEY ON so the helper deterministically emits the
+    // LEAD.SYNC_HUBSPOT row regardless of whether .env has the key.
+    savedHubspotKey = process.env.HUBSPOT_API_KEY;
+    process.env.HUBSPOT_API_KEY = 'pat-test';
+  });
+
+  afterAll(() => {
+    if (savedRedisUrl === undefined) delete process.env.REDIS_URL;
+    else process.env.REDIS_URL = savedRedisUrl;
+    if (savedPrefix === undefined) delete process.env.BULLMQ_PREFIX;
+    else process.env.BULLMQ_PREFIX = savedPrefix;
+    if (savedHubspotKey === undefined) delete process.env.HUBSPOT_API_KEY;
+    else process.env.HUBSPOT_API_KEY = savedHubspotKey;
+  });
+
+  beforeEach(async () => {
+    process.env.REDIS_URL = redisUrl!;
+    process.env.BULLMQ_PREFIX = `f16-test-quotespreview-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+    __resetForTests();
+
+    db = createDb(liveUrl!);
+    await db.execute(sql`TRUNCATE TABLE agent_messages RESTART IDENTITY CASCADE`);
+    await db.execute(sql`TRUNCATE TABLE maxance_actions RESTART IDENTITY CASCADE`);
+    await db.execute(sql`TRUNCATE TABLE quotes RESTART IDENTITY CASCADE`);
+    await db.execute(sql`TRUNCATE TABLE leads RESTART IDENTITY CASCADE`);
+    await db.execute(sql`TRUNCATE TABLE customers RESTART IDENTITY CASCADE`);
+  });
+
+  afterEach(async () => {
+    await shutdownQueues().catch(() => {});
+    __resetForTests();
+  });
+
+  async function seedQuote(): Promise<{ quoteId: string; leadId: string }> {
+    const c = await insertCustomer(db, { fullName: 'Preview Owner' });
+    const [l] = await db
+      .insert(leads)
+      .values({ source: 'website', productLine: 'scooter', customerId: c.id })
+      .returning();
+    const q = await insertQuote(db, {
+      customerId: c.id,
+      leadId: l!.id,
+      product: 'scooter',
+      productVariant: 'malus',
+      sessionId: randomUUID(),
+    });
+    return { quoteId: q.id, leadId: l!.id };
+  }
+
+  it('persists both prices as decimal strings, leaves status unchanged, emits one sync', async () => {
+    const { quoteId, leadId } = await seedQuote();
+
+    // M8 preview { monthly: 78.85, annual: 90.85 } → P1 fixture strings.
+    const updated = await markQuotePreview(db, quoteId, {
+      monthlyPremium: 78.85,
+      comptantDue: 90.85,
+    });
+
+    // numeric(10,2) round-trips as a string in postgres-js — that's expected.
+    expect(updated.monthlyPremium).toBe('78.85');
+    expect(updated.comptantDue).toBe('90.85');
+    // A preview is NOT 'ready' — status must stay as inserted.
+    expect(updated.status).toBe('requested');
+    expect(updated.readyAt).toBeNull();
+
+    // The DB row really changed (not just the returned object).
+    const [fresh] = await db.select().from(quotes).where(eq(quotes.id, quoteId));
+    expect(fresh!.monthlyPremium).toBe('78.85');
+    expect(fresh!.comptantDue).toBe('90.85');
+    expect(fresh!.status).toBe('requested');
+
+    // Exactly one LEAD.SYNC_HUBSPOT for hubspot-sync, correlated to the lead.
+    const msgs = await db
+      .select()
+      .from(agentMessages)
+      .where(eq(agentMessages.correlationId, leadId));
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0]!.intent).toBe('LEAD.SYNC_HUBSPOT');
+    expect(msgs[0]!.toRole).toBe('hubspot-sync');
+    expect((msgs[0]!.payload as Record<string, unknown>)['leadId']).toBe(leadId);
+  });
+
+  it('does nothing (no update, no emit, no throw) when both prices are undefined', async () => {
+    const { quoteId, leadId } = await seedQuote();
+
+    const updated = await markQuotePreview(db, quoteId, {
+      monthlyPremium: undefined,
+      comptantDue: undefined,
+    });
+
+    // Returned the current (untouched) row.
+    expect(updated.id).toBe(quoteId);
+    expect(updated.monthlyPremium).toBeNull();
+    expect(updated.comptantDue).toBeNull();
+    expect(updated.status).toBe('requested');
+
+    const msgs = await db
+      .select()
+      .from(agentMessages)
+      .where(eq(agentMessages.correlationId, leadId));
+    expect(msgs).toHaveLength(0);
+  });
+
+  it('persists only the defined price, leaving the other column untouched', async () => {
+    const { quoteId } = await seedQuote();
+
+    const updated = await markQuotePreview(db, quoteId, {
+      monthlyPremium: 78.85,
+      comptantDue: undefined,
+    });
+
+    expect(updated.monthlyPremium).toBe('78.85');
+    expect(updated.comptantDue).toBeNull();
+    expect(updated.status).toBe('requested');
   });
 });
