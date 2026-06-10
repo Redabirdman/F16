@@ -42,3 +42,17 @@ export const LeadStatusChangedPayload = registerIntent(
     to: z.string(),
   }),
 );
+
+/**
+ * Request a HubSpot reconcile for a lead. Consumed SOLELY by the `hubspot-sync`
+ * worker on its dedicated `hubspot` queue — gives it a single-consumer queue so
+ * it never races the lead-scorer on the shared `lead` queue. The handler runs
+ * the idempotent create-or-update reconcile, so emitting this on every lifecycle
+ * transition keeps the CRM mirror live (Phase 2 trigger).
+ */
+export const LeadSyncHubspotPayload = registerIntent(
+  'LEAD.SYNC_HUBSPOT',
+  z.object({
+    leadId: z.string().uuid(),
+  }),
+);

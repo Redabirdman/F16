@@ -34,6 +34,7 @@ const d = describe.skipIf(!liveBoth);
 let savedPiiKey: string | undefined;
 let savedRedisUrl: string | undefined;
 let savedPrefix: string | undefined;
+let savedHubspotKey: string | undefined;
 
 beforeAll(() => {
   savedPiiKey = process.env.PII_ENCRYPTION_KEY;
@@ -42,6 +43,10 @@ beforeAll(() => {
   }
   savedRedisUrl = process.env.REDIS_URL;
   savedPrefix = process.env.BULLMQ_PREFIX;
+  // Force HUBSPOT_API_KEY ON so ingestLead deterministically emits the
+  // LEAD.SYNC_HUBSPOT fan-out row regardless of whether .env has the key.
+  savedHubspotKey = process.env.HUBSPOT_API_KEY;
+  process.env.HUBSPOT_API_KEY = 'pat-test';
 });
 
 afterAll(() => {
@@ -51,6 +56,8 @@ afterAll(() => {
   else process.env.REDIS_URL = savedRedisUrl;
   if (savedPrefix === undefined) delete process.env.BULLMQ_PREFIX;
   else process.env.BULLMQ_PREFIX = savedPrefix;
+  if (savedHubspotKey === undefined) delete process.env.HUBSPOT_API_KEY;
+  else process.env.HUBSPOT_API_KEY = savedHubspotKey;
 });
 
 // --- normalizePhone() is pure, no DB — runs even when the live gate skips
@@ -133,19 +140,21 @@ d('ingestLead (live)', () => {
     expect(ls[0]!.productLine).toBe('scooter');
     expect(ls[0]!.customerId).toBe(result.customerId);
 
-    // 2 LEAD.NEW agent_messages correlated to the leadId — one per
-    // consumer role in the M5.T2 fan-out (lead-scorer + hubspot-sync).
+    // 2 agent_messages correlated to the leadId — the lead-scorer gets a
+    // LEAD.NEW on the 'lead' queue; hubspot-sync gets a LEAD.SYNC_HUBSPOT on
+    // its dedicated 'hubspot' queue (gated on HUBSPOT_API_KEY, forced on here).
     const msgs = await db
       .select()
       .from(agentMessages)
       .where(eq(agentMessages.correlationId, result.leadId));
     expect(msgs).toHaveLength(2);
     for (const m of msgs) {
-      expect(m.intent).toBe('LEAD.NEW');
       expect(m.fromRole).toBe('channel.intake');
     }
-    const roles = msgs.map((m) => m.toRole).sort();
-    expect(roles).toEqual(['hubspot-sync', 'lead-scorer']);
+    const byRole = new Map(msgs.map((m) => [m.toRole, m]));
+    expect([...byRole.keys()].sort()).toEqual(['hubspot-sync', 'lead-scorer']);
+    expect(byRole.get('lead-scorer')!.intent).toBe('LEAD.NEW');
+    expect(byRole.get('hubspot-sync')!.intent).toBe('LEAD.SYNC_HUBSPOT');
   });
 
   // -------------------------------------------------------------------------

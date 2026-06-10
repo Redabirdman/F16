@@ -64,7 +64,9 @@ const F16_CUSTOM_PROPS = ['f16_lead_id', 'f16_product_line', 'f16_source'] as co
 export function startHubSpotSyncWorker(opts: HubSpotSyncWorkerOptions): Worker {
   return consume({
     db: opts.db,
-    queue: 'lead',
+    // Dedicated 'hubspot' queue — hubspot-sync is the SOLE consumer, so a job
+    // is never grabbed by another role (lead-scorer) and dropped as a misroute.
+    queue: 'hubspot',
     role: 'hubspot-sync',
     handler: async (envelope: AgentMessageEnvelope): Promise<MessageHandlerResult> => {
       if (envelope.intent !== 'LEAD.NEW' && envelope.intent !== 'LEAD.SYNC_HUBSPOT') {

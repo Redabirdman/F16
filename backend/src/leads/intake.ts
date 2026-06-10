@@ -223,12 +223,12 @@ export async function ingestLead(db: Database, payload: LeadIntakePayload): Prom
   //    are time-sensitive (first-touch SLA) but not as urgent as inbound
   //    customer messages (which run at default).
   //
-  //    Fan-out: one row per consumer role. The `lead-scorer` reads the lead
-  //    for in-product follow-up; `hubspot-sync` (M5.T2) mirrors the lead into
-  //    the HubSpot CRM. Each consumer's `claimSpecific` filters by role, so
-  //    both rows hit the `lead` BullMQ queue without interfering. If a third
-  //    consumer joins later, append it here.
-  const fanoutRoles = ['lead-scorer', 'hubspot-sync'] as const;
+  //    The `lead-scorer` consumes LEAD.NEW on the `lead` queue. HubSpot is NOT
+  //    fanned out here anymore: it lives on its own `hubspot` queue (sole
+  //    consumer) and is triggered by a separate LEAD.SYNC_HUBSPOT below — this
+  //    avoids the wrong-role race where lead-scorer grabbed the hubspot job on
+  //    the shared queue and the bounded-reroute dropped it.
+  const fanoutRoles = ['lead-scorer'] as const;
   const intentPayload = {
     leadId: insertedLead.id,
     source: payload.source,
@@ -257,6 +257,32 @@ export async function ingestLead(db: Database, payload: LeadIntakePayload): Prom
       },
     );
     messageIds.push(id);
+  }
+
+  // 4b. Route the lead to HubSpot via its own queue + dedicated intent. Gated
+  //     on HUBSPOT_API_KEY (no-op when the integration is off). Wrapped so a
+  //     HubSpot routing hiccup never breaks lead intake — the lead is already
+  //     persisted and LEAD.NEW dispatched.
+  if (process.env.HUBSPOT_API_KEY) {
+    try {
+      const id = await sendMessage(
+        { db },
+        {
+          fromRole: 'channel.intake',
+          toRole: 'hubspot-sync',
+          intent: 'LEAD.SYNC_HUBSPOT',
+          payload: { leadId: insertedLead.id },
+          correlationId: insertedLead.id,
+          priority: 4,
+        },
+      );
+      messageIds.push(id);
+    } catch (err) {
+      logger.warn(
+        { leadId: insertedLead.id, err: err instanceof Error ? err.message : 'unknown' },
+        'lead intake: failed to enqueue HubSpot sync (non-fatal)',
+      );
+    }
   }
 
   // Log without payload — `formAnswers` may contain plaintext PII the

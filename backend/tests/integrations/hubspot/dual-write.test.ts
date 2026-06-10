@@ -137,6 +137,7 @@ afterAll(async () => {
 let savedPiiKey: string | undefined;
 let savedRedisUrl: string | undefined;
 let savedPrefix: string | undefined;
+let savedHubspotKey: string | undefined;
 
 beforeAll(() => {
   savedPiiKey = process.env.PII_ENCRYPTION_KEY;
@@ -145,6 +146,12 @@ beforeAll(() => {
   }
   savedRedisUrl = process.env.REDIS_URL;
   savedPrefix = process.env.BULLMQ_PREFIX;
+  // ingestLead only emits LEAD.SYNC_HUBSPOT when HUBSPOT_API_KEY is set —
+  // test 6 (fan-out via ingestLead) needs it so the hubspot worker gets a job.
+  savedHubspotKey = process.env.HUBSPOT_API_KEY;
+  if (!process.env.HUBSPOT_API_KEY) {
+    process.env.HUBSPOT_API_KEY = 'pat-test';
+  }
 });
 
 afterAll(() => {
@@ -154,6 +161,8 @@ afterAll(() => {
   else process.env.REDIS_URL = savedRedisUrl;
   if (savedPrefix === undefined) delete process.env.BULLMQ_PREFIX;
   else process.env.BULLMQ_PREFIX = savedPrefix;
+  if (savedHubspotKey === undefined) delete process.env.HUBSPOT_API_KEY;
+  else process.env.HUBSPOT_API_KEY = savedHubspotKey;
 });
 
 function buildClient(): HubSpotClient {
@@ -229,8 +238,8 @@ d('hubspot dual-write (live)', () => {
       {
         fromRole: 'channel.intake',
         toRole: 'hubspot-sync',
-        intent: 'LEAD.NEW',
-        payload: { leadId, source: 'website', productLine: 'scooter' },
+        intent: 'LEAD.SYNC_HUBSPOT',
+        payload: { leadId },
         correlationId: leadId,
         priority: 4,
       },
@@ -311,8 +320,8 @@ d('hubspot dual-write (live)', () => {
       {
         fromRole: 'channel.intake',
         toRole: 'hubspot-sync',
-        intent: 'LEAD.NEW',
-        payload: { leadId, source: 'website', productLine: 'scooter' },
+        intent: 'LEAD.SYNC_HUBSPOT',
+        payload: { leadId },
         correlationId: leadId,
         priority: 4,
       },
@@ -332,8 +341,8 @@ d('hubspot dual-write (live)', () => {
       {
         fromRole: 'channel.intake',
         toRole: 'hubspot-sync',
-        intent: 'LEAD.NEW',
-        payload: { leadId, source: 'website', productLine: 'scooter' },
+        intent: 'LEAD.SYNC_HUBSPOT',
+        payload: { leadId },
         correlationId: leadId,
         priority: 4,
       },
@@ -387,8 +396,8 @@ d('hubspot dual-write (live)', () => {
       {
         fromRole: 'channel.intake',
         toRole: 'hubspot-sync',
-        intent: 'LEAD.NEW',
-        payload: { leadId, source: 'website', productLine: 'scooter' },
+        intent: 'LEAD.SYNC_HUBSPOT',
+        payload: { leadId },
         correlationId: leadId,
         priority: 4,
       },
@@ -434,8 +443,8 @@ d('hubspot dual-write (live)', () => {
       {
         fromRole: 'channel.intake',
         toRole: 'hubspot-sync',
-        intent: 'LEAD.NEW',
-        payload: { leadId, source: 'website', productLine: 'scooter' },
+        intent: 'LEAD.SYNC_HUBSPOT',
+        payload: { leadId },
         correlationId: leadId,
         priority: 4,
       },
@@ -494,8 +503,8 @@ d('hubspot dual-write (live)', () => {
       {
         fromRole: 'channel.intake',
         toRole: 'hubspot-sync',
-        intent: 'LEAD.NEW',
-        payload: { leadId, source: 'website', productLine: 'scooter' },
+        intent: 'LEAD.SYNC_HUBSPOT',
+        payload: { leadId },
         correlationId: leadId,
         priority: 4,
       },
@@ -522,9 +531,10 @@ d('hubspot dual-write (live)', () => {
   });
 
   // -------------------------------------------------------------------------
-  // 6. Fan-out: ingestLead writes BOTH lead-scorer + hubspot-sync rows
+  // 6. Fan-out: ingestLead writes a lead-scorer LEAD.NEW + a hubspot-sync
+  //    LEAD.SYNC_HUBSPOT (the latter on the dedicated 'hubspot' queue).
   // -------------------------------------------------------------------------
-  it('test 6 (fan-out): ingestLead produces BOTH lead-scorer and hubspot-sync rows in agent_messages', async () => {
+  it('test 6 (fan-out): ingestLead produces a lead-scorer LEAD.NEW and a hubspot-sync LEAD.SYNC_HUBSPOT', async () => {
     const result = await ingestLead(db, {
       source: 'website',
       productLine: 'scooter',
@@ -533,8 +543,8 @@ d('hubspot dual-write (live)', () => {
       phone: '+33612345682',
     });
 
-    // The hubspot-sync worker we started will consume its row + sync to the
-    // stub. Wait for the deal id to land.
+    // The hubspot-sync worker we started will consume the LEAD.SYNC_HUBSPOT row
+    // off the 'hubspot' queue + sync to the stub. Wait for the deal id to land.
     await waitFor(async () => {
       const [row] = await db.select().from(leads).where(eq(leads.id, result.leadId));
       return Boolean(row?.hubspotDealId);
@@ -547,9 +557,12 @@ d('hubspot dual-write (live)', () => {
     expect(rows).toHaveLength(2);
     const roles = rows.map((r) => r.toRole).sort();
     expect(roles).toEqual(['hubspot-sync', 'lead-scorer']);
-    // Every row carries the same intent + the same priority.
+    // The lead-scorer row is LEAD.NEW; the hubspot-sync row is LEAD.SYNC_HUBSPOT.
+    const byRole = new Map(rows.map((r) => [r.toRole, r]));
+    expect(byRole.get('lead-scorer')!.intent).toBe('LEAD.NEW');
+    expect(byRole.get('hubspot-sync')!.intent).toBe('LEAD.SYNC_HUBSPOT');
+    // Both at priority 4.
     for (const r of rows) {
-      expect(r.intent).toBe('LEAD.NEW');
       expect(r.priority).toBe(4);
     }
   });
@@ -611,8 +624,8 @@ d('hubspot dual-write (live)', () => {
       {
         fromRole: 'channel.intake',
         toRole: 'hubspot-sync',
-        intent: 'LEAD.NEW',
-        payload: { leadId, source: 'website', productLine: 'scooter' },
+        intent: 'LEAD.SYNC_HUBSPOT',
+        payload: { leadId },
         correlationId: leadId,
         priority: 4,
       },

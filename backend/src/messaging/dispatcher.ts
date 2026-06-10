@@ -57,6 +57,9 @@ const INTENT_TO_QUEUE: Record<string, string> = {
   'LEAD.PROFILE_UPDATED': 'lead',
   'LEAD.SCORED': 'lead',
   'LEAD.STATUS_CHANGED': 'lead',
+  // hubspot mirror — dedicated queue so hubspot-sync is the SOLE consumer
+  // (no wrong-role race against lead-scorer on the shared 'lead' queue).
+  'LEAD.SYNC_HUBSPOT': 'hubspot',
   // customer
   'CUSTOMER.MESSAGE_RECEIVED': 'customer',
   'CUSTOMER.MESSAGE_SENT': 'customer',

@@ -28,6 +28,7 @@ const KNOWN_INTENTS: ReadonlyArray<[string, z.ZodTypeAny]> = [
   ['LEAD.PROFILE_UPDATED', intents.LeadProfileUpdatedPayload],
   ['LEAD.SCORED', intents.LeadScoredPayload],
   ['LEAD.STATUS_CHANGED', intents.LeadStatusChangedPayload],
+  ['LEAD.SYNC_HUBSPOT', intents.LeadSyncHubspotPayload],
   ['CUSTOMER.MESSAGE_RECEIVED', intents.CustomerMessageReceivedPayload],
   ['CUSTOMER.MESSAGE_SENT', intents.CustomerMessageSentPayload],
   ['CUSTOMER.OCR_REQUESTED', intents.CustomerOcrRequestedPayload],
