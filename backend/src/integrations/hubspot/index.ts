@@ -15,5 +15,17 @@ export {
 export {
   startHubSpotSyncWorker,
   handleLeadNew,
+  reconcileLead,
   type HubSpotSyncWorkerOptions,
 } from './dual-write.js';
+
+export { ensureSchema, ASSURYAL_PIPELINE_LABEL, type ResolvedSchema } from './schema.js';
+
+export {
+  stageKeyForStatus,
+  buildContactProps,
+  buildDealProps,
+  type LeadStatus,
+  type StageKey,
+  type MirrorInput,
+} from './mirror-map.js';

@@ -55,6 +55,18 @@ function defaultRespond(req: IncomingMessage, res: ServerResponse): void {
     res.end(JSON.stringify({ id: 'deal-1' }));
     return;
   }
+  // PATCH deal update (Phase 1 reconcileLead update path)
+  if (url.startsWith('/crm/v3/objects/deals/') && req.method === 'PATCH') {
+    res.statusCode = 200;
+    res.end(JSON.stringify({ id: 'deal-1' }));
+    return;
+  }
+  // PATCH contact update
+  if (url.startsWith('/crm/v3/objects/contacts/') && req.method === 'PATCH') {
+    res.statusCode = 200;
+    res.end(JSON.stringify({ id: 'contact-1' }));
+    return;
+  }
   if (url.includes('/associations/default/deals/')) {
     res.statusCode = 204;
     res.end();
@@ -67,12 +79,27 @@ function defaultRespond(req: IncomingMessage, res: ServerResponse): void {
         results: [
           {
             id: 'default-pipe',
+            label: 'Assuryal',
             displayOrder: 0,
-            stages: [{ id: 'new-stage', displayOrder: 0 }],
+            stages: [
+              { id: 'nouveau-stage', label: 'Nouveau', displayOrder: 0 },
+              { id: 'qualifie-stage', label: 'Qualifié', displayOrder: 1 },
+              { id: 'devis-en-cours-stage', label: 'Devis en cours', displayOrder: 2 },
+              { id: 'devis-envoye-stage', label: 'Devis envoyé / Négociation', displayOrder: 3 },
+              { id: 'attente-stage', label: 'En attente paiement', displayOrder: 4 },
+              { id: 'gagne-stage', label: 'Gagné', displayOrder: 5 },
+              { id: 'perdu-stage', label: 'Perdu', displayOrder: 6 },
+            ],
           },
         ],
       }),
     );
+    return;
+  }
+  // ensureProperty GET — respond 200 (property already exists) to avoid create attempts
+  if (url.startsWith('/crm/v3/properties/') && req.method === 'GET') {
+    res.statusCode = 200;
+    res.end(JSON.stringify({ name: 'stub', label: 'Stub', type: 'string' }));
     return;
   }
   res.statusCode = 404;
@@ -259,9 +286,9 @@ d('hubspot dual-write (live)', () => {
   });
 
   // -------------------------------------------------------------------------
-  // 2. Idempotency
+  // 2. Idempotency (create-or-update)
   // -------------------------------------------------------------------------
-  it('test 2 (idempotency): second LEAD.NEW for the same lead is skipped, no duplicate HubSpot calls', async () => {
+  it('test 2 (idempotency): second LEAD.NEW for the same lead performs an update (no second deal create)', async () => {
     const customer = await insertCustomer(db, {
       fullName: 'Bob',
       email: 'bob@example.com',
@@ -278,7 +305,7 @@ d('hubspot dual-write (live)', () => {
       .returning();
     const leadId = insertedLead!.id;
 
-    // First send -> writes hubspot_deal_id.
+    // First send -> creates deal, writes hubspot_deal_id.
     await sendMessage(
       { db },
       {
@@ -294,10 +321,12 @@ d('hubspot dual-write (live)', () => {
       const [row] = await db.select().from(leads).where(eq(leads.id, leadId));
       return Boolean(row?.hubspotDealId);
     });
-    const firstCallCount = seenRequests.length;
-    expect(firstCallCount).toBeGreaterThan(0);
+    const dealCreates = seenRequests.filter(
+      (r) => r.url === '/crm/v3/objects/deals' && r.method === 'POST',
+    ).length;
+    expect(dealCreates).toBe(1);
 
-    // Second send -> handler should see hubspot_deal_id and short-circuit.
+    // Second send -> handler sees hubspot_deal_id → update path (PATCH deal, no new POST deal).
     await sendMessage(
       { db },
       {
@@ -310,8 +339,7 @@ d('hubspot dual-write (live)', () => {
       },
     );
 
-    // Wait until BOTH agent_messages rows are consumed (the second one with
-    // the skipped:'already-synced' result).
+    // Wait until BOTH agent_messages rows are consumed.
     await waitFor(async () => {
       const rows = await db
         .select()
@@ -320,15 +348,19 @@ d('hubspot dual-write (live)', () => {
       return rows.length === 2 && rows.every((r) => r.consumedAt != null);
     });
 
-    expect(seenRequests.length).toBe(firstCallCount);
+    // Only one deal POST ever (the create). Second call uses PATCH.
+    const dealCreatesAfter = seenRequests.filter(
+      (r) => r.url === '/crm/v3/objects/deals' && r.method === 'POST',
+    ).length;
+    expect(dealCreatesAfter).toBe(1);
 
     const rows = await db
       .select()
       .from(agentMessages)
       .where(eq(agentMessages.correlationId, leadId));
     const results = rows.map((r) => r.result as Record<string, unknown>);
-    const skipped = results.find((r) => r['skipped'] === 'already-synced');
-    expect(skipped).toBeDefined();
+    const updated = results.find((r) => r['updated'] === true);
+    expect(updated).toBeDefined();
   });
 
   // -------------------------------------------------------------------------

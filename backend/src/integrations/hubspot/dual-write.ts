@@ -1,31 +1,28 @@
 /**
- * HubSpot dual-write worker (M5.T2).
+ * HubSpot dual-write worker (M5.T2) — Phase 1 rich mirror.
  *
- * Subscribes to the `lead` BullMQ queue as role `hubspot-sync`. Whenever an
- * intake produces a LEAD.NEW message, this worker fans out to HubSpot:
+ * Subscribes to the `lead` BullMQ queue as role `hubspot-sync`. Handles
+ * LEAD.NEW and LEAD.SYNC_HUBSPOT intents.
  *
- *   1. Decrypt the customer's PII (email/phone/name).
- *   2. Upsert a contact by email (idempotent — repeat emails merge).
- *   3. Resolve the default pipeline + first stage (cached after first hit).
- *   4. Create a deal in that stage.
- *   5. Associate contact <-> deal.
- *   6. Write `hubspot_deal_id` back onto the lead row — idempotency anchor.
+ * reconcileLead():
+ *   - Build a full MirrorInput snapshot (lead + customer + latestQuote).
+ *   - Ensure all custom properties + the Assuryal pipeline exist (ensureSchema).
+ *   - Upsert the HubSpot Contact with rich props (address, preferred channel/time).
+ *   - CREATE the Deal if hubspot_deal_id is null; UPDATE it otherwise.
+ *   - On create: associate contact↔deal, write hubspot_deal_id back.
  *
  * Idempotency:
- *   - We early-return on `leads.hubspot_deal_id != null`. The dispatcher's
- *     row-claim already guarantees once-and-only-once delivery for LEAD.NEW,
- *     but a manual requeue or replay must not double-write to HubSpot.
+ *   - Create path: `hubspot_deal_id IS NULL` guard.
+ *   - Update path: PATCH is idempotent (same props → same result).
  *
  * PII discipline:
  *   - No logs ever contain email/phone/name. Lead id + customer id + deal id
  *     + booleans only.
  *
- * Custom-property degrade:
- *   - We send `f16_lead_id`, `f16_product_line`, `f16_source` as a hint to
- *     the runbook setup, but a fresh portal won't have those properties yet.
- *     If HubSpot returns "Property X does not exist", we strip those props
- *     and retry once. The runbook (M5.T5) tells Ridaa to create them so the
- *     fallback path becomes rare.
+ * Custom-property degrade (contact upsert only):
+ *   - The degrade helper strips known F16 custom props and retries once when
+ *     HubSpot reports "Property X does not exist". Kept for the contact path;
+ *     the deal create passes props directly via `createDeal({ properties })`.
  */
 import { eq } from 'drizzle-orm';
 import type { Worker } from 'bullmq';
@@ -38,6 +35,14 @@ import {
   type MessageHandlerResult,
 } from '../../messaging/dispatcher.js';
 import { HubSpotClient, HubSpotApiError } from './client.js';
+import { ensureSchema } from './schema.js';
+import {
+  buildContactProps,
+  buildDealProps,
+  stageKeyForStatus,
+  type MirrorInput,
+} from './mirror-map.js';
+import { getLatestQuoteForLead } from '../../db/repositories/quotes.js';
 import { logger } from '../../logger.js';
 
 export interface HubSpotSyncWorkerOptions {
@@ -52,12 +57,6 @@ export interface HubSpotSyncWorkerOptions {
 /** Custom-property names we attempt to set, in one place so the degrade-list matches. */
 const F16_CUSTOM_PROPS = ['f16_lead_id', 'f16_product_line', 'f16_source'] as const;
 
-type LeadNewPayload = {
-  leadId: string;
-  productLine: 'scooter' | 'car';
-  source?: string;
-};
-
 /**
  * Start the worker. Returns the BullMQ Worker handle so the caller can close
  * it on shutdown.
@@ -67,146 +66,171 @@ export function startHubSpotSyncWorker(opts: HubSpotSyncWorkerOptions): Worker {
     db: opts.db,
     queue: 'lead',
     role: 'hubspot-sync',
-    handler: async (envelope: AgentMessageEnvelope): Promise<MessageHandlerResult> =>
-      handleLeadNew(opts, envelope),
+    handler: async (envelope: AgentMessageEnvelope): Promise<MessageHandlerResult> => {
+      if (envelope.intent !== 'LEAD.NEW' && envelope.intent !== 'LEAD.SYNC_HUBSPOT') {
+        return { ok: true, result: { skipped: 'wrong-intent' } };
+      }
+      const payload = envelope.payload as { leadId: string };
+      return reconcileLead(opts, payload.leadId);
+    },
   });
 }
 
 /**
- * Exported for direct testing (no BullMQ in the path). The integration test
- * still exercises the worker; unit-style tests can call this without a queue.
+ * Back-compat shim for existing tests/callers.
+ *
+ * The original handleLeadNew only accepted LEAD.NEW and created the deal.
+ * reconcileLead now handles both LEAD.NEW + LEAD.SYNC_HUBSPOT and does
+ * create-or-update. Callers passing LEAD.NEW still get create-or-update
+ * semantics (create on first call, update on replay).
  */
 export async function handleLeadNew(
   opts: HubSpotSyncWorkerOptions,
   env: AgentMessageEnvelope,
 ): Promise<MessageHandlerResult> {
-  if (env.intent !== 'LEAD.NEW') {
+  if (env.intent !== 'LEAD.NEW' && env.intent !== 'LEAD.SYNC_HUBSPOT') {
     return { ok: true, result: { skipped: 'wrong-intent' } };
   }
-  const payload = env.payload as LeadNewPayload;
+  const payload = env.payload as { leadId: string };
+  return reconcileLead(opts, payload.leadId);
+}
 
-  // 1. Load the lead. Defensive: a stale BullMQ job might race a deletion.
-  const [lead] = await opts.db.select().from(leads).where(eq(leads.id, payload.leadId)).limit(1);
-  if (!lead) {
-    return { ok: false, error: `Lead ${payload.leadId} not found` };
-  }
+/**
+ * Reconcile a lead's full state into HubSpot (create-or-update). Idempotent.
+ *
+ * First call (hubspot_deal_id IS NULL): creates Contact + Deal, associates
+ * them, and writes hubspot_deal_id back onto the lead.
+ *
+ * Subsequent calls: PATCHes Contact + Deal with the latest rich props + stage.
+ */
+export async function reconcileLead(
+  opts: HubSpotSyncWorkerOptions,
+  leadId: string,
+): Promise<MessageHandlerResult> {
+  // 1. Load the lead.
+  const [lead] = await opts.db.select().from(leads).where(eq(leads.id, leadId)).limit(1);
+  if (!lead) return { ok: false, error: `Lead ${leadId} not found` };
+  if (!lead.customerId) return { ok: true, result: { skipped: 'no-customer' } };
 
-  // 2. Idempotency guard — already synced this lead.
-  if (lead.hubspotDealId) {
-    logger.debug(
-      { leadId: lead.id, hubspotDealId: lead.hubspotDealId },
-      'hubspot-sync: already synced, skipping',
-    );
-    return {
-      ok: true,
-      result: { skipped: 'already-synced', hubspotDealId: lead.hubspotDealId },
-    };
-  }
-
-  if (!lead.customerId) {
-    logger.warn(
-      { leadId: lead.id },
-      'hubspot-sync: lead has no customer_id; cannot sync without contact info',
-    );
-    return { ok: true, result: { skipped: 'no-customer' } };
-  }
-
+  // 2. Load the customer.
   const [customerRow] = await opts.db
     .select()
     .from(customers)
     .where(eq(customers.id, lead.customerId))
     .limit(1);
-  if (!customerRow) {
-    return { ok: false, error: `Customer ${lead.customerId} not found` };
-  }
+  if (!customerRow) return { ok: false, error: `Customer ${lead.customerId} not found` };
 
-  // 3. Decrypt PII. We never log these values.
+  // 3. Decrypt PII. Never log these values.
   const email = decryptPII(customerRow.email);
+  if (!email) return { ok: true, result: { skipped: 'no-email' } };
   const phone = decryptPII(customerRow.phone);
   const fullName = decryptPII(customerRow.fullName);
+  const address = customerRow.address ? decryptPII(customerRow.address) : null;
 
-  if (!email) {
-    // Email is the upsert key. Without it we'd have to invent a HubSpot
-    // identifier per lead, which would break dedup across submissions.
-    logger.warn(
-      { leadId: lead.id },
-      'hubspot-sync: no email on customer; deferring (V1 limitation)',
-    );
-    return { ok: true, result: { skipped: 'no-email' } };
-  }
+  // 4. Fetch the latest quote (for amount + devis number on the deal).
+  const latestQuote = await getLatestQuoteForLead(opts.db, lead.id);
 
-  const trimmedName = (fullName ?? '').trim();
-  const [firstName, ...rest] = trimmedName.split(/\s+/).filter(Boolean);
-  const lastName = rest.join(' ') || undefined;
+  // 5. Ensure HubSpot schema (custom props + Assuryal pipeline). Cached after first call.
+  const schema = await ensureSchema(opts.client);
 
-  // 4. Build the props we'd LIKE to set. Degrade list is built from the
-  //    canonical custom-property names so the retry path stays in sync.
-  const productLine = payload.productLine;
-  const customProps: Record<string, string> = {
-    f16_lead_id: lead.id,
-    f16_product_line: productLine,
-    f16_source: lead.source,
+  // 6. Build the mapping input.
+  const mirror: MirrorInput = {
+    lead: {
+      id: lead.id,
+      status: lead.status as MirrorInput['lead']['status'],
+      source: lead.source,
+      productLine: lead.productLine as 'scooter' | 'car',
+      score: lead.score ?? null,
+      preferredChannel: (lead.preferredChannel as 'whatsapp' | 'call' | null) ?? null,
+      preferredTime: (lead.preferredTime as string | null) ?? null,
+    },
+    customer: {
+      fullName,
+      email,
+      phone,
+      address,
+      vehicle: customerRow.vehicle ?? null,
+    },
+    latestQuote: latestQuote
+      ? {
+          status: latestQuote.status,
+          monthlyPremium: latestQuote.monthlyPremium ?? null,
+          comptantDue: latestQuote.comptantDue ?? null,
+          maxanceDevisNumber: latestQuote.maxanceDevisNumber ?? null,
+          productVariant: latestQuote.productVariant,
+        }
+      : null,
   };
 
-  // 5. Upsert contact (with degrade-on-missing-property).
+  const contactProps = buildContactProps(mirror);
+  const dealProps = buildDealProps(mirror);
+  const stageKey = stageKeyForStatus(mirror.lead.status);
+  const stageId = stageKey !== null ? schema.stageIdByKey[stageKey] : undefined;
+
+  // 7. Upsert Contact (with custom-property degrade retained).
   const contact = await callWithPropertyDegrade(
     (props) =>
       opts.client.upsertContact({
         email,
-        ...(firstName ? { firstName } : {}),
-        ...(lastName ? { lastName } : {}),
+        ...(contactProps.firstname ? { firstName: contactProps.firstname } : {}),
+        ...(contactProps.lastname ? { lastName: contactProps.lastname } : {}),
         ...(phone ? { phone } : {}),
         properties: props,
       }),
-    customProps,
+    contactProps,
     { leadId: lead.id, op: 'upsertContact' },
   );
 
-  // 6. Resolve pipeline + stage (cached on the client after first hit).
-  const { pipelineId, newDealStageId } = await resolvePipelineAndStage(opts);
+  // 8. Create or update the Deal.
+  if (!lead.hubspotDealId) {
+    // --- CREATE path ---
+    const deal = await opts.client.createDeal({
+      dealName: String(dealProps.dealname),
+      pipeline: schema.pipelineId,
+      ...(stageId ? { dealStage: stageId } : {}),
+      productLine: mirror.lead.productLine,
+      properties: dealProps,
+    });
 
-  // 7. Create deal.
-  const dealName = buildDealName(productLine, fullName, email);
-  const deal = await callWithPropertyDegrade(
-    (props) =>
-      opts.client.createDeal({
-        dealName,
-        pipeline: pipelineId,
-        dealStage: newDealStageId,
-        productLine,
-        properties: props,
-      }),
-    { f16_lead_id: lead.id },
-    { leadId: lead.id, op: 'createDeal' },
-  );
+    await opts.client.associateContactDeal(contact.hubspotContactId, deal.hubspotDealId);
 
-  // 8. Associate.
-  await opts.client.associateContactDeal(contact.hubspotContactId, deal.hubspotDealId);
+    await opts.db
+      .update(leads)
+      .set({ hubspotDealId: deal.hubspotDealId, updatedAt: new Date() })
+      .where(eq(leads.id, lead.id));
 
-  // 9. Persist deal id back onto the lead — the idempotency anchor for any
-  //    replay.
-  await opts.db
-    .update(leads)
-    .set({ hubspotDealId: deal.hubspotDealId, updatedAt: new Date() })
-    .where(eq(leads.id, lead.id));
+    logger.info(
+      {
+        leadId: lead.id,
+        hubspotDealId: deal.hubspotDealId,
+        hubspotContactId: contact.hubspotContactId,
+        contactWasNew: contact.isNew,
+      },
+      'hubspot-sync: lead created',
+    );
 
-  logger.info(
-    {
-      leadId: lead.id,
-      hubspotDealId: deal.hubspotDealId,
-      hubspotContactId: contact.hubspotContactId,
-      contactWasNew: contact.isNew,
-    },
-    'hubspot-sync: lead synced',
-  );
+    return {
+      ok: true,
+      result: {
+        created: true,
+        hubspotDealId: deal.hubspotDealId,
+        hubspotContactId: contact.hubspotContactId,
+        contactWasNew: contact.isNew,
+      },
+    };
+  }
+
+  // --- UPDATE path ---
+  const updateProps: Record<string, string | number> = { ...dealProps };
+  if (stageId) updateProps.dealstage = stageId;
+
+  await opts.client.updateDeal(lead.hubspotDealId, updateProps);
+
+  logger.info({ leadId: lead.id, hubspotDealId: lead.hubspotDealId }, 'hubspot-sync: lead updated');
 
   return {
     ok: true,
-    result: {
-      hubspotDealId: deal.hubspotDealId,
-      hubspotContactId: contact.hubspotContactId,
-      contactWasNew: contact.isNew,
-    },
+    result: { updated: true, hubspotDealId: lead.hubspotDealId },
   };
 }
 
@@ -249,28 +273,4 @@ async function callWithPropertyDegrade<T>(
     }
     throw err;
   }
-}
-
-async function resolvePipelineAndStage(
-  opts: HubSpotSyncWorkerOptions,
-): Promise<{ pipelineId: string; newDealStageId: string }> {
-  if (opts.pipelineId && opts.newDealStageId) {
-    return { pipelineId: opts.pipelineId, newDealStageId: opts.newDealStageId };
-  }
-  const discovered = await opts.client.getDefaultDealPipelineAndStage();
-  return {
-    pipelineId: opts.pipelineId ?? discovered.pipelineId,
-    newDealStageId: opts.newDealStageId ?? discovered.newDealStageId,
-  };
-}
-
-/** "Trottinette — Marie Curie" / "Auto — marie@example.fr" / "Trottinette — Lead" */
-function buildDealName(
-  productLine: 'scooter' | 'car',
-  fullName: string | null,
-  email: string,
-): string {
-  const product = productLine === 'scooter' ? 'Trottinette' : 'Auto';
-  const subject = (fullName && fullName.trim()) || email || 'Lead';
-  return `${product} — ${subject}`;
 }
