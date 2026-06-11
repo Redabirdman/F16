@@ -327,6 +327,15 @@ export async function start(port: number = Number(process.env.PORT ?? 3001)): Pr
   const server = serve({ fetch: liveApp.fetch, port }) as Server;
   logger.info({ port }, 'f16-backend listening');
 
+  // Wire channel adapters into the runtime registry. Without this, every
+  // `sendViaChannel()` → `getChannel('whatsapp'|'email')` throws
+  // "No channel registered", so the sales-agent + engagement-agent
+  // customer-reply path is dead. Env-gated inside the helper (no-op when
+  // WAHA_BASE_URL / BILLIONMAIL_SMTP_HOST are unset), so dev/test boots are
+  // unaffected; a bad SMTP config is logged and never blocks boot.
+  const { registerConfiguredChannels } = await import('./channels/bootstrap.js');
+  await registerConfiguredChannels();
+
   // Boot every backend worker / agent (env-gated). Closes the deployment
   // loop for hubspot-sync, reporter-agent, maxance-operator, the sales
   // spawn orchestrator, and lead-scorer. Without this call, the routes

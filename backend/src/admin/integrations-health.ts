@@ -31,7 +31,7 @@
  *   - Anthropic      — env-presence only (ANTHROPIC_API_KEY). A live
  *                      probe burns tokens; not worth it.
  *   - OpenRouter     — env-presence only (OPENROUTER_API_KEY)
- *   - BillionMail    — env-presence only (BILLIONMAIL_API_KEY)
+ *   - BillionMail    — env-presence only (BILLIONMAIL_SMTP_HOST)
  *
  * PII discipline: probe error messages are passed through `String(err)`
  * — no secrets are echoed since we never include the key in the request
@@ -78,7 +78,7 @@ export function buildAdminIntegrationsRouter(opts: AdminIntegrationsRouterOption
       envPresenceProbe('maxance', 'MAXANCE_DRIVER'),
       envPresenceProbe('anthropic', 'ANTHROPIC_API_KEY'),
       envPresenceProbe('openrouter', 'OPENROUTER_API_KEY'),
-      envPresenceProbe('billionmail', 'BILLIONMAIL_API_KEY'),
+      envPresenceProbe('billionmail', 'BILLIONMAIL_SMTP_HOST'),
     ]);
     const body: IntegrationsHealthResponse = {
       generatedAt: new Date().toISOString(),
