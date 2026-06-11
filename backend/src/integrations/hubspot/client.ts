@@ -532,7 +532,8 @@ export class HubSpotClient {
    *
    * Endpoint: POST /crm/v3/objects/communications
    * Properties:
-   *   hs_communication_channel_type — WHATSAPP | SMS
+   *   hs_communication_channel_type — WHATS_APP | SMS (HubSpot enum: note the
+   *                                    underscore in WHATS_APP)
    *   hs_communication_body         — message body (never logged on our end)
    *   hs_communication_logged_from  — CRM (required by HubSpot)
    *   hs_timestamp                  — ISO-8601 datetime
@@ -542,7 +543,7 @@ export class HubSpotClient {
    * Requires scope: crm.objects.communications.write (not yet on Service Key).
    */
   async createCommunication(input: {
-    channel: 'WHATSAPP' | 'SMS';
+    channel: 'WHATS_APP' | 'SMS';
     body: string;
     contactId: string;
     dealId: string;

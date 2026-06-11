@@ -62,7 +62,7 @@ describe('mapActivityToEngagement — voice-call-ended', () => {
 });
 
 describe('mapActivityToEngagement — whatsapp-turn', () => {
-  it('returns a communication spec with WHATSAPP channel and inbound prefix', () => {
+  it('returns a communication spec with WHATS_APP channel and inbound prefix', () => {
     const event: WhatsAppTurnEvent = {
       kind: 'whatsapp-turn',
       customerId: 'cust-1',
@@ -74,7 +74,7 @@ describe('mapActivityToEngagement — whatsapp-turn', () => {
     const spec = mapActivityToEngagement(event);
     expect(spec.kind).toBe('communication');
     if (spec.kind !== 'communication') return;
-    expect(spec.channel).toBe('WHATSAPP');
+    expect(spec.channel).toBe('WHATS_APP');
     expect(spec.body).toContain('[Client]');
     expect(spec.body).toContain('Bonjour');
     expect(spec.timestamp).toBe(TS);

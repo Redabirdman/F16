@@ -86,7 +86,7 @@ export interface CallSpec {
 
 export interface CommunicationSpec {
   kind: 'communication';
-  channel: 'WHATSAPP' | 'SMS';
+  channel: 'WHATS_APP' | 'SMS';
   body: string;
   timestamp: Date;
 }
@@ -101,7 +101,7 @@ export type EngagementSpec = NoteSpec | CallSpec | CommunicationSpec;
  * Map an F16 activity event to a HubSpot engagement spec.
  *
  * voice-call-ended   → call engagement (OUTBOUND, with duration + summary)
- * whatsapp-turn      → communication engagement (WHATSAPP channel)
+ * whatsapp-turn      → communication engagement (WHATS_APP channel)
  * engagement-followup → note engagement (cadence step + nudge text)
  * human-action-resolved → note engagement (resolution summary)
  */
@@ -126,7 +126,7 @@ export function mapActivityToEngagement(event: F16ActivityEvent): EngagementSpec
       const prefix = event.direction === 'inbound' ? '[Client] ' : '[Agent Assuryal] ';
       return {
         kind: 'communication',
-        channel: 'WHATSAPP',
+        channel: 'WHATS_APP',
         body: prefix + event.body,
         timestamp: event.timestamp,
       };

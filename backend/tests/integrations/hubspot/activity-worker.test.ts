@@ -43,7 +43,7 @@ type MockCreateCall = MockedFunction<
 >;
 type MockCreateCommunication = MockedFunction<
   (input: {
-    channel: 'WHATSAPP' | 'SMS';
+    channel: 'WHATS_APP' | 'SMS';
     body: string;
     contactId: string;
     dealId: string;

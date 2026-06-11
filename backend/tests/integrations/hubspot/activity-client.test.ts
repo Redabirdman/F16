@@ -207,10 +207,10 @@ describe('HubSpotClient.createCall', () => {
 // ---------------------------------------------------------------------------
 
 describe('HubSpotClient.createCommunication', () => {
-  it('POSTs /crm/v3/objects/communications with WHATSAPP channel + associations', async () => {
+  it('POSTs /crm/v3/objects/communications with WHATS_APP channel + associations', async () => {
     const ts = new Date('2024-06-10T10:00:00.000Z');
     const out = await buildClient().createCommunication({
-      channel: 'WHATSAPP',
+      channel: 'WHATS_APP',
       body: '[Client] Bonjour',
       contactId: 'contact-123',
       dealId: 'deal-456',
@@ -231,7 +231,7 @@ describe('HubSpotClient.createCommunication', () => {
       }>;
     };
 
-    expect(b.properties.hs_communication_channel_type).toBe('WHATSAPP');
+    expect(b.properties.hs_communication_channel_type).toBe('WHATS_APP');
     expect(b.properties.hs_communication_body).toBe('[Client] Bonjour');
     // hs_communication_logged_from is required by HubSpot (= 'CRM').
     expect(b.properties.hs_communication_logged_from).toBe('CRM');
