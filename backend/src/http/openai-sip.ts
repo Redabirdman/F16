@@ -81,6 +81,8 @@ interface CallContext {
   sipCallId: string;
   leadId?: string;
   customerId?: string;
+  /** Epoch ms when we accepted the incoming call — used as call-start for duration. */
+  connectedAt: number;
   /** Ordered transcript of the call, flushed to conversation_turns on close. */
   transcripts: Array<{ direction: 'inbound' | 'outbound'; content: string }>;
   /** Set before a deliberate hangup (terminer_appel) so close doesn't reconnect. */
@@ -140,7 +142,7 @@ export function buildOpenAiSipRouter(opts: OpenAiSipRouterOptions): Hono | null 
     }
 
     // 3. Resolve the F16 lead/customer from our custom SIP header (best-effort).
-    const ctx: CallContext = { sipCallId: callId, transcripts: [] };
+    const ctx: CallContext = { sipCallId: callId, connectedAt: Date.now(), transcripts: [] };
     const sessionId = findSipHeader(event.data?.sip_headers, SESSION_SIP_HEADER);
     if (sessionId) {
       try {
@@ -490,7 +492,9 @@ async function persistTranscripts(db: Database, ctx: CallContext): Promise<void>
       .map((t) => t.content)
       .join(' / ');
     const transcriptSummary = summaryLines.slice(0, 500) || 'Appel vocal Assuryal';
-    const durationMs = ctx.transcripts.length > 0 ? Date.now() - base : undefined;
+    // Real call duration = now − accept time (ctx.connectedAt), NOT `base` which
+    // is set right before the insert loop and would measure insert time (~0ms).
+    const durationMs = ctx.transcripts.length > 0 ? Date.now() - ctx.connectedAt : undefined;
     await emitHubSpotActivity(db, {
       customerId: ctx.customerId,
       ...(ctx.leadId !== undefined ? { leadId: ctx.leadId } : {}),

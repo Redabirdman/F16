@@ -134,9 +134,7 @@ export class HubSpotApiError extends Error {
  *     types: [{ associationCategory: "HUBSPOT_DEFINED", associationTypeId: <n> }]
  *   }]
  */
-function buildAssociations(
-  links: Array<{ toId: string; typeId: number }>,
-): Array<{
+function buildAssociations(links: Array<{ toId: string; typeId: number }>): Array<{
   to: { id: string };
   types: Array<{ associationCategory: string; associationTypeId: number }>;
 }> {
@@ -487,7 +485,11 @@ export class HubSpotClient {
    *   hs_call_title     — short label shown in the timeline header
    *   hs_call_body      — transcript summary or notes (never logged on our end)
    *   hs_timestamp      — ISO-8601 datetime
-   *   hs_call_duration  — optional, milliseconds integer
+   *   hs_call_status    — COMPLETED (we only log calls that already happened);
+   *                       HubSpot 400s without it.
+   *   hs_call_duration  — optional, milliseconds. HubSpot v3 expects a STRING of
+   *                       milliseconds, so we String()-ify it; omitted when no
+   *                       finite duration is provided.
    *   hs_call_direction — OUTBOUND (we always originate calls)
    * Associations:
    *   contact typeId 194 (HUBSPOT_DEFINED), deal typeId 206 (HUBSPOT_DEFINED)
@@ -505,9 +507,10 @@ export class HubSpotClient {
       hs_call_body: input.body,
       hs_timestamp: input.timestamp.toISOString(),
       hs_call_direction: 'OUTBOUND',
+      hs_call_status: 'COMPLETED',
     };
-    if (typeof input.durationMs === 'number') {
-      properties.hs_call_duration = input.durationMs;
+    if (typeof input.durationMs === 'number' && Number.isFinite(input.durationMs)) {
+      properties.hs_call_duration = String(input.durationMs);
     }
     const associations = buildAssociations([
       { toId: input.contactId, typeId: 194 },
@@ -530,6 +533,7 @@ export class HubSpotClient {
    * Properties:
    *   hs_communication_channel_type — WHATSAPP | SMS
    *   hs_communication_body         — message body (never logged on our end)
+   *   hs_communication_logged_from  — CRM (required by HubSpot)
    *   hs_timestamp                  — ISO-8601 datetime
    * Associations:
    *   contact typeId 82 (HUBSPOT_DEFINED), deal typeId 86 (HUBSPOT_DEFINED)
@@ -551,6 +555,7 @@ export class HubSpotClient {
       properties: {
         hs_communication_channel_type: input.channel,
         hs_communication_body: input.body,
+        hs_communication_logged_from: 'CRM',
         hs_timestamp: input.timestamp.toISOString(),
       },
       associations,

@@ -172,7 +172,10 @@ describe('HubSpotClient.createCall', () => {
     expect(b.properties.hs_call_title).toBe('Appel sortant Assuryal');
     expect(b.properties.hs_call_body).toBe('Client discussed scooter plan');
     expect(b.properties.hs_call_direction).toBe('OUTBOUND');
-    expect(b.properties.hs_call_duration).toBe(90000);
+    // hs_call_status is required — HubSpot 400s without it (completed logged call).
+    expect(b.properties.hs_call_status).toBe('COMPLETED');
+    // HubSpot v3 expects hs_call_duration as a STRING of milliseconds.
+    expect(b.properties.hs_call_duration).toBe('90000');
     expect(b.properties.hs_timestamp).toBe('2024-06-10T10:00:00.000Z');
 
     // Associations — contact typeId 194, deal typeId 206 (HUBSPOT_DEFINED)
@@ -185,7 +188,7 @@ describe('HubSpotClient.createCall', () => {
     expect(contactAssoc!.types[0]!.associationCategory).toBe('HUBSPOT_DEFINED');
   });
 
-  it('omits hs_call_duration when durationMs is not provided', async () => {
+  it('omits hs_call_duration when durationMs is not provided (status still set)', async () => {
     await buildClient().createCall({
       title: 'Test',
       body: 'body',
@@ -195,6 +198,7 @@ describe('HubSpotClient.createCall', () => {
     });
     const b = seenRequests[0]!.body as { properties: Record<string, unknown> };
     expect(b.properties.hs_call_duration).toBeUndefined();
+    expect(b.properties.hs_call_status).toBe('COMPLETED');
   });
 });
 
@@ -229,6 +233,8 @@ describe('HubSpotClient.createCommunication', () => {
 
     expect(b.properties.hs_communication_channel_type).toBe('WHATSAPP');
     expect(b.properties.hs_communication_body).toBe('[Client] Bonjour');
+    // hs_communication_logged_from is required by HubSpot (= 'CRM').
+    expect(b.properties.hs_communication_logged_from).toBe('CRM');
     expect(b.properties.hs_timestamp).toBe('2024-06-10T10:00:00.000Z');
 
     // Associations — contact typeId 82, deal typeId 86 (HUBSPOT_DEFINED)
