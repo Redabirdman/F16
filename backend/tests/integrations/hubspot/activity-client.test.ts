@@ -9,7 +9,7 @@
  * Association typeIds verified:
  *   Notes:  contact 202, deal 214
  *   Calls:  contact 194, deal 206
- *   Comms:  contact  82, deal  86
+ *   Comms:  contact  81, deal  85
  *
  * NEVER hits api.hubapi.com.
  */
@@ -237,12 +237,12 @@ describe('HubSpotClient.createCommunication', () => {
     expect(b.properties.hs_communication_logged_from).toBe('CRM');
     expect(b.properties.hs_timestamp).toBe('2024-06-10T10:00:00.000Z');
 
-    // Associations — contact typeId 82, deal typeId 86 (HUBSPOT_DEFINED)
+    // Associations — contact typeId 81, deal typeId 85 (HUBSPOT_DEFINED)
     const contactAssoc = b.associations.find((a) => a.to.id === 'contact-123');
     const dealAssoc = b.associations.find((a) => a.to.id === 'deal-456');
 
-    expect(contactAssoc!.types[0]!.associationTypeId).toBe(82);
-    expect(dealAssoc!.types[0]!.associationTypeId).toBe(86);
+    expect(contactAssoc!.types[0]!.associationTypeId).toBe(81);
+    expect(dealAssoc!.types[0]!.associationTypeId).toBe(85);
     expect(contactAssoc!.types[0]!.associationCategory).toBe('HUBSPOT_DEFINED');
   });
 

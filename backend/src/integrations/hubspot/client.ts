@@ -434,11 +434,12 @@ export class HubSpotClient {
   // Association typeIds (HUBSPOT_DEFINED category):
   //   Notes  → contact: 202,  deal: 214
   //   Calls  → contact: 194,  deal: 206
-  //   Comms  → contact: 82,   deal: 86
+  //   Comms  → contact: 81,   deal: 85
   //
-  // These are the HubSpot-standard (built-in) association type IDs from the
-  // public docs. If live-verify finds a mismatch, check:
+  // These are the HubSpot-standard (built-in) association type IDs, verified
+  // live 2026-06-11 against this portal via
   //   GET /crm/v4/associations/{fromObjectType}/{toObjectType}/labels
+  // (the comms IDs are 81/85 here, not the 82/86 seen in some older docs).
   //
   // PII note: activity BODIES contain message text — that is the point of
   // the timeline. We NEVER log the body content; only ids + booleans surface
@@ -536,7 +537,7 @@ export class HubSpotClient {
    *   hs_communication_logged_from  — CRM (required by HubSpot)
    *   hs_timestamp                  — ISO-8601 datetime
    * Associations:
-   *   contact typeId 82 (HUBSPOT_DEFINED), deal typeId 86 (HUBSPOT_DEFINED)
+   *   contact typeId 81 (HUBSPOT_DEFINED), deal typeId 85 (HUBSPOT_DEFINED)
    *
    * Requires scope: crm.objects.communications.write (not yet on Service Key).
    */
@@ -548,8 +549,8 @@ export class HubSpotClient {
     timestamp: Date;
   }): Promise<{ communicationId: string }> {
     const associations = buildAssociations([
-      { toId: input.contactId, typeId: 82 },
-      { toId: input.dealId, typeId: 86 },
+      { toId: input.contactId, typeId: 81 },
+      { toId: input.dealId, typeId: 85 },
     ]);
     const json = await this.request<{ id?: string }>('POST', '/crm/v3/objects/communications', {
       properties: {
