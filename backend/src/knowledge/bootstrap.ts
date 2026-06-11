@@ -10,6 +10,7 @@
  *   - F16_KNOWLEDGE_MD_PATH    — the Assuryal markdown knowledge base
  *   - F16_WEBSITE_SOURCE_PATH  — the conversion-machine React source tree
  *   - F16_MAXANCE_CATALOG_PATH — the Maxance product-fiche catalogue (M9)
+ *   - F16_CLOSING_RULES_PATH   — the Assuryal closing/souscription rules (M8.T7)
  */
 import { registerKnowledgeSource } from './source-registry.js';
 
@@ -44,6 +45,20 @@ export function bootstrapKnowledgeSources(): void {
     name: 'maxance_product_catalog',
     adapter: 'markdown-file',
     path: process.env['F16_MAXANCE_CATALOG_PATH'] ?? '../MAXANCE catalogue produits agent.md',
+    intervalHours: 24,
+    scheduled: true,
+  });
+
+  // M8.T7 — Assuryal closing/souscription rules (Achraf's doc, compliant
+  // version): formules + garanties additionnelles, fractionnement and first
+  // prélèvement mechanics, frais d'inscription au contrat (approved wording
+  // only), closing process (IBAN/BIC/titulaire/ville de naissance), escalation
+  // triggers. Retrieved by the Sales Agent via `knowledge.search` during the
+  // closing phase. Stable hand-curated rules → daily re-ingest is plenty.
+  registerKnowledgeSource({
+    name: 'assuryal_closing_rules',
+    adapter: 'markdown-file',
+    path: process.env['F16_CLOSING_RULES_PATH'] ?? '../ASSURYAL closing souscription agent.md',
     intervalHours: 24,
     scheduled: true,
   });

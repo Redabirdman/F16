@@ -66,18 +66,44 @@ describe('buildSalesAgentSystemPrompt()', () => {
     expect(a.map((f) => f.cache)).toEqual(b.map((f) => f.cache));
   });
 
-  it('keeps the four cached fragments under ~8 kB for a typical context', () => {
-    // Cap was 6 kB through M6. M8.T8 Option A bumped to 8 kB because the
-    // playbook now lists the FIVE required trottinette qualification fields
-    // (purchasePriceEur, purchaseDate, postalCode, clientDateOfBirth,
-    // stationnement) with concrete French phrasings for each — added ~1 kB,
-    // intentional growth (the playbook was previously incomplete and the
-    // LLM couldn't have called quote.request correctly). Token cost: ~+250
-    // input tokens per first-turn-after-deploy, amortised by prompt caching
-    // afterward.
+  it('keeps the four cached fragments under ~10 kB for a typical context', () => {
+    // Cap was 6 kB through M6, 8 kB after M8.T8 (five trottinette
+    // qualification fields). M8.T7 (closing) bumped to 10 kB: the closing
+    // phase now carries the souscription guidance (IBAN/BIC/titulaire/ville
+    // de naissance collection, fractionnement mechanics, the ONLY-approved
+    // frais formulations, garanties additionnelles, escalation) — ~1.5 kB of
+    // intentional growth so the agent can actually close. Token cost
+    // amortised by prompt caching as before.
     const frags = buildSalesAgentSystemPrompt(minimalCtx);
     const totalBytes = frags.reduce((sum, f) => sum + Buffer.byteLength(f.text, 'utf8'), 0);
-    expect(totalBytes).toBeLessThan(8000);
+    expect(totalBytes).toBeLessThan(10000);
+  });
+
+  it('playbook closing phase carries the compliant frais framing and collection list', () => {
+    const text = PLAYBOOK_FRAGMENT.text;
+    // The three approved formulations are present…
+    expect(text).toContain("frais d'inscription au contrat");
+    expect(text).toContain('honoraires de gestion du dossier');
+    expect(text).toContain('accompagnement administratif personnalisé');
+    // …and the forbidden state-tax framing is NOT (compliance: Ridaa 2026-06-11).
+    expect(text).not.toContain('taxe imposée par l’État');
+    expect(text).not.toContain("taxe imposée par l'État");
+    // Closing data collection + fractionnement mechanics + escalation hook.
+    expect(text).toContain('IBAN');
+    expect(text).toContain('BIC');
+    expect(text).toContain('titulaire du compte');
+    expect(text).toContain('ville de naissance');
+    expect(text).toContain('prorata du mois en cours');
+    expect(text).toContain('prélevée le 5');
+    expect(text).toContain('human.escalate');
+    // Tool-agnostic on purpose: the subscription tool lands in a later task.
+    expect(text).not.toContain('subscription.request');
+  });
+
+  it('guardrails forbid tax-framing of frais and cross-channel bank data leaks', () => {
+    const text = GUARDRAILS_FRAGMENT.text;
+    expect(text).toContain('Présenter les frais comme une taxe ou une obligation légale');
+    expect(text).toContain('Communiquer une donnée bancaire en clair dans un autre canal');
   });
 });
 

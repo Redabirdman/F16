@@ -90,12 +90,13 @@ describe('source-registry', () => {
     expect(names1).toContain('assuryal_knowledge_md');
     expect(names1).toContain('assuryal_website_source');
     expect(names1).toContain('maxance_product_catalog');
-    expect(names1).toHaveLength(3);
+    expect(names1).toContain('assuryal_closing_rules');
+    expect(names1).toHaveLength(4);
 
     // Second call must NOT throw (despite duplicate-name guard inside register)
     // because the once-flag short-circuits.
     expect(() => bootstrapKnowledgeSources()).not.toThrow();
-    expect(listKnowledgeSources()).toHaveLength(3);
+    expect(listKnowledgeSources()).toHaveLength(4);
 
     const md = getKnowledgeSource('assuryal_knowledge_md');
     expect(md?.adapter).toBe('markdown-file');
@@ -109,5 +110,11 @@ describe('source-registry', () => {
     expect(catalog?.adapter).toBe('markdown-file');
     expect(catalog?.intervalHours).toBe(24);
     expect(catalog?.scheduled).toBe(true);
+
+    // M8.T7 — Assuryal closing/souscription rules, markdown adapter too.
+    const closing = getKnowledgeSource('assuryal_closing_rules');
+    expect(closing?.adapter).toBe('markdown-file');
+    expect(closing?.intervalHours).toBe(24);
+    expect(closing?.scheduled).toBe(true);
   });
 });
