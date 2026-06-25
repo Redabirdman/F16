@@ -14,6 +14,7 @@ import AdsPage from '@/pages/Ads';
 import KnowledgePage from '@/pages/Knowledge';
 import PromptsPage from '@/pages/Prompts';
 import TeamChatPage from '@/pages/TeamChat';
+import SimulationPage from '@/pages/Simulation';
 import { useRealtime } from '@/lib/use-realtime';
 
 const OfficePage = lazy(() => import('@/pages/Office'));
@@ -64,6 +65,9 @@ function Nav(): ReactElement {
         </NavLink>
         <NavLink to="/audit" className={navItemClass}>
           Audit
+        </NavLink>
+        <NavLink to="/sim" className={navItemClass}>
+          Simulation
         </NavLink>
       </div>
     </nav>
@@ -167,6 +171,7 @@ export default function App(): ReactElement {
         <Route path="/knowledge" element={<KnowledgePage />} />
         <Route path="/integrations" element={<IntegrationsPage />} />
         <Route path="/audit" element={<AuditPage />} />
+        <Route path="/sim" element={<SimulationPage />} />
       </Routes>
     </div>
   );

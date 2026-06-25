@@ -526,3 +526,67 @@ export function getTeamChat(limit = 50): Promise<TeamChatResponse> {
 export function sendTeamChat(text: string): Promise<{ ok: boolean }> {
   return apiPost<{ ok: boolean }>('/v1/admin/team-chat/send', { text });
 }
+
+// ----- M8-sim: simulation control (inject fake FB lead / reset / status) -----
+
+/** Optional quote prefill forwarded to the real intake pipeline. */
+export interface SimQuoteInput {
+  purchasePriceEur: number;
+  purchaseDate: string;
+  postalCode: string;
+  stationnement: string;
+  dateOfBirth: string;
+  city?: string;
+}
+
+export interface SimInjectBody {
+  fullName: string;
+  phone: string;
+  email?: string;
+  preferredChannel: 'whatsapp' | 'call';
+  preferredTime?: string;
+  productLine: 'scooter';
+  quote?: SimQuoteInput;
+}
+
+/** Mirrors POST /v1/admin/sim/inject-lead (200). */
+export interface SimInjectResult {
+  leadId: string;
+  customerId: string;
+  dedup: 'new_customer' | 'matched_existing';
+  source: 'meta';
+  productLine: string;
+}
+
+export function injectSimulatedLead(body: SimInjectBody): Promise<SimInjectResult> {
+  return apiPost<SimInjectResult>('/v1/admin/sim/inject-lead', body);
+}
+
+/** Mirrors POST /v1/admin/sim/status (200). */
+export interface SimStatus {
+  channels: { whatsapp: boolean; voice: boolean };
+  contact: { exists: boolean; leadCount: number; lastLeadStatus: string | null } | null;
+}
+
+export function getSimStatus(phone?: string): Promise<SimStatus> {
+  return apiPost<SimStatus>('/v1/admin/sim/status', { phone });
+}
+
+/** Mirrors POST /v1/admin/sim/reset (200). */
+export interface SimResetResult {
+  purged: {
+    customer: number;
+    leads: number;
+    quotes: number;
+    conversations: number;
+    humanActions: number;
+  };
+  hubspot: 'archived' | 'not_found' | 'error' | 'skipped';
+}
+
+export function resetSimulatedContact(body: {
+  phone?: string;
+  email?: string;
+}): Promise<SimResetResult> {
+  return apiPost<SimResetResult>('/v1/admin/sim/reset', body);
+}
