@@ -15,6 +15,7 @@ import type { Database } from '../index.js';
 import { customers } from '../schema/index.js';
 import type { Customer } from '../schema/customers.js';
 import { encryptPII, decryptPII, hashPII } from '../crypto.js';
+import { normalizeIban, validateIban, maskIban } from '../../lib/iban.js';
 
 /** Plaintext domain shape passed into the repo. */
 export interface CustomerInput {
@@ -112,6 +113,101 @@ export async function getCustomerByPhone(
   const [row] = await db.select().from(customers).where(eq(customers.phoneHash, hash)).limit(1);
   if (!row) return null;
   return decryptCustomerRow(row);
+}
+
+// ---------------------------------------------------------------------------
+// Bank details for souscription prélèvement (M8.T7 closing).
+// Same AES-256-GCM at-rest pattern as the PII block. The plaintext NEVER
+// appears in logs or error messages — only maskIban() forms.
+// ---------------------------------------------------------------------------
+
+/** Plaintext bank details collected at closing. */
+export interface CustomerBankDetailsInput {
+  iban: string;
+  bic: string;
+  accountHolder: string;
+  /** Lieu de naissance — Ville. Plaintext column (same tier as dob). */
+  birthPlaceCity: string;
+}
+
+/** Decrypted bank details, or nulls where never collected. */
+export interface CustomerBankDetails {
+  iban: string | null;
+  bic: string | null;
+  accountHolder: string | null;
+  birthPlaceCity: string | null;
+}
+
+/**
+ * Persist the closing bank details encrypted on the customer row. The IBAN is
+ * checksum-validated (mod-97) and normalized before encryption so the Maxance
+ * Operator always reads a fill-ready value. Throws on an invalid IBAN with a
+ * MASKED reference only.
+ */
+export async function saveCustomerBankDetails(
+  db: Database,
+  customerId: string,
+  input: CustomerBankDetailsInput,
+): Promise<void> {
+  const iban = normalizeIban(input.iban);
+  if (!validateIban(iban)) {
+    throw new Error(`saveCustomerBankDetails: invalid IBAN checksum (${maskIban(iban)})`);
+  }
+  const bic = input.bic.replace(/\s+/g, '').toUpperCase();
+  if (!/^[A-Z]{6}[A-Z0-9]{2}([A-Z0-9]{3})?$/.test(bic)) {
+    throw new Error('saveCustomerBankDetails: invalid BIC format');
+  }
+  const accountHolder = input.accountHolder.trim();
+  if (!accountHolder) {
+    throw new Error('saveCustomerBankDetails: accountHolder is required');
+  }
+  const birthPlaceCity = input.birthPlaceCity.trim();
+  if (!birthPlaceCity) {
+    throw new Error('saveCustomerBankDetails: birthPlaceCity is required');
+  }
+
+  const [row] = await db
+    .update(customers)
+    .set({
+      bankIbanEnc: encryptPII(iban),
+      bankBicEnc: encryptPII(bic),
+      bankAccountHolderEnc: encryptPII(accountHolder),
+      birthPlaceCity,
+      updatedAt: new Date(),
+    })
+    .where(eq(customers.id, customerId))
+    .returning({ id: customers.id });
+
+  if (!row) throw new Error(`saveCustomerBankDetails: no customer with id=${customerId}`);
+}
+
+/**
+ * Decrypt the closing bank details for the Maxance Operator. Returns null when
+ * the customer doesn't exist; null fields when never collected. Callers MUST
+ * NOT log the returned values (maskIban only).
+ */
+export async function getCustomerBankDetails(
+  db: Database,
+  customerId: string,
+): Promise<CustomerBankDetails | null> {
+  const [row] = await db
+    .select({
+      bankIbanEnc: customers.bankIbanEnc,
+      bankBicEnc: customers.bankBicEnc,
+      bankAccountHolderEnc: customers.bankAccountHolderEnc,
+      birthPlaceCity: customers.birthPlaceCity,
+    })
+    .from(customers)
+    .where(eq(customers.id, customerId))
+    .limit(1);
+  if (!row) return null;
+
+  return {
+    iban: decryptPII(row.bankIbanEnc),
+    bic: decryptPII(row.bankBicEnc),
+    accountHolder: decryptPII(row.bankAccountHolderEnc),
+    birthPlaceCity: row.birthPlaceCity,
+  };
 }
 
 /** Reverse the encryption applied at insert. Exported for tests + adjacent repos. */

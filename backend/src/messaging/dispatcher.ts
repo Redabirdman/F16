@@ -82,6 +82,12 @@ const INTENT_TO_QUEUE: Record<string, string> = {
   'PAYMENT.PENDING_HUMAN': 'quote',
   'CONTRACT.PENDING_HUMAN': 'quote',
   'CONTRACT.ISSUED': 'quote',
+  // subscription (M8.T7 closing) — same queue as quotes: the Maxance Operator
+  // and Sales Agent already consume 'quote', and the souscription is the same
+  // single-browser-session resource the quote flows serialize on.
+  'SUBSCRIPTION.REQUESTED': 'quote',
+  'SUBSCRIPTION.READY': 'quote',
+  'SUBSCRIPTION.FAILED': 'quote',
   // voice
   'VOICE.CALL_SCHEDULED': 'voice',
   'VOICE.CALL_STARTED': 'voice',

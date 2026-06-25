@@ -20,6 +20,7 @@
  */
 import { eq, asc, desc } from 'drizzle-orm';
 import { sql } from 'drizzle-orm';
+import type { PgUpdateSetSource } from 'drizzle-orm/pg-core';
 import type { Database } from '../index.js';
 import { quotes, maxanceActions } from '../schema/index.js';
 import type { Quote, MaxanceAction } from '../schema/quotes.js';
@@ -202,6 +203,110 @@ export async function markQuotePreview(
   }
 
   return row;
+}
+
+// ---------------------------------------------------------------------------
+// Subscription lifecycle (M8.T7 closing) — none → requested → in_progress →
+// pending_inspector → contract_issued, sad path any → failed. Every transition
+// mirrors to HubSpot when the quote is lead-linked, same contract as
+// markQuoteConfirmed: persist FIRST, emit AFTER, never throw on the emit.
+// ---------------------------------------------------------------------------
+
+/** Shared transition writer — update, assert the row exists, mirror to HubSpot. */
+async function setSubscriptionFields(
+  db: Database,
+  quoteId: string,
+  label: string,
+  set: PgUpdateSetSource<typeof quotes>,
+): Promise<Quote> {
+  const [row] = await db.update(quotes).set(set).where(eq(quotes.id, quoteId)).returning();
+
+  if (!row) throw new Error(`${label}: no quote with id=${quoteId}`);
+
+  // Non-blocking — emitHubSpotSync never throws and a HubSpot hiccup must not
+  // break the closing flow.
+  if (row.leadId) {
+    await emitHubSpotSync(db, row.leadId);
+  }
+
+  return row;
+}
+
+/** Customer accepted + closing data complete — SUBSCRIPTION.REQUESTED emitted. */
+export async function markSubscriptionRequested(db: Database, quoteId: string): Promise<Quote> {
+  return setSubscriptionFields(db, quoteId, 'markSubscriptionRequested', {
+    subscriptionStatus: 'requested',
+    subscriptionRequestedAt: new Date(),
+  });
+}
+
+/** The Maxance Operator picked the job up and is driving the portal. */
+export async function markSubscriptionInProgress(db: Database, quoteId: string): Promise<Quote> {
+  return setSubscriptionFields(db, quoteId, 'markSubscriptionInProgress', {
+    subscriptionStatus: 'in_progress',
+  });
+}
+
+/** Outputs surfaced by the souscription run when it stops at the Paiement page. */
+export interface MarkSubscriptionPendingInspectorInput {
+  /** Maxance souscripteur/instance ref (e.g. "T…"). */
+  souscripteurRef?: string | null;
+  /** "Comptant dû" read from the portal, €. Stored as numeric(10,2). */
+  montantComptantEur?: number | null;
+  /** Comptant à régler breakdown (frais de gestion / commission / dossier …). */
+  fraisBreakdown?: Record<string, unknown> | null;
+  /** Stripe payment link for the Assuryal frais, when Stripe is configured. */
+  stripePaymentLinkUrl?: string | null;
+}
+
+/**
+ * Souscription reached the Paiement page — everything automated is done and
+ * the inspector handoff (human) is the only step left. Stamps the portal
+ * outputs; skips any field the extraction did not produce.
+ */
+export async function markSubscriptionPendingInspector(
+  db: Database,
+  quoteId: string,
+  input: MarkSubscriptionPendingInspectorInput,
+): Promise<Quote> {
+  return setSubscriptionFields(db, quoteId, 'markSubscriptionPendingInspector', {
+    subscriptionStatus: 'pending_inspector',
+    ...(input.souscripteurRef != null ? { souscripteurRef: input.souscripteurRef } : {}),
+    ...(input.montantComptantEur != null && Number.isFinite(input.montantComptantEur)
+      ? { montantComptant: input.montantComptantEur.toFixed(2) }
+      : {}),
+    ...(input.fraisBreakdown != null ? { fraisBreakdown: input.fraisBreakdown } : {}),
+    ...(input.stripePaymentLinkUrl != null
+      ? { stripePaymentLinkUrl: input.stripePaymentLinkUrl }
+      : {}),
+  });
+}
+
+/** Inspector released the contract — Maxance issued it; the lead closes won. */
+export async function markSubscriptionContractIssued(
+  db: Database,
+  quoteId: string,
+): Promise<Quote> {
+  return setSubscriptionFields(db, quoteId, 'markSubscriptionContractIssued', {
+    subscriptionStatus: 'contract_issued',
+    subscriptionCompletedAt: new Date(),
+  });
+}
+
+/**
+ * Souscription failed (UI drift, wrong state, duplicate contact, …). The
+ * errorCode is merged into raw_response (audit) — no dedicated column, the
+ * tagged code is diagnostic, not queryable state.
+ */
+export async function markSubscriptionFailed(
+  db: Database,
+  quoteId: string,
+  input: { errorCode: string },
+): Promise<Quote> {
+  return setSubscriptionFields(db, quoteId, 'markSubscriptionFailed', {
+    subscriptionStatus: 'failed',
+    rawResponse: sql`COALESCE(${quotes.rawResponse}, '{}'::jsonb) || jsonb_build_object('subscriptionError', ${input.errorCode}::text)`,
+  });
 }
 
 /** Optional fields on a Maxance action append. `actionText` is required. */

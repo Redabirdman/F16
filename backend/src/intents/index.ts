@@ -2,6 +2,7 @@ export * from './_registry.js';
 export * from './lead.js';
 export * from './customer.js';
 export * from './quote.js';
+export * from './subscription.js';
 export * from './voice.js';
 export * from './ads.js';
 export * from './knowledge.js';

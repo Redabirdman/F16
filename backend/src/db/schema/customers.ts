@@ -58,6 +58,19 @@ export const customers = pgTable(
     ibanCiphertext: text('iban_ciphertext'),
     ibanHash: varchar('iban_hash', { length: 43 }), // HMAC-SHA256 base64url = 43 chars
 
+    // --- Bank details for souscription prélèvement (M8.T7 closing) ---
+    // Same AES-256-GCM pattern as the PII block above. Distinct from the
+    // intake-dedup iban_ciphertext: these are the verified payment details
+    // collected at closing (IBAN + BIC + titulaire du compte) and are only
+    // ever read by the Maxance Operator via getCustomerBankDetails.
+    bankIbanEnc: text('bank_iban_enc'),
+    bankBicEnc: text('bank_bic_enc'),
+    bankAccountHolderEnc: text('bank_account_holder_enc'),
+    // Lieu de naissance — Ville. Plaintext on purpose: same low-sensitivity
+    // tier as `dob`/`civility` (a city name alone identifies no one), and the
+    // Maxance form needs it as a plain string.
+    birthPlaceCity: text('birth_place_city'),
+
     // --- Plaintext low-sensitivity scalars ---
     dob: date('dob'),
     civility: text('civility'),

@@ -78,6 +78,29 @@ export const quotes = pgTable(
 
     pdfUrl: text('pdf_url'),
 
+    // --- M8.T7 closing (souscription) lifecycle ---
+    // Deliberately `text` with a TS-level enum rather than a pg ENUM: the
+    // closing flow is young and will grow states (e.g. payment-confirmed)
+    // faster than we want to ship `ALTER TYPE ... ADD VALUE` migrations.
+    // Happy path: none → requested → in_progress → pending_inspector →
+    // contract_issued. Sad path: any → failed.
+    subscriptionStatus: text('subscription_status', {
+      enum: ['none', 'requested', 'in_progress', 'pending_inspector', 'contract_issued', 'failed'],
+    })
+      .notNull()
+      .default('none'),
+    // Maxance souscripteur/instance ref from the Paiement page (e.g. "T…").
+    souscripteurRef: text('souscripteur_ref'),
+    // "Comptant dû" shown on the Coordonnées bancaires page, €.
+    montantComptant: numeric('montant_comptant', { precision: 10, scale: 2 }),
+    // Comptant à régler breakdown read from the portal (frais de gestion /
+    // commission / frais de dossier …) — opaque audit payload.
+    fraisBreakdown: jsonb('frais_breakdown').$type<Record<string, unknown>>(),
+    // Stripe payment link the customer pays the Assuryal frais through.
+    stripePaymentLinkUrl: text('stripe_payment_link_url'),
+    subscriptionRequestedAt: timestamp('subscription_requested_at', { withTimezone: true }),
+    subscriptionCompletedAt: timestamp('subscription_completed_at', { withTimezone: true }),
+
     // Correlates this quote with the maxance_actions rows produced for it.
     // UNIQUE — exactly one quote per Maxance Operator session.
     sessionId: text('session_id').notNull(),
