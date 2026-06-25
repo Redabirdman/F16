@@ -62,6 +62,10 @@ export class SalesAgent extends BaseAgent {
           return await this.handleQuoteReady(envelope);
         case 'QUOTE.FAILED':
           return await this.handleQuoteFailed(envelope);
+        case 'SUBSCRIPTION.READY':
+          return await this.handleSubscriptionReady(envelope);
+        case 'SUBSCRIPTION.FAILED':
+          return await this.handleSubscriptionFailed(envelope);
         default:
           logger.debug(
             { intent: envelope.intent, instanceId: this.instanceId },
@@ -662,6 +666,215 @@ export class SalesAgent extends BaseAgent {
   }
 
   /**
+   * Maxance Operator (M8.T7) ran the souscription up to its stop point (the
+   * Paiement page in real mode, or the pre-Valider gate in dryRun). Build the
+   * customer-facing closing message with the EXACT figures + the Stripe
+   * payment link and send it on the customer's most-recent channel.
+   *
+   * No LLM call — the montant comptant + frais figures must be exact and
+   * stable (compliant frais wording is locked, Achraf reviews once). When
+   * Stripe is unconfigured the operator sends `paymentLinkUrl: null`; we then
+   * fall back to a "votre conseiller vous transmet le lien" line so the
+   * customer still gets a coherent message.
+   *
+   * Idempotency: same `#<quoteId>` outbound-turn marker scheme as the QUOTE.*
+   * handlers — a worker restart mid-flight must not double-send.
+   */
+  private async handleSubscriptionReady(
+    envelope: AgentMessageEnvelope,
+  ): Promise<MessageHandlerResult> {
+    const payload = envelope.payload as {
+      quoteId: string;
+      customerId: string;
+      souscripteurRef?: string;
+      montantComptantEur?: number;
+      fraisComptantEur?: number;
+      fraisDossierTotalEur: number;
+      assuryalFraisEur: number;
+      paymentLinkUrl: string | null;
+      dryRun: boolean;
+    };
+
+    const leadId = this.leadIdFromEnvelope(envelope);
+    if (!leadId) return { ok: false, error: 'no leadId available' };
+
+    const recentTurns = await listTurns(this.db, {
+      customerId: payload.customerId,
+      leadId,
+      limit: 5,
+    });
+    const channel: ChannelId = (recentTurns[0]?.channel as ChannelId | undefined) ?? 'whatsapp';
+
+    const { customer, lead, contactRef } = await this.resolveCustomerAndContact(leadId, channel);
+    if (!contactRef) {
+      logger.warn(
+        { leadId: lead.id, channel, instanceId: this.instanceId, quoteId: payload.quoteId },
+        'sales-agent: no contact address for subscription-ready channel',
+      );
+      return { ok: true, result: { skipped: 'no-contact-address', channel } };
+    }
+
+    // Idempotency: skip if we've already sent the "souscription / paiement"
+    // message for this quoteId.
+    const marker = `#${payload.quoteId.slice(0, 8)} paiement`;
+    const alreadySent = recentTurns.some(
+      (t) => t.direction === 'outbound' && (t.content ?? '').includes(marker),
+    );
+    if (alreadySent) {
+      return { ok: true, result: { skipped: 'already-sent', quoteId: payload.quoteId } };
+    }
+
+    const fullName = decryptPII(customer.fullName) ?? '';
+    const firstName = (fullName.split(' ')[0] ?? '').trim();
+    const draft = formatSubscriptionReadyMessage({
+      firstName,
+      ...(payload.montantComptantEur !== undefined
+        ? { montantComptantEur: payload.montantComptantEur }
+        : {}),
+      fraisDossierTotalEur: payload.fraisDossierTotalEur,
+      assuryalFraisEur: payload.assuryalFraisEur,
+      paymentLinkUrl: payload.paymentLinkUrl,
+      quoteId: payload.quoteId,
+    });
+
+    const send = await sendViaChannel({
+      db: this.db,
+      customerId: customer.id,
+      leadId: lead.id,
+      to: contactRef,
+      body: [{ type: 'text', text: draft }],
+      agentRole: this.role,
+      agentInstance: this.instanceId,
+      correlationId: payload.quoteId,
+    });
+
+    logger.info(
+      {
+        leadId: lead.id,
+        customerId: customer.id,
+        instanceId: this.instanceId,
+        channel,
+        quoteId: payload.quoteId,
+        dryRun: payload.dryRun,
+        hasPaymentLink: payload.paymentLinkUrl !== null,
+        externalId: send.receipt.externalId,
+      },
+      'sales-agent: subscription-ready closing message sent to customer',
+    );
+
+    return {
+      ok: true,
+      result: {
+        intent: envelope.intent,
+        sent: true,
+        channel,
+        externalId: send.receipt.externalId,
+        quoteId: payload.quoteId,
+      },
+    };
+  }
+
+  /**
+   * Maxance Operator (M8.T7) reported a souscription failure (wrong state, UI
+   * drift, duplicate contact, …). Mirror of `handleQuoteFailed`: send the
+   * customer a deliberately vague apologetic French notice AND escalate to a
+   * HUMAN_ACTION carrying the real errorCode/detail for Ridaa/Achraf. The
+   * customer never sees the internal failure code.
+   */
+  private async handleSubscriptionFailed(
+    envelope: AgentMessageEnvelope,
+  ): Promise<MessageHandlerResult> {
+    const payload = envelope.payload as {
+      quoteId: string;
+      customerId: string;
+      errorCode: string;
+      detail?: string;
+      screenshots?: { step: string; url: string }[];
+    };
+
+    const leadId = this.leadIdFromEnvelope(envelope);
+    if (!leadId) return { ok: false, error: 'no leadId available' };
+
+    const recentTurns = await listTurns(this.db, {
+      customerId: payload.customerId,
+      leadId,
+      limit: 5,
+    });
+    const channel: ChannelId = (recentTurns[0]?.channel as ChannelId | undefined) ?? 'whatsapp';
+
+    const { customer, lead, contactRef } = await this.resolveCustomerAndContact(leadId, channel);
+    const fullName = decryptPII(customer.fullName) ?? '';
+    const firstName = (fullName.split(' ')[0] ?? '').trim();
+    const draft = formatSubscriptionFailedMessage({ firstName, quoteId: payload.quoteId });
+
+    // Always escalate — even if the customer channel is unreachable, the
+    // closing failure must reach a human (this is the money step).
+    const action = await humanActions.createAction(this.db, {
+      createdByAgent: `${this.role}#${this.instanceId}`,
+      correlationId: payload.quoteId,
+      intent: 'SUBSCRIPTION_FAILED',
+      severity: 2,
+      summary:
+        `Souscription ${payload.quoteId} échouée (${payload.errorCode}). ` +
+        `Lead ${leadId}. ${payload.detail ? `Détail : ${payload.detail}. ` : ''}` +
+        `Capture(s) : ${payload.screenshots?.length ?? 0}.`,
+      options: [
+        { id: 'retry', label: 'Relancer la souscription', kind: 'approve' },
+        { id: 'manual', label: 'Finaliser à la main', kind: 'approve' },
+        { id: 'abandon', label: 'Abandonner ce lead', kind: 'reject' },
+      ],
+    });
+
+    if (!contactRef) {
+      logger.warn(
+        { leadId: lead.id, channel, instanceId: this.instanceId, quoteId: payload.quoteId },
+        'sales-agent: no contact address for subscription-failed message; escalation logged',
+      );
+      return {
+        ok: true,
+        result: { skipped: 'no-contact-address', humanActionId: action.id, channel },
+      };
+    }
+
+    const send = await sendViaChannel({
+      db: this.db,
+      customerId: customer.id,
+      leadId: lead.id,
+      to: contactRef,
+      body: [{ type: 'text', text: draft }],
+      agentRole: this.role,
+      agentInstance: this.instanceId,
+      correlationId: payload.quoteId,
+    });
+
+    logger.warn(
+      {
+        leadId: lead.id,
+        customerId: customer.id,
+        instanceId: this.instanceId,
+        channel,
+        quoteId: payload.quoteId,
+        errorCode: payload.errorCode,
+        externalId: send.receipt.externalId,
+        humanActionId: action.id,
+      },
+      'sales-agent: subscription-failed notice sent + human escalation logged',
+    );
+
+    return {
+      ok: true,
+      result: {
+        intent: envelope.intent,
+        sent: true,
+        channel,
+        externalId: send.receipt.externalId,
+        humanActionId: action.id,
+        quoteId: payload.quoteId,
+      },
+    };
+  }
+
+  /**
    * Resolve the leadId for the current envelope.
    *
    * Two sources, in priority order:
@@ -785,6 +998,76 @@ export function formatQuoteFailedMessage(opts: { firstName?: string; quoteId: st
     '',
     "J'ai un petit souci technique pour finaliser votre devis trottinette.",
     'Un conseiller revient vers vous très rapidement.',
+    '',
+    `(réf #${opts.quoteId.slice(0, 8)})`,
+  ].join('\n');
+}
+
+/**
+ * Customer-facing closing message after the Maxance Operator reached the
+ * Paiement page (M8.T7). Templated, no LLM call — the figures must be EXACT
+ * and the frais wording COMPLIANT (Ridaa 2026-06-11: never "X € de frais de
+ * dossier" bluntly, never "taxe imposée par l'État"; use "honoraires
+ * d'accompagnement administratif"). The customer pays the Assuryal frais part
+ * via the payment link; the comptant restant is prélevé sur le compte.
+ *
+ * Pure function — covered by unit tests.
+ */
+export function formatSubscriptionReadyMessage(opts: {
+  firstName?: string;
+  montantComptantEur?: number;
+  fraisDossierTotalEur: number;
+  assuryalFraisEur: number;
+  paymentLinkUrl: string | null;
+  quoteId: string;
+}): string {
+  const greeting = opts.firstName ? `Bonjour ${opts.firstName},` : 'Bonjour,';
+  const lines: string[] = [greeting, '', 'Votre souscription est presque finalisée. 🎉', ''];
+
+  // Compliant frais framing — honoraires d'accompagnement, never "frais de
+  // dossier" bluntly, never a "taxe d'État".
+  lines.push(
+    `Pour activer votre contrat, il reste à régler vos honoraires ` +
+      `d'accompagnement administratif : ${formatEur(opts.assuryalFraisEur)}.`,
+  );
+  if (opts.montantComptantEur !== undefined) {
+    lines.push(
+      `Le comptant restant (${formatEur(opts.montantComptantEur)}) sera ` +
+        'prélevé sur votre compte le 5 du mois prochain.',
+    );
+  }
+  lines.push('');
+
+  if (opts.paymentLinkUrl) {
+    lines.push('Réglez en quelques secondes, en toute sécurité, via ce lien :');
+    lines.push(opts.paymentLinkUrl);
+  } else {
+    lines.push('Votre conseiller vous transmet le lien de paiement sécurisé dans un instant.');
+  }
+  lines.push('');
+  lines.push('Dès réception, votre contrat est débloqué et envoyé pour signature.');
+  lines.push('');
+  lines.push(`(réf #${opts.quoteId.slice(0, 8)} paiement)`);
+  return lines.join('\n');
+}
+
+/**
+ * Customer-facing message when the souscription flow failed. Deliberately
+ * vague — the customer doesn't need the Maxance internals; the real
+ * diagnostics live in the HUMAN_ACTION the handler also creates.
+ *
+ * Pure function — covered by unit tests.
+ */
+export function formatSubscriptionFailedMessage(opts: {
+  firstName?: string;
+  quoteId: string;
+}): string {
+  const greeting = opts.firstName ? `Bonjour ${opts.firstName},` : 'Bonjour,';
+  return [
+    greeting,
+    '',
+    "J'ai un petit souci technique pour finaliser votre souscription.",
+    'Un conseiller revient vers vous très rapidement pour la valider avec vous.',
     '',
     `(réf #${opts.quoteId.slice(0, 8)})`,
   ].join('\n');
