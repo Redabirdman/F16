@@ -73,6 +73,30 @@ export interface ConfirmQuoteResult {
   finalUrl: string;
 }
 
+/**
+ * M8.T7 B2: result of resuming an existing devis (reprise). The flow lands
+ * on the Garanties tab with the closing controls applied (commission forced
+ * to 22 — it resets to 9.0 on every reprise). Mirrors QuotePreviewResult's
+ * price+breakdown shape so the operator reuses the extraction.
+ */
+export interface ResumeDevisResult {
+  sessionId: string;
+  durationMs: number;
+  screenshots: { step: string; url: string }[];
+  devisNumber: string;
+  pricePreviewEur: { monthly?: number; annual?: number };
+  comptantBreakdown: ComptantBreakdown;
+  finalUrl: string;
+}
+
+/** Garanties closing-control overrides for a resume. */
+export interface ResumeDevisParams {
+  formule?: 'tiers_illimite' | 'vol_incendie' | 'dommages_tous_accidents';
+  /** Commission % override. Absent → the extension forces 22 (Achraf's rule). */
+  commissionPct?: number;
+  fractionnement?: 'mensuel' | 'annuel';
+}
+
 export interface ExtensionSubscriberInfo {
   civilite: 'monsieur' | 'madame';
   lastName: string;
@@ -430,6 +454,51 @@ export class ExtensionClient {
       ...(resp.comptantBreakdown !== undefined
         ? { comptantBreakdown: resp.comptantBreakdown }
         : {}),
+      finalUrl: resp.finalUrl,
+    };
+  }
+
+  /**
+   * M8.T7 B2: resume an existing devis by number (reprise) and advance to the
+   * configured Garanties tab. Leaves the extension tab on Garanties (ready
+   * for completeSubscription). Same UUID-correlated pattern + 6-min timeout.
+   */
+  async resumeDevis(
+    _sessionName: string,
+    args: { devisNumber: string } & ResumeDevisParams,
+    opts: { timeoutMs?: number } = {},
+  ): Promise<ResumeDevisResult> {
+    void _sessionName;
+    const cmd: Command = {
+      id: randomUUID(),
+      kind: 'devis.resume',
+      devisNumber: args.devisNumber,
+      ...(args.formule !== undefined ? { formule: args.formule } : {}),
+      ...(args.commissionPct !== undefined ? { commissionPct: args.commissionPct } : {}),
+      ...(args.fractionnement !== undefined ? { fractionnement: args.fractionnement } : {}),
+      ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
+    };
+    const resp = await this.send(cmd, opts.timeoutMs);
+    if (resp.kind !== 'devis.resume.ok') {
+      throw new ExtensionClientError(
+        `extension_resume_unexpected_kind:${resp.kind}`,
+        'unexpected_kind',
+      );
+    }
+    return {
+      sessionId: cmd.id,
+      durationMs: resp.durationMs,
+      screenshots: this.mapScreenshots(resp.screenshots),
+      devisNumber: resp.devisNumber,
+      pricePreviewEur: {
+        ...(resp.pricePreviewEur.monthly !== undefined
+          ? { monthly: resp.pricePreviewEur.monthly }
+          : {}),
+        ...(resp.pricePreviewEur.annual !== undefined
+          ? { annual: resp.pricePreviewEur.annual }
+          : {}),
+      },
+      comptantBreakdown: resp.comptantBreakdown,
       finalUrl: resp.finalUrl,
     };
   }

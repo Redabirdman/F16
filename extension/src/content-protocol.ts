@@ -212,6 +212,46 @@ export type GarantiesConfigureResponse =
   | { kind: 'garanties.ok'; log: string[]; finalCommission: string }
   | { kind: 'garanties.err'; log: string[]; error: string };
 
+/**
+ * Content → SW: "search a devis by number in the ACCES PORTEFEUILLE bar and
+ * submit — in the page's MAIN world" (M8.T7 B2).
+ *
+ * The criterion select (`critereSelected`=NO), the value input
+ * (`#valeurCritere`), and the search anchor (`#mainSearchLink`, whose href is
+ * `javascript:doSubmit(...)`) are all Maxance framework widgets — set the
+ * select + input, then dispatch a real click on the anchor in MAIN world so
+ * the inline `doSubmit` navigates the top frame to the "Visualisation du
+ * devis" dossier page. Same proven path as click.main-world.
+ */
+export interface RepriseSearchRequest {
+  kind: 'reprise.search-mw';
+  /** Devis number to look up (e.g. "DR0000976146"). */
+  devisNumber: string;
+}
+
+/** SW → content: outcome of the main-world devis search submit. */
+export type RepriseSearchResponse =
+  | { kind: 'reprise.search.ok'; log: string[] }
+  | { kind: 'reprise.search.err'; log: string[]; error: string };
+
+/**
+ * Content → SW: "call `doSubmit('repriseDevisMoto.do')` in the page's MAIN
+ * world" (M8.T7 B2). No params — the devis is already in the Maxance session
+ * after the search lands on the Visualisation page. Navigates the top frame
+ * to the resumed VÉHICULE tab. Routed through MAIN world because `doSubmit`
+ * is a page-global Proximéo function.
+ */
+export interface RepriseSubmitRequest {
+  kind: 'reprise.submit-mw';
+  /** Reprise action path (e.g. "repriseDevisMoto.do"). */
+  repriseDo: string;
+}
+
+/** SW → content: outcome of the main-world reprise submit. */
+export type RepriseSubmitResponse =
+  | { kind: 'reprise.submit.ok'; log: string[] }
+  | { kind: 'reprise.submit.err'; log: string[]; error: string };
+
 /** All possible inbound messages on the SW side. */
 export type SwInbound =
   | FlowOutcome
@@ -222,7 +262,9 @@ export type SwInbound =
   | DevisFillAndSubmitRequest
   | OpenMdiWindowRequest
   | CourrierFillSendRequest
-  | GarantiesConfigureRequest;
+  | GarantiesConfigureRequest
+  | RepriseSearchRequest
+  | RepriseSubmitRequest;
 
 /** All possible inbound messages on the content-script side. */
 export type ContentInbound = FlowInvocation;

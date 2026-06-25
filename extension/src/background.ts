@@ -35,10 +35,13 @@ import type {
   ContentInbound,
   FlowOutcome,
   GarantiesConfigureResponse,
+  RepriseSearchResponse,
+  RepriseSubmitResponse,
   ScreenshotResponse,
   SwInbound,
 } from './content-protocol.js';
 import { handleGarantiesConfigureMw } from './garanties-mw.js';
+import { handleRepriseSearchMw, handleRepriseSubmitMw } from './reprise-mw.js';
 
 /** Backend WS endpoint. Hard-coded for V1 — production = same machine. */
 const BACKEND_WS_URL = 'ws://127.0.0.1:9223';
@@ -105,7 +108,11 @@ async function forwardToContent(command: Command): Promise<Response> {
   // navigation-aware orchestrator. Plain commands (login.ensure) still
   // use the single-shot path because they're intra-page or have their
   // own URL-wait logic baked in.
-  if (command.kind === 'quote.preview' || command.kind === 'quote.confirm') {
+  if (
+    command.kind === 'quote.preview' ||
+    command.kind === 'quote.confirm' ||
+    command.kind === 'devis.resume'
+  ) {
     const resp = await orchestrateNavigatingFlow(tabId, command);
     // Autonomous self-healing (phase-2j, Ridaa 2026-06-03). A flow that
     // ends anywhere other than a clean Proximéo home poisons the NEXT run
@@ -117,6 +124,9 @@ async function forwardToContent(command: Command): Promise<Response> {
     //     edition page — the next preview needs the home/picker).
     //   - quote.preview SUCCESS → do NOT reset (it left the Garanties tab,
     //     which the immediately-following confirm needs).
+    //   - devis.resume SUCCESS → do NOT reset (M8.T7 B2: it leaves the tab on
+    //     the Garanties tab of the resumed devis, which the subscription
+    //     flow needs to keep). Errors still reset.
     // The response (devisNumber / detail / screenshots) is built before the
     // navigate, so nothing is lost.
     const shouldReset = resp.kind === 'error' || command.kind === 'quote.confirm';
@@ -235,12 +245,20 @@ async function orchestrateNavigatingFlow(tabId: number, command: Command): Promi
     if (resp.kind === 'error') {
       return { ...resp, screenshots: accumulatedScreenshots };
     }
-    if (resp.kind === 'quote.preview.ok' || resp.kind === 'quote.confirm.ok') {
+    if (
+      resp.kind === 'quote.preview.ok' ||
+      resp.kind === 'quote.confirm.ok' ||
+      resp.kind === 'devis.resume.ok'
+    ) {
       // Replace the final response's screenshots with the full accumulated
       // set so callers see the entire navigation chain.
       return { ...resp, screenshots: accumulatedScreenshots };
     }
-    if (resp.kind === 'quote.preview.navigating' || resp.kind === 'quote.confirm.navigating') {
+    if (
+      resp.kind === 'quote.preview.navigating' ||
+      resp.kind === 'quote.confirm.navigating' ||
+      resp.kind === 'devis.resume.navigating'
+    ) {
       console.warn(
         `[f16-ext] orchestrator: iter ${iter} returned navigating from=${resp.fromScreen} expected=${resp.expectedScreen}`,
       );
@@ -451,7 +469,9 @@ chrome.runtime.onMessage.addListener(
         | { kind: 'mdi.err'; error: string }
         | { kind: 'courrier.ok'; log: string[]; filledFrame: boolean; sent: boolean }
         | { kind: 'courrier.err'; error: string }
-        | GarantiesConfigureResponse,
+        | GarantiesConfigureResponse
+        | RepriseSearchResponse
+        | RepriseSubmitResponse,
     ) => void,
   ) => {
     if (message.kind === 'capture_screenshot') {
@@ -770,6 +790,44 @@ chrome.runtime.onMessage.addListener(
         (err: unknown) =>
           sendResponse({
             kind: 'garanties.err',
+            log: [],
+            error: err instanceof Error ? err.message.slice(0, 240) : String(err).slice(0, 240),
+          }),
+      );
+      return true;
+    }
+    if (message.kind === 'reprise.search-mw') {
+      // M8.T7 B2: fill the ACCES PORTEFEUILLE search bar + click the search
+      // link in MAIN world (logic in reprise-mw.ts). Routing shim, same
+      // shape as garanties.configure-mw.
+      const tabId = sender.tab?.id;
+      if (tabId === undefined) {
+        sendResponse({ kind: 'reprise.search.err', log: [], error: 'no_sender_tab' });
+        return false;
+      }
+      void handleRepriseSearchMw(tabId, message.devisNumber).then(
+        (resp) => sendResponse(resp),
+        (err: unknown) =>
+          sendResponse({
+            kind: 'reprise.search.err',
+            log: [],
+            error: err instanceof Error ? err.message.slice(0, 240) : String(err).slice(0, 240),
+          }),
+      );
+      return true;
+    }
+    if (message.kind === 'reprise.submit-mw') {
+      // M8.T7 B2: call doSubmit('repriseDevisMoto.do') in MAIN world.
+      const tabId = sender.tab?.id;
+      if (tabId === undefined) {
+        sendResponse({ kind: 'reprise.submit.err', log: [], error: 'no_sender_tab' });
+        return false;
+      }
+      void handleRepriseSubmitMw(tabId, message.repriseDo).then(
+        (resp) => sendResponse(resp),
+        (err: unknown) =>
+          sendResponse({
+            kind: 'reprise.submit.err',
             log: [],
             error: err instanceof Error ? err.message.slice(0, 240) : String(err).slice(0, 240),
           }),

@@ -309,6 +309,67 @@ export function parseFraisComptant(text: string | null | undefined): number | nu
 }
 
 /* ────────────────────────────────────────────────────────────────────────── */
+/*  Reprise du devis (M8.T7 B2) — live-verified 2026-06-11                      */
+/* ────────────────────────────────────────────────────────────────────────── */
+
+/**
+ * ACCES PORTEFEUILLE generic-search form name. Hosts the criterion select +
+ * the value input + the search link. Verified live 2026-06-11.
+ */
+export const SEARCH_FORM_NAME = 'RechercheGeneriqueForm' as const;
+
+/**
+ * Search-criterion select name. Set to 'NO' (numéro de devis) before the
+ * search so Maxance interprets `valeurCritere` as a devis number.
+ */
+export const CRITERE_SELECT_NAME = 'critereSelected' as const;
+
+/** Search-criterion value = "numéro de devis". */
+export const CRITERE_VALUE_DEVIS = 'NO' as const;
+
+/** Search value input id — receives the devis number to look up. */
+export const VALEUR_CRITERE_ID = 'valeurCritere' as const;
+
+/**
+ * Search submit anchor id. Its href is `javascript:doSubmit(...)` — we
+ * dispatch a real click in MAIN world (the inline handler navigates the
+ * top frame to the "Visualisation du devis" dossier page).
+ */
+export const MAIN_SEARCH_LINK_ID = 'mainSearchLink' as const;
+
+/**
+ * Reprise action — called in MAIN world as `doSubmit('repriseDevisMoto.do')`
+ * (no params; the devis is already in the Maxance session after the search
+ * lands on the Visualisation page). Navigates to the VÉHICULE tab of a
+ * resumed devis (URL `/Proximeo/repriseDevisMoto.do`).
+ */
+export const REPRISE_DO = 'repriseDevisMoto.do' as const;
+
+/** Page title rendered on the dossier page reached after the search. */
+export const VISUALISATION_TITLE = 'Visualisation du devis' as const;
+
+/**
+ * First Suivant button container id on the resumed VÉHICULE tab. Same
+ * `.buttonMiddle` mouse-event dispatch pattern as validerVehicule on the
+ * preview flow. Click → navigates to the CONDUCTEUR tab.
+ */
+export const VALIDER_VEHICULE_ID = 'validerVehicule' as const;
+
+/**
+ * Second Suivant button container id on the resumed CONDUCTEUR tab. Click →
+ * navigates to `souscriptionNaviguerOngletVehicule.do` (Garanties).
+ */
+export const VALIDER_CONDUCTEUR_ID = 'validerConducteur' as const;
+
+/**
+ * Matches the resumed-devis header "Reprise du devis n° DR…" rendered on
+ * the VÉHICULE tab after `doSubmit('repriseDevisMoto.do')`. Used to confirm
+ * the reprise actually landed (vs. an error/redirect). The DR number is
+ * captured in group 1.
+ */
+export const REPRISE_HEADER_RE = /Reprise du devis\s*n[°o]\s*(DR\d{6,14})/i;
+
+/* ────────────────────────────────────────────────────────────────────────── */
 /*  Devis tab (M8.T6)                                                          */
 /* ────────────────────────────────────────────────────────────────────────── */
 

@@ -129,11 +129,35 @@ export const QuoteConfirmCommandSchema = z.object({
   timeoutMs: z.number().int().positive().optional(),
 });
 
+/**
+ * M8.T7 B2 — resume an existing devis (reprise). Searches the devis by
+ * number via the ACCES PORTEFEUILLE bar, opens the dossier, calls the
+ * reprise action, advances the resumed VÉHICULE → CONDUCTEUR Suivants to
+ * Garanties, applies the closing controls (commission ALWAYS re-forced to
+ * 22 — it RESETS to 9.0 on every reprise), and extracts the comptant
+ * breakdown. Leaves the tab on Garanties (ready for the B3 subscription
+ * flow) — the SW does NOT reset on success.
+ */
+export const DevisResumeCommandSchema = z.object({
+  id: z.string().uuid(),
+  kind: z.literal('devis.resume'),
+  /** Maxance devis number, e.g. "DR0000976146". */
+  devisNumber: z.string().min(3),
+  /** Coverage tier to (re-)select on Garanties. Absent = leave as resumed. */
+  formule: z.enum(['tiers_illimite', 'vol_incendie', 'dommages_tous_accidents']).optional(),
+  /** Commission % override. Absent = forced to 22 (Achraf's rule). */
+  commissionPct: z.number().min(0).max(100).optional(),
+  /** Payment cadence to (re-)select. Absent = leave as resumed. */
+  fractionnement: z.enum(['mensuel', 'annuel']).optional(),
+  timeoutMs: z.number().int().positive().optional(),
+});
+
 export const CommandSchema = z.discriminatedUnion('kind', [
   PingCommandSchema,
   LoginEnsureCommandSchema,
   QuotePreviewCommandSchema,
   QuoteConfirmCommandSchema,
+  DevisResumeCommandSchema,
 ]);
 export type Command = z.infer<typeof CommandSchema>;
 
@@ -239,10 +263,42 @@ export const QuoteConfirmNavigatingResponseSchema = z.object({
 });
 
 /**
+ * M8.T7 B2 — devis.resume terminal success. The flow ends on the Garanties
+ * tab of the resumed devis with the closing controls applied. Mirrors
+ * quote.preview.ok's price+breakdown shape so the operator reuses the same
+ * extraction logic.
+ */
+export const DevisResumeResponseSchema = z.object({
+  id: z.string().uuid(),
+  kind: z.literal('devis.resume.ok'),
+  /** Echoed back so the caller can correlate against the requested devis. */
+  devisNumber: z.string().min(3),
+  /** Configured Garanties prices (commission forced to 22). */
+  pricePreviewEur: z.object({
+    monthly: z.number().nonnegative().optional(),
+    annual: z.number().nonnegative().optional(),
+  }),
+  /** Comptant breakdown read off the configured Garanties tab. */
+  comptantBreakdown: ComptantBreakdownSchema,
+  screenshots: z.array(ScreenshotSchema),
+  finalUrl: z.string().url(),
+  durationMs: z.number().nonnegative(),
+});
+
+/** Mirror of QuotePreviewNavigatingResponseSchema for the resume flow. */
+export const DevisResumeNavigatingResponseSchema = z.object({
+  id: z.string().uuid(),
+  kind: z.literal('devis.resume.navigating'),
+  fromScreen: z.string(),
+  expectedScreen: z.string(),
+  screenshots: z.array(ScreenshotSchema),
+});
+
+/**
  * Generic error response. Caller correlates via `id`.
  * `errorCode` mirrors the tagged-error scheme the Operator agent already
- * consumes (maxance_quote_*, maxance_confirm_*, login_*, etc.) so the
- * existing QUOTE.FAILED routing keeps working unchanged.
+ * consumes (maxance_quote_*, maxance_confirm_*, maxance_resume_*, login_*,
+ * etc.) so the existing QUOTE.FAILED routing keeps working unchanged.
  */
 export const ErrorResponseSchema = z.object({
   id: z.string().uuid(),
@@ -260,6 +316,8 @@ export const ResponseSchema = z.discriminatedUnion('kind', [
   QuotePreviewNavigatingResponseSchema,
   QuoteConfirmResponseSchema,
   QuoteConfirmNavigatingResponseSchema,
+  DevisResumeResponseSchema,
+  DevisResumeNavigatingResponseSchema,
   ErrorResponseSchema,
 ]);
 export type Response = z.infer<typeof ResponseSchema>;

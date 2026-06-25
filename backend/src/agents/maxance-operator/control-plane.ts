@@ -33,6 +33,7 @@ import type {
   ExtensionClient,
   ExtensionQuoteParams,
   ExtensionSubscriberInfo,
+  ResumeDevisParams,
 } from './extension-client.js';
 
 /** Default port for the HTTP control plane. WS server uses 9223. */
@@ -86,6 +87,24 @@ const SubscriberSchema = z.object({
 const ConfirmBodySchema = SubscriberSchema.and(
   z.object({ _dryRun: z.boolean().optional(), _exerciseCourrier: z.boolean().optional() }),
 );
+
+// M8.T7 B2 — devis.resume body. devisNumber required; the Garanties closing
+// overrides are optional (commission defaults to 22 in the extension).
+const ResumeBodySchema = z.object({
+  devisNumber: z.string().min(3),
+  formule: z.enum(['tiers_illimite', 'vol_incendie', 'dommages_tous_accidents']).optional(),
+  commissionPct: z.number().min(0).max(100).optional(),
+  fractionnement: z.enum(['mensuel', 'annuel']).optional(),
+});
+
+/** Build ResumeDevisParams from the parsed body, omitting undefined optionals. */
+function toResumeParams(parsed: z.infer<typeof ResumeBodySchema>): ResumeDevisParams {
+  return {
+    ...(parsed.formule !== undefined ? { formule: parsed.formule } : {}),
+    ...(parsed.commissionPct !== undefined ? { commissionPct: parsed.commissionPct } : {}),
+    ...(parsed.fractionnement !== undefined ? { fractionnement: parsed.fractionnement } : {}),
+  };
+}
 
 /** Build an ExtensionQuoteParams from the parsed body, omitting undefined optionals. */
 function toQuoteParams(parsed: z.infer<typeof QuoteParamsSchema>): ExtensionQuoteParams {
@@ -221,6 +240,30 @@ export function buildExtensionControlPlane(opts: BuildControlPlaneOptions): Hono
       return c.json(
         {
           error: 'quote_confirm_failed',
+          detail: err instanceof Error ? err.message : String(err),
+        },
+        500,
+      );
+    }
+  });
+
+  app.post('/devis-resume', async (c) => {
+    const body = await parseJsonBody(c);
+    if (!body.ok) return body.res;
+    const parse = ResumeBodySchema.safeParse(body.value);
+    if (!parse.success) {
+      return c.json({ error: 'invalid_body', issues: parse.error.issues }, 400);
+    }
+    try {
+      const res = await opts.client.resumeDevis('maxance-default', {
+        devisNumber: parse.data.devisNumber,
+        ...toResumeParams(parse.data),
+      });
+      return c.json(res, 200);
+    } catch (err) {
+      return c.json(
+        {
+          error: 'devis_resume_failed',
           detail: err instanceof Error ? err.message : String(err),
         },
         500,

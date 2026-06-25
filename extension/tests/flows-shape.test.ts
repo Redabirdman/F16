@@ -14,6 +14,7 @@ import { describe, it, expect } from 'vitest';
 import { runLoginEnsure } from '../src/flows/login.js';
 import { runQuotePreview } from '../src/flows/quote-preview.js';
 import { runQuoteConfirm } from '../src/flows/quote-confirm.js';
+import { runDevisResume } from '../src/flows/devis-resume.js';
 
 describe('flow module surface', () => {
   it('exports runLoginEnsure as a function', () => {
@@ -29,5 +30,10 @@ describe('flow module surface', () => {
   it('exports runQuoteConfirm as a function', () => {
     expect(typeof runQuoteConfirm).toBe('function');
     expect(runQuoteConfirm.length).toBe(1);
+  });
+
+  it('exports runDevisResume as a function', () => {
+    expect(typeof runDevisResume).toBe('function');
+    expect(runDevisResume.length).toBe(1);
   });
 });

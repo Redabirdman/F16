@@ -90,6 +90,34 @@ describe('CommandSchema', () => {
     const fail = CommandSchema.safeParse({ id: UUID, kind: 'nonsense' });
     expect(fail.success).toBe(false);
   });
+
+  // M8.T7 B2 — devis.resume command.
+  it('accepts a devis.resume command with just a devisNumber', () => {
+    const ok = CommandSchema.safeParse({
+      id: UUID,
+      kind: 'devis.resume',
+      devisNumber: 'DR0000976146',
+    });
+    expect(ok.success).toBe(true);
+  });
+
+  it('accepts a devis.resume command with garanties overrides', () => {
+    const ok = CommandSchema.safeParse({
+      id: UUID,
+      kind: 'devis.resume',
+      devisNumber: 'DR0000976146',
+      formule: 'tiers_illimite',
+      commissionPct: 22,
+      fractionnement: 'mensuel',
+      timeoutMs: 360000,
+    });
+    expect(ok.success).toBe(true);
+  });
+
+  it('rejects a devis.resume command missing the devisNumber', () => {
+    const fail = CommandSchema.safeParse({ id: UUID, kind: 'devis.resume' });
+    expect(fail.success).toBe(false);
+  });
 });
 
 describe('ResponseSchema', () => {
@@ -231,6 +259,69 @@ describe('ResponseSchema', () => {
       screenshots: [],
     });
     expect(fail.success).toBe(false);
+  });
+
+  // M8.T7 B2 — devis.resume responses.
+  it('accepts a devis.resume.ok with prices + comptant breakdown', () => {
+    const ok = ResponseSchema.safeParse({
+      id: UUID,
+      kind: 'devis.resume.ok',
+      devisNumber: 'DR0000976146',
+      pricePreviewEur: { monthly: 83.71, annual: 95.71 },
+      comptantBreakdown: {
+        fractionnement: 'mensuel',
+        comptantEur: 21.58,
+        termeSuivantEur: 7.97,
+        coutAnnuelBrutEur: 95.71,
+        fraisComptantEur: 17,
+      },
+      screenshots: [],
+      finalUrl: 'https://www.maxance.com/Proximeo/souscriptionNaviguerOngletVehicule.do',
+      durationMs: 12345,
+    });
+    expect(ok.success).toBe(true);
+  });
+
+  it('rejects a devis.resume.ok missing the required comptantBreakdown', () => {
+    const fail = ResponseSchema.safeParse({
+      id: UUID,
+      kind: 'devis.resume.ok',
+      devisNumber: 'DR0000976146',
+      pricePreviewEur: { monthly: 83.71 },
+      screenshots: [],
+      finalUrl: 'https://www.maxance.com/Proximeo/x',
+      durationMs: 1,
+    });
+    expect(fail.success).toBe(false);
+  });
+
+  it('accepts a devis.resume.navigating response (mid-flow handoff)', () => {
+    const ok = ResponseSchema.safeParse({
+      id: UUID,
+      kind: 'devis.resume.navigating',
+      fromScreen: 'visualisation',
+      expectedScreen: 'reprise_vehicule',
+      screenshots: [],
+    });
+    expect(ok.success).toBe(true);
+  });
+
+  it('round-trips a devis.resume.ok through parseFrame', () => {
+    const frame: Response = {
+      id: UUID,
+      kind: 'devis.resume.ok',
+      devisNumber: 'DR0000976146',
+      pricePreviewEur: { monthly: 83.71 },
+      comptantBreakdown: { fractionnement: 'mensuel', comptantEur: 21.58, fraisComptantEur: null },
+      screenshots: [],
+      finalUrl: 'https://www.maxance.com/Proximeo/x',
+      durationMs: 1,
+    };
+    const parsed = parseFrame(JSON.stringify(frame));
+    expect(parsed.side).toBe('response');
+    if (parsed.side === 'response' && parsed.value.kind === 'devis.resume.ok') {
+      expect(parsed.value.devisNumber).toBe('DR0000976146');
+    }
   });
 
   it('accepts an error response with tagged errorCode', () => {

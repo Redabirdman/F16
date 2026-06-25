@@ -22,6 +22,16 @@ import {
   stationnementOption,
   formatIsoDateFr,
   COURRIER_POPUP_IFRAME_ID,
+  SEARCH_FORM_NAME,
+  CRITERE_SELECT_NAME,
+  CRITERE_VALUE_DEVIS,
+  VALEUR_CRITERE_ID,
+  MAIN_SEARCH_LINK_ID,
+  REPRISE_DO,
+  VISUALISATION_TITLE,
+  VALIDER_VEHICULE_ID,
+  VALIDER_CONDUCTEUR_ID,
+  REPRISE_HEADER_RE,
 } from '../src/maxance/selectors.js';
 
 describe('maxance selectors (extension/src/maxance/selectors)', () => {
@@ -56,5 +66,29 @@ describe('maxance selectors (extension/src/maxance/selectors)', () => {
 
   it('imports the Courrier popup iframe id (live-verified, M8.T8)', () => {
     expect(COURRIER_POPUP_IFRAME_ID).toBe('window_nvCourrier');
+  });
+
+  // M8.T7 B2 — reprise selectors (live-verified 2026-06-11).
+  it('pins the ACCES PORTEFEUILLE search selectors', () => {
+    expect(SEARCH_FORM_NAME).toBe('RechercheGeneriqueForm');
+    expect(CRITERE_SELECT_NAME).toBe('critereSelected');
+    expect(CRITERE_VALUE_DEVIS).toBe('NO');
+    expect(VALEUR_CRITERE_ID).toBe('valeurCritere');
+    expect(MAIN_SEARCH_LINK_ID).toBe('mainSearchLink');
+  });
+
+  it('pins the reprise action + page markers', () => {
+    expect(REPRISE_DO).toBe('repriseDevisMoto.do');
+    expect(VISUALISATION_TITLE).toBe('Visualisation du devis');
+    expect(VALIDER_VEHICULE_ID).toBe('validerVehicule');
+    expect(VALIDER_CONDUCTEUR_ID).toBe('validerConducteur');
+  });
+
+  it('matches the resumed-devis header and captures the DR number', () => {
+    const m = REPRISE_HEADER_RE.exec('Reprise du devis n° DR0000976146 — Véhicule');
+    expect(m?.[1]).toBe('DR0000976146');
+    // tolerant of the ASCII "no" and missing space variants
+    expect(REPRISE_HEADER_RE.test('Reprise du devis no DR0000976146')).toBe(true);
+    expect(REPRISE_HEADER_RE.test('Visualisation du devis DR0000976146')).toBe(false);
   });
 });

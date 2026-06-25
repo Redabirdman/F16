@@ -14,6 +14,7 @@ import type { ContentInbound, FlowOutcome } from './content-protocol.js';
 import { runLoginEnsure } from './flows/login.js';
 import { runQuotePreview } from './flows/quote-preview.js';
 import { runQuoteConfirm } from './flows/quote-confirm.js';
+import { runDevisResume } from './flows/devis-resume.js';
 
 console.info('[f16-ext] content script loaded on', location.href);
 
@@ -47,6 +48,8 @@ async function handleFlow(command: Command): Promise<Response> {
         return await runQuotePreview(command);
       case 'quote.confirm':
         return await runQuoteConfirm(command);
+      case 'devis.resume':
+        return await runDevisResume(command);
     }
   } catch (err) {
     return ErrorResponseSchema.parse({
