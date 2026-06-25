@@ -49,11 +49,10 @@ import { sendMessage } from '../../messaging/dispatcher.js';
 export const quoteRequestToolName = 'quote.request';
 
 /**
- * Trottinette quote params — mirrors `MaxanceQuoteParams` from
- * `@f16/stagehand/maxance/types` but lives here as its own schema so the
- * tool layer doesn't pull stagehand into the backend (lighter import
- * graph, clearer boundary). The shape stays in sync — drift would surface
- * in the M8.T4 param-translation tests.
+ * Trottinette quote params — mirrors the Maxance quote param shape used by
+ * the extension's `maxance/selectors` but lives here as its own schema so
+ * the tool layer keeps a clean boundary (lighter import graph). The shape
+ * stays in sync — drift would surface in the M8.T4 param-translation tests.
  */
 const trottinetteFormDataSchema = z
   .object({

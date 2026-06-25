@@ -14,10 +14,10 @@
  *   - Status events flow extension → backend: `ready`, `quote.progress`,
  *     `error`. These are not paired with a request id (they're spontaneous).
  *
- * Mirrors the in-process types from `stagehand/src/maxance/types.ts` where
- * possible — same field names + value enums — so the eventual selectors-only
- * import from stagehand stays cheap. Where the wire side needs JSON-safe
- * representations (no `Date`), we use ISO strings.
+ * Mirrors the in-process Maxance param types declared in
+ * `./maxance/selectors.ts` where possible — same field names + value enums.
+ * Where the wire side needs JSON-safe representations (no `Date`), we use
+ * ISO strings.
  */
 import { z } from 'zod';
 

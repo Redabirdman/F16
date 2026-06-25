@@ -38,7 +38,7 @@ import {
   PHONE_USAGE_PERSO,
   PROFESSION_VALUE,
   PROXIMEO_URL_SIGNATURES,
-} from '@f16/stagehand/maxance/selectors';
+} from '../maxance/selectors.js';
 import {
   captureScreenshot,
   clickMaxanceButton,

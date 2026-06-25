@@ -1,15 +1,16 @@
 /**
- * Cross-workspace import smoke test (M8.T8 phase 2).
+ * Selectors smoke test (M8.T8 phase 2).
  *
- * Asserts that the extension can resolve `@f16/stagehand/maxance/selectors`
- * via the subpath export defined in stagehand/package.json. If this test
- * passes, the extension's flows can pull the canonical Maxance values
- * (Marque, Version bands, Civilité codes, etc.) directly from the same
- * source the (now-dead) Stagehand runtime used. Drift between the two
- * codebases is structurally impossible.
+ * Asserts that the extension can resolve its local
+ * `src/maxance/selectors.ts` and that the canonical Maxance values
+ * (Marque, Version bands, Civilité codes, etc.) are present and correct.
+ * The selectors module is the SINGLE SOURCE OF TRUTH for the Maxance UI
+ * mapping; this guards against accidental edits to those live-verified
+ * constants.
  *
- * If this ever fails: the subpath export probably got dropped from
- * stagehand/package.json, or pnpm relinked the workspace incorrectly.
+ * (Historically these constants lived in a separate Playwright-driver
+ * workspace and were imported cross-workspace; that workspace has been
+ * removed and the selectors now live here in the extension.)
  */
 import { describe, it, expect } from 'vitest';
 import {
@@ -21,9 +22,9 @@ import {
   stationnementOption,
   formatIsoDateFr,
   COURRIER_POPUP_IFRAME_ID,
-} from '@f16/stagehand/maxance/selectors';
+} from '../src/maxance/selectors.js';
 
-describe('cross-workspace import from @f16/stagehand/maxance/selectors', () => {
+describe('maxance selectors (extension/src/maxance/selectors)', () => {
   it('imports the verified Marque + Cylindrée constants', () => {
     expect(MARQUE_TROTTINETTE).toBe('TROTTINETTE');
     expect(CYLINDREE_TROTTINETTE).toBe('25');

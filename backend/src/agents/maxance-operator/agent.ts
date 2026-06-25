@@ -23,9 +23,10 @@
  *                             a non-Cloudflare staging environment if one ever
  *                             exists. PRODUCTION NEVER.
  *
- * The Stagehand step-planner code (stagehand/src/maxance/*.ts) survives as
- * the canonical selectors + field-mappings reference — the extension will
- * import those constants when phase 2 lands.
+ * The canonical Maxance selectors + field-mappings now live in the
+ * extension at `extension/src/maxance/selectors.ts` (the legacy Stagehand
+ * step-planner workspace has been removed); the extension flows import
+ * those constants directly.
  *
  * Original (pre-gate) flow, kept for documentation:
  *   1. Translate the QUOTE.REQUESTED payload into a MaxanceQuoteParams.

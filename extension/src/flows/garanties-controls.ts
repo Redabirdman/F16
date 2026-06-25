@@ -23,7 +23,7 @@ import {
   FRACTIONNEMENT_CODE,
   FRACTIONNEMENT_SELECT_NAME,
   parseFraisComptant,
-} from '@f16/stagehand/maxance/selectors';
+} from '../maxance/selectors.js';
 import type { GarantiesConfigureRequest, GarantiesConfigureResponse } from '../content-protocol.js';
 import type { ComptantBreakdown } from '../wire.js';
 

@@ -27,7 +27,7 @@ import {
   COMMISSION_INPUT_ID,
   FORMULE_RADIO_NAME,
   FRACTIONNEMENT_SELECT_NAME,
-} from '@f16/stagehand/maxance/selectors';
+} from './maxance/selectors.js';
 import type { GarantiesConfigureRequest, GarantiesConfigureResponse } from './content-protocol.js';
 
 /** Give the AJAX a beat to raise the "Chargement" indicator before polling. */

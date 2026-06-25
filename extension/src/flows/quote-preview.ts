@@ -3,8 +3,8 @@
  *
  * Replicates the M8.T3 Stagehand step planner using vanilla DOM ops in
  * the user's daily Chrome. The selectors + form values are imported
- * directly from `@f16/stagehand/maxance/selectors` — single source of
- * truth, no duplication.
+ * directly from `../maxance/selectors` — single source of truth, no
+ * duplication.
  *
  * Pre-condition: caller has already run login.ensure successfully on
  * the same tab. We're on a page within /Proximeo/.
@@ -36,7 +36,7 @@ import {
   formuleLabel,
   stationnementOption,
   trottinetteVersionBand,
-} from '@f16/stagehand/maxance/selectors';
+} from '../maxance/selectors.js';
 import {
   captureScreenshot,
   clickByText,

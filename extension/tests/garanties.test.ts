@@ -10,7 +10,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { parseFractionnementRow } from '../src/flows/garanties-controls.js';
-import { parseFraisComptant } from '@f16/stagehand/maxance/selectors';
+import { parseFraisComptant } from '../src/maxance/selectors.js';
 
 describe('parseFractionnementRow', () => {
   it('parses the live-verified single-line body text shape', () => {

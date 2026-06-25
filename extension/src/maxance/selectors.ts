@@ -1,26 +1,103 @@
 /**
  * Maxance Proximéo selectors + constants (canonical reference, live-verified).
  *
- * 🔑 SINGLE SOURCE OF TRUTH for the Maxance UI mapping. Imported by BOTH:
- *   - stagehand/src/maxance/quote-form.ts (legacy Playwright runtime, dead in prod)
- *   - extension/src/flows/* (V1 Chrome-extension driver — actually runs)
+ * 🔑 SINGLE SOURCE OF TRUTH for the Maxance UI mapping. Imported by the
+ * extension/src/flows/* (V1 Chrome-extension driver — the actual production
+ * Maxance driver).
  *
- * PURE module: no runtime imports — only type imports from types.ts. Bundleable
- * in a browser context (no node:fs, no logger, no Stagehand). This means the
- * extension can `import { ... } from '@f16/stagehand/maxance/selectors'`
- * without dragging Playwright into a Chrome MV3 service worker.
+ * PURE module: no runtime imports — only the inlined param-shaped types
+ * below. Bundleable in a browser context (no node:fs, no logger, no
+ * Stagehand / Playwright). This file is self-contained: the handful of
+ * Maxance param enums it references (formerly imported from the dropped
+ * Playwright-driver workspace's maxance types) are inlined here so the
+ * extension drags nothing extra into a Chrome MV3 service worker.
  *
  * Verified live 2026-05-22 (M8.T3) + 2026-05-23 (M8.T6) against the real
  * Maxance broker portal driven via the Claude in Chrome extension. Per
  * Ridaa: Maxance UI is stable for 12+ months — these constants are safe.
  */
-import type {
-  MaxanceFractionnement,
-  MaxanceFormule,
-  MaxanceQuoteParams,
-  MaxanceStationnement,
-  MaxanceSubscriberInfo,
-} from './types.js';
+
+/* ────────────────────────────────────────────────────────────────────────── */
+/*  Maxance param enums (inlined — previously a separate maxance/types module) */
+/* ────────────────────────────────────────────────────────────────────────── */
+
+/** Supported vehicle types in the quote-flow library (EDPM trottinette only). */
+export type MaxanceVehicleKind = 'trottinette';
+
+/** Optional payment cadence at the Garanties tab. Default `mensuel`. */
+export type MaxanceFractionnement = 'mensuel' | 'annuel';
+
+/** Coverage tier. Achraf's default is `tiers_illimite`. */
+export type MaxanceFormule = 'tiers_illimite' | 'vol_incendie' | 'dommages_tous_accidents';
+
+/**
+ * Where the trottinette is stored overnight. Drives risk pricing; must be
+ * asked from the client up-front because we cannot guess it.
+ */
+export type MaxanceStationnement =
+  | 'garage_box'
+  | 'parking_prive_clos'
+  | 'parking_prive_non_clos'
+  | 'rue';
+
+/** Civilité — Maxance's salutation dropdown on the Devis tab. */
+export type MaxanceCivilite = 'monsieur' | 'madame';
+
+/**
+ * Parameters for one quote run. The intent library reads these from the
+ * caller (sourced from the QUOTE.REQUESTED payload).
+ */
+export interface MaxanceQuoteParams {
+  /** EDPM trottinette only. */
+  vehicleKind: MaxanceVehicleKind;
+  /** Purchase price in EUR — drives the "Version" price band. */
+  purchasePriceEur: number;
+  /**
+   * Acquisition date — used for both "Première mise en circulation" and
+   * "Date d'acquisition". Achraf's rule: identical values, sourced from the
+   * client's invoice.
+   */
+  purchaseDate: Date;
+  postalCode: string;
+  /** Optional — Maxance auto-fills from CP, but pass through if the caller has it. */
+  city?: string;
+  stationnement: MaxanceStationnement;
+  /** Date of birth — only required field on the Conducteur tab. */
+  clientDateOfBirth: Date;
+  /** Coverage tier. Default `tiers_illimite`. */
+  formule?: MaxanceFormule;
+  /** Commission percentage, slider 9 → 22 on the Garanties tab. Default 9. */
+  commissionPct?: number;
+  /** Payment cadence. Default `mensuel`. */
+  fractionnement?: MaxanceFractionnement;
+}
+
+/**
+ * Subscriber-info payload for the Devis tab — the fields the broker fills
+ * once the price has been previewed. All are required by Maxance.
+ */
+export interface MaxanceSubscriberInfo {
+  civilite: MaxanceCivilite;
+  /** Family name (NOM). Uppercase preferred but Maxance accepts mixed-case. */
+  lastName: string;
+  /** First name (PRÉNOM). */
+  firstName: string;
+  /** Civic address, single line. e.g. "12 RUE DE LA PAIX". */
+  addressLine: string;
+  /** Apartment / floor / building info — optional. */
+  addressComplement?: string;
+  postalCode: string;
+  city: string;
+  /** Customer's mobile, French format. e.g. "+33612345678" or "0612345678". */
+  phoneMobile: string;
+  /** Customer's email — Maxance will email the quote PDF to this address. */
+  email: string;
+  /**
+   * Profession dropdown — defaults to Achraf's "Employé secteur privé" if
+   * unset.
+   */
+  profession?: 'employe_prive' | 'employe_public' | 'etudiant' | 'retraite' | 'sans_profession';
+}
 
 /* ────────────────────────────────────────────────────────────────────────── */
 /*  URLs                                                                       */
@@ -316,10 +393,3 @@ export function formatIsoDateFr(iso: string): string {
   if (!m) throw new Error(`maxance_invalid_iso_date:${iso}`);
   return `${m[3]}/${m[2]}/${m[1]}`;
 }
-
-/* ────────────────────────────────────────────────────────────────────────── */
-/*  Re-export the param type for downstream consumers                          */
-/* ────────────────────────────────────────────────────────────────────────── */
-
-/** Re-export so a single import from selectors covers most downstream needs. */
-export type { MaxanceQuoteParams };

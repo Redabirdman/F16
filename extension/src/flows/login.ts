@@ -18,7 +18,7 @@
  *      days when the Auth0 cookie expires).
  */
 import { clickByText, captureScreenshot, waitForUrl } from '../dom.js';
-import { PROXIMEO_URL_SIGNATURES, PROXIMEO_SSO_URL } from '@f16/stagehand/maxance/selectors';
+import { PROXIMEO_URL_SIGNATURES, PROXIMEO_SSO_URL } from '../maxance/selectors.js';
 import {
   LoginEnsureResponseSchema,
   ErrorResponseSchema,
