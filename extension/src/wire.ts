@@ -408,6 +408,11 @@ export const SubscriptionCompleteNavigatingResponseSchema = z.object({
  * maxance_subscription_* incl. maxance_subscription_rib_rejected /
  * maxance_subscription_wrong_state, login_*, etc.) so the existing
  * QUOTE.FAILED routing keeps working unchanged.
+ *
+ * P3b adds a distinct `maxance_devis_contact_duplicate` — the repeat-customer
+ * "Ce contact existe déjà" alerte survived the single in-flow recovery retry;
+ * the backend routes it to a human / reuse-existing-contact strategy rather
+ * than treating it as a generic fill failure.
  */
 export const ErrorResponseSchema = z.object({
   id: z.string().uuid(),

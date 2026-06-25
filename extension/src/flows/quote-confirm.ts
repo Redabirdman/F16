@@ -59,6 +59,7 @@ import {
   type Screenshot,
 } from '../wire.js';
 import { reportProgress } from './progress.js';
+import { CONTACT_DUPLICATE_ERROR } from './contact-duplicate.js';
 import type { z } from 'zod';
 
 type QuoteConfirmCommand = z.infer<typeof QuoteConfirmCommandSchema>;
@@ -290,10 +291,19 @@ export async function runQuoteConfirm(cmd: QuoteConfirmCommand): Promise<Respons
           }),
         );
         if (!devisResult.ok) {
+          // P3b: repeat-customer "Ce contact existe déjà" surfaces as a
+          // DISTINCT error code (set by the main-world handler) so the
+          // backend can reason about it separately from generic fill
+          // failures (route to human / reuse-existing-contact). Pass it
+          // through verbatim; otherwise use the generic fill-failed code.
+          const errorCode =
+            devisResult.error === CONTACT_DUPLICATE_ERROR
+              ? CONTACT_DUPLICATE_ERROR
+              : 'maxance_confirm_devis_fill_failed';
           return ErrorResponseSchema.parse({
             id: cmd.id,
             kind: 'error',
-            errorCode: 'maxance_confirm_devis_fill_failed',
+            errorCode,
             detail: `${devisResult.error}${devisResult.errorMsg ? ': ' + devisResult.errorMsg : ''}`,
             screenshots,
           });

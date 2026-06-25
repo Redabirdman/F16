@@ -44,6 +44,12 @@ import type {
   SwInbound,
 } from './content-protocol.js';
 import { handleGarantiesConfigureMw } from './garanties-mw.js';
+import {
+  dismissDuplicateAlert,
+  probeContactDuplicate,
+  refillAndRetryOk,
+} from './contact-duplicate-mw.js';
+import { CONTACT_DUPLICATE_ERROR, decideContactRecovery } from './flows/contact-duplicate.js';
 import { handleRepriseSearchMw, handleRepriseSubmitMw } from './reprise-mw.js';
 import {
   handleSubscriptionBancairesMw,
@@ -621,6 +627,20 @@ chrome.runtime.onMessage.addListener(
           log.push(...(phoneStep?.log ?? ['phoneStep=null']));
           await new Promise((r) => setTimeout(r, 2500));
 
+          // P3b: after the phone Nouveau-commit, detect "Ce contact existe
+          // déjà" (repeat customer). If it fired, dismiss the popin so it
+          // doesn't block the rest of the flow — the existing-contact row is
+          // already populated, so skipping the commit is the correct recovery
+          // (the OK retry below handles the residual case).
+          const phoneDup = await probeContactDuplicate(tabId, 'telephoneListBean');
+          if (phoneDup.duplicateAlert) {
+            log.push(
+              `phoneDuplicate=${phoneDup.marker};committed=${phoneDup.existingContactPopulated}`,
+            );
+            log.push('phoneDismiss=' + (await dismissDuplicateAlert(tabId)));
+            await new Promise((r) => setTimeout(r, 600));
+          }
+
           // Step 3: fill email draft.
           const r3 = await chrome.scripting.executeScript({
             target: { tabId },
@@ -686,6 +706,16 @@ chrome.runtime.onMessage.addListener(
           const emailNouveauStep = r4[0]?.result as { log: string[] } | undefined;
           log.push(...(emailNouveauStep?.log ?? ['emailNouveauStep=null']));
           await new Promise((r) => setTimeout(r, 2500));
+
+          // P3b: same duplicate detection after the email Nouveau-commit.
+          const emailDup = await probeContactDuplicate(tabId, 'emailListBean');
+          if (emailDup.duplicateAlert) {
+            log.push(
+              `emailDuplicate=${emailDup.marker};committed=${emailDup.existingContactPopulated}`,
+            );
+            log.push('emailDismiss=' + (await dismissDuplicateAlert(tabId)));
+            await new Promise((r) => setTimeout(r, 600));
+          }
 
           // Step 5: RE-FILL Nom/Prénom/ligne1 (Maxance's Nouveau AJAX zone
           // refresh replaces them with fresh empty inputs — verified
@@ -772,6 +802,40 @@ chrome.runtime.onMessage.addListener(
             | { ok: false; log: string[]; error: string; errorMsg?: string }
             | undefined;
           log.push(...(okStep?.log ?? ['okStep=null']));
+
+          // P3b: after the devis OK click, the duplicate-contact alerte can
+          // still surface (Maxance re-checks on submit for repeat customers).
+          // Detect it, and if present run ONE recovery: dismiss the popin,
+          // skip any further Nouveau-commit (the existing contactList[0] row
+          // already holds the contact), re-fill the wiped subscriber fields,
+          // retry OK once. If it STILL trips → return the DISTINCT error code
+          // so the backend can route to a human / reuse-existing strategy.
+          await new Promise((r) => setTimeout(r, 800));
+          const okDup = await probeContactDuplicate(tabId, 'emailListBean');
+          const decision = decideContactRecovery({
+            duplicateAlert: okDup.duplicateAlert,
+            existingContactPopulated: okDup.existingContactPopulated,
+            alreadyRetried: false,
+          });
+          if (decision === 'skip_commit_retry' || decision === 'retry') {
+            log.push(`okDuplicate=${okDup.marker};decision=${decision}`);
+            log.push('okDismiss=' + (await dismissDuplicateAlert(tabId)));
+            await new Promise((r) => setTimeout(r, 600));
+            const retry = await refillAndRetryOk(tabId, payloadJson);
+            log.push(...retry.log);
+            await new Promise((r) => setTimeout(r, 800));
+            // Re-probe: did the single retry clear the duplicate?
+            const reDup = await probeContactDuplicate(tabId, 'emailListBean');
+            if (!retry.ok || reDup.duplicateAlert) {
+              log.push(`okDuplicateRetryFailed=${reDup.marker}`);
+              sendResponse({ kind: 'devis.err', log, error: CONTACT_DUPLICATE_ERROR });
+              return;
+            }
+            log.push('okDuplicateRecovered');
+            sendResponse({ kind: 'devis.ok', log });
+            return;
+          }
+
           if (!okStep || !okStep.ok) {
             sendResponse({
               kind: 'devis.err',
