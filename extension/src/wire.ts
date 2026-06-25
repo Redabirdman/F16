@@ -76,6 +76,22 @@ export const ComptantBreakdownSchema = z.object({
 });
 export type ComptantBreakdown = z.infer<typeof ComptantBreakdownSchema>;
 
+/**
+ * Subscription "Comptant à régler" breakdown (M8.T7 B3) parsed off the
+ * Coordonnées + bancaires page body text:
+ *   "Frais de gestion X € Commission Y € Frais de dossier Z € Comptant dû W €"
+ * All fields optional/nullable — best-effort parse; null when the line is
+ * absent. Distinct from `ComptantBreakdown` (which is the Garanties-tab
+ * fractionnement row, not the bancaires page).
+ */
+export const SubscriptionComptantSchema = z.object({
+  fraisGestionEur: z.number().nonnegative().nullable(),
+  commissionEur: z.number().nonnegative().nullable(),
+  fraisDossierEur: z.number().nonnegative().nullable(),
+  comptantDuEur: z.number().nonnegative().nullable(),
+});
+export type SubscriptionComptant = z.infer<typeof SubscriptionComptantSchema>;
+
 /** One screenshot result reported back to the backend (data URL). */
 export const ScreenshotSchema = z.object({
   step: z.string(),
@@ -152,12 +168,57 @@ export const DevisResumeCommandSchema = z.object({
   timeoutMs: z.number().int().positive().optional(),
 });
 
+/** Bank-coordinates payload for the souscription bancaires page. */
+export const BankInfoSchema = z.object({
+  /** Full FR IBAN (spaces tolerated; the extension strips + segments it). */
+  iban: z.string().min(15),
+  /** BIC — must correspond to the IBAN's bank (no auto-fill). */
+  bic: z.string().min(8).max(11),
+  /** Titulaire du compte (account holder). */
+  accountHolder: z.string().min(1),
+});
+export type BankInfo = z.infer<typeof BankInfoSchema>;
+
+/**
+ * M8.T7 B3 — complete the souscription on a devis already resumed to its
+ * Garanties tab (devis.resume left it there). Drives Valider souscription →
+ * Infos complémentaires → Coordonnées + bancaires → Paiement page STOP. The
+ * destructive gate is the **Valider souscription** click — `dryRun=true`
+ * (DEFAULT) STOPS before it. The Paiement page's CB form is NEVER filled.
+ *
+ * IBAN/BIC are PII — they're masked (last 4) in every progress/log line; only
+ * the extension's MAIN-world fill funcs ever see the full values.
+ */
+export const SubscriptionCompleteCommandSchema = z.object({
+  id: z.string().uuid(),
+  kind: z.literal('subscription.complete'),
+  /** Echoed back for correlation; the resumed devis is already in session. */
+  devisNumber: z.string().min(3),
+  subscriber: z.object({
+    lastName: z.string().min(1),
+    firstName: z.string().min(1),
+  }),
+  bank: BankInfoSchema,
+  /** Lieu de naissance ville ("Paris" fallback for foreign-born). */
+  birthPlaceCity: z.string().min(1),
+  /** N° de série — Achraf's rule defaults to "1234567". */
+  serialNumber: z.string().min(1).default('1234567'),
+  /**
+   * Safety gate. TRUE (DEFAULT) → STOP before clicking Valider souscription
+   * and return the comptant breakdown. FALSE → run the full chain to the
+   * Paiement page STOP (or rib_rejected).
+   */
+  dryRun: z.boolean().default(true),
+  timeoutMs: z.number().int().positive().optional(),
+});
+
 export const CommandSchema = z.discriminatedUnion('kind', [
   PingCommandSchema,
   LoginEnsureCommandSchema,
   QuotePreviewCommandSchema,
   QuoteConfirmCommandSchema,
   DevisResumeCommandSchema,
+  SubscriptionCompleteCommandSchema,
 ]);
 export type Command = z.infer<typeof CommandSchema>;
 
@@ -295,10 +356,58 @@ export const DevisResumeNavigatingResponseSchema = z.object({
 });
 
 /**
+ * M8.T7 B3 — subscription.complete terminal success. Two outcomes share this
+ * shape:
+ *   - dryRun=true → STOPPED before the destructive Valider souscription click;
+ *     `stoppedBefore='valider_souscription'`, comptant from the Garanties tab.
+ *   - dryRun=false → ran to the Paiement page STOP (CB never filled);
+ *     `souscripteurRef` / `montantComptantEur` / `comptantBreakdown` from the
+ *     bancaires + paiement pages.
+ * (The RIB-test-rejection path returns an `error` with
+ * `maxance_subscription_rib_rejected`, not this success.)
+ */
+export const SubscriptionCompleteResponseSchema = z.object({
+  id: z.string().uuid(),
+  kind: z.literal('subscription.complete.ok'),
+  dryRun: z.boolean(),
+  /** Present in dryRun: the step we stopped before. */
+  stoppedBefore: z.literal('valider_souscription').optional(),
+  /** Maxance souscripteur/instance ref (e.g. "T123456789012") — real mode. */
+  souscripteurRef: z.string().optional(),
+  /** Montant règlement read off the Paiement page — real mode. */
+  montantComptantEur: z.number().nonnegative().optional(),
+  /** Email the souscripteur will be notified at — real mode (Paiement page). */
+  souscripteurEmail: z.string().optional(),
+  /** "Comptant à régler" breakdown from the bancaires page (real mode), or
+   *  null when not reached (dryRun stop, or paiement after a cross-nav). */
+  comptantBreakdown: SubscriptionComptantSchema.nullable(),
+  /**
+   * Garanties-tab comptant breakdown (fractionnement row), captured at the
+   * dryRun STOP (we're still on the Garanties tab). Mirrors devis.resume.ok's
+   * field. Absent in real mode (the flow leaves the Garanties tab).
+   */
+  garantiesComptant: ComptantBreakdownSchema.optional(),
+  screenshots: z.array(ScreenshotSchema),
+  finalUrl: z.string().url(),
+  durationMs: z.number().nonnegative(),
+});
+
+/** Mirror of QuotePreviewNavigatingResponseSchema for the subscription flow. */
+export const SubscriptionCompleteNavigatingResponseSchema = z.object({
+  id: z.string().uuid(),
+  kind: z.literal('subscription.complete.navigating'),
+  fromScreen: z.string(),
+  expectedScreen: z.string(),
+  screenshots: z.array(ScreenshotSchema),
+});
+
+/**
  * Generic error response. Caller correlates via `id`.
  * `errorCode` mirrors the tagged-error scheme the Operator agent already
- * consumes (maxance_quote_*, maxance_confirm_*, maxance_resume_*, login_*,
- * etc.) so the existing QUOTE.FAILED routing keeps working unchanged.
+ * consumes (maxance_quote_*, maxance_confirm_*, maxance_resume_*,
+ * maxance_subscription_* incl. maxance_subscription_rib_rejected /
+ * maxance_subscription_wrong_state, login_*, etc.) so the existing
+ * QUOTE.FAILED routing keeps working unchanged.
  */
 export const ErrorResponseSchema = z.object({
   id: z.string().uuid(),
@@ -318,6 +427,8 @@ export const ResponseSchema = z.discriminatedUnion('kind', [
   QuoteConfirmNavigatingResponseSchema,
   DevisResumeResponseSchema,
   DevisResumeNavigatingResponseSchema,
+  SubscriptionCompleteResponseSchema,
+  SubscriptionCompleteNavigatingResponseSchema,
   ErrorResponseSchema,
 ]);
 export type Response = z.infer<typeof ResponseSchema>;

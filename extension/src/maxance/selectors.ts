@@ -370,6 +370,132 @@ export const VALIDER_CONDUCTEUR_ID = 'validerConducteur' as const;
 export const REPRISE_HEADER_RE = /Reprise du devis\s*n[°o]\s*(DR\d{6,14})/i;
 
 /* ────────────────────────────────────────────────────────────────────────── */
+/*  Souscription (M8.T7 B3) — closing flow, live-verified 2026-06-11           */
+/* ────────────────────────────────────────────────────────────────────────── */
+
+/**
+ * The DESTRUCTIVE gate on the Garanties tab. `.buttonMiddle` text
+ * "Valider souscription". Container id `#validerSouscription` — disambiguate
+ * from `#validerDevis` (the existing Valider devis path). Clicking this starts
+ * the irreversible souscription wizard, so the flow STOPS before it in dryRun.
+ *
+ * NB: the same container id `#validerSouscription` is REUSED on the Infos
+ * complémentaires page as the "Suivant >>" button (Maxance recycles the
+ * container) — see SUIVANT_INFOS_COMPL_ID below; same constant, different
+ * `.buttonMiddle` label.
+ */
+export const VALIDER_SOUSCRIPTION_ID = 'validerSouscription' as const;
+
+/** Existing "Valider devis" container — kept here only to disambiguate. */
+export const VALIDER_DEVIS_ID = 'validerDevis' as const;
+
+/**
+ * Infos complémentaires page (title "Souscription"): the N° de série input.
+ * Achraf's rule: ALWAYS "1234567" (placeholder; client mails the real papers;
+ * Maxance handles). `mouvement.immatriculationVehicule` is left empty.
+ */
+export const SERIE_INPUT_NAME = 'mouvement.numeroSerieVehicule' as const;
+
+/** Always-set serial number placeholder (Achraf). */
+export const SERIE_PLACEHOLDER = '1234567' as const;
+
+/** Immatriculation input — intentionally left empty (kept for clarity). */
+export const IMMAT_INPUT_NAME = 'mouvement.immatriculationVehicule' as const;
+
+/** Infos complémentaires "Suivant >>" — reuses the validerSouscription container. */
+export const SUIVANT_INFOS_COMPL_ID = VALIDER_SOUSCRIPTION_ID;
+
+/**
+ * Coordonnées + bancaires page (title "Validation de l'affaire nouvelle").
+ * Lieu de naissance commune search input — type the city, then CLICK the
+ * row's <a> search link (img search.gif) to fire the INSEE lookup AJAX
+ * (~4s); a plain blur does NOT trigger it.
+ */
+export const NAISSANCE_COMMUNE_INPUT_NAME = 'souscripteurNaissanceZonier.rechercheCommune' as const;
+
+/**
+ * The resolved-commune select that the lookup populates. Pick the option
+ * whose value starts with the matching INSEE (e.g. "75001|" for Paris).
+ */
+export const NAISSANCE_KEY_SELECT_NAME = 'souscripteurNaissanceZonier.key' as const;
+
+/** Fallback birth-place city for foreign-born subscribers (Achraf). */
+export const NAISSANCE_FALLBACK_CITY = 'Paris' as const;
+
+/**
+ * IBAN is split across 7 segmented inputs `#ibanPart0`..`#ibanPart6`
+ * (maxLength 4,4,4,4,4,4,3 → 27 chars, FR IBAN). The framework also tracks
+ * them under name `bicIbanBean.ibanPartList[i].value`; we set by id.
+ */
+export const IBAN_PART_ID_PREFIX = 'ibanPart' as const;
+export const IBAN_PART_COUNT = 7 as const;
+/** Per-segment max lengths — total 27 (FR IBAN). */
+export const IBAN_PART_LENGTHS = [4, 4, 4, 4, 4, 4, 3] as const;
+
+/** BIC input — must correspond to the IBAN's bank; set explicitly (no auto-fill). */
+export const BIC_INPUT_NAME = 'bicIban.bic' as const;
+
+/** Account-holder input (Titulaire du compte). */
+export const TITULAIRE_INPUT_ID = 'nomTitulaireCompte' as const;
+
+/** Date de prélèvement input — default '5'; we verify, never override blindly. */
+export const JOUR_PRELEVEMENT_INPUT_NAME = 'bicIban.jourPrelevementCompte' as const;
+export const JOUR_PRELEVEMENT_DEFAULT = '5' as const;
+
+/** "Je dispose du comptant" checkbox — check it before Valider. */
+export const COMPTANT_CHECKBOX_NAME = 'flagPrimeRecue' as const;
+
+/**
+ * Final Valider on the bancaires page. The button's onkeypress calls
+ * `doSubmitConfirm('SouscriptionContratVehiculeForm', VALIDER_FINALE_DO,
+ * labelAN)`. Synthetic mouse clicks do NOT fire it, and calling
+ * `doSubmitForm` directly bypasses the confirm → "Erreur applicative"
+ * (FORBIDDEN). Correct automation: set `window.confirm = () => true`, then
+ * call `doSubmitConfirm('SouscriptionContratVehiculeForm', VALIDER_FINALE_DO,
+ * window.labelAN)`; if a CONFIRMATION popin (ConstructConfirmInfo) appears,
+ * click its 'Valider'.
+ */
+export const SOUSCRIPTION_FORM_NAME = 'SouscriptionContratVehiculeForm' as const;
+export const VALIDER_FINALE_DO = 'souscriptionValiderFinaleMoto.do' as const;
+
+/**
+ * Comptant à régler block (body text):
+ *   "Frais de gestion X € Commission Y € Frais de dossier Z € Comptant dû W €"
+ * Each capture group is the EUR amount.
+ */
+export const COMPTANT_FRAIS_GESTION_RE = /Frais de gestion[^\d]*(\d+[.,]\d{2})/i;
+export const COMPTANT_COMMISSION_RE = /Commission[^\d]*(\d+[.,]\d{2})/i;
+export const COMPTANT_FRAIS_DOSSIER_RE = /Frais de dossier[^\d]*(\d+[.,]\d{2})/i;
+export const COMPTANT_DU_RE = /Comptant d[ûu][^\d]*(\d+[.,]\d{2})/i;
+
+/**
+ * Test-RIB rejection ALERTE text. After Valider, this popin appears for test
+ * IBANs → flow returns `maxance_subscription_rib_rejected`. Real IBANs proceed
+ * to the Paiement page instead.
+ */
+export const RIB_REJECT_RE = /Pr[ée]l[èe]vement sur RIB de test non autoris[ée]/i;
+
+/**
+ * Paiement page markers (only reached with a REAL IBAN; URL ends with
+ * VALIDER_FINALE_DO). NEVER fill the CB form / never click its Valider.
+ */
+export const PAIEMENT_ENCAISSEMENT_RE = /Encaissement relatif au souscripteur\s*:\s*(T\d{9,12})/i;
+/** Generic souscripteur instance ref (e.g. T123456789012). */
+export const SOUSCRIPTEUR_REF_RE = /\bT\d{9,12}\b/;
+/** "Un email sera envoyé au souscripteur <addr>". */
+export const PAIEMENT_EMAIL_RE = /Un email sera envoy[ée] au souscripteur\s*([^\s<]+@[^\s<]+)/i;
+/** "Montant règlement … €". */
+export const PAIEMENT_MONTANT_RE = /Montant r[èe]glement[^\d]*(\d+[.,]\d{2})/i;
+
+/** Parse one EUR amount from a body via a RE whose group 1 is the number. */
+export function parseEurFromRe(re: RegExp, text: string | null | undefined): number | null {
+  if (!text) return null;
+  const m = re.exec(text);
+  if (!m?.[1]) return null;
+  return Number.parseFloat(m[1].replace(',', '.'));
+}
+
+/* ────────────────────────────────────────────────────────────────────────── */
 /*  Devis tab (M8.T6)                                                          */
 /* ────────────────────────────────────────────────────────────────────────── */
 

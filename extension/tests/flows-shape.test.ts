@@ -15,6 +15,7 @@ import { runLoginEnsure } from '../src/flows/login.js';
 import { runQuotePreview } from '../src/flows/quote-preview.js';
 import { runQuoteConfirm } from '../src/flows/quote-confirm.js';
 import { runDevisResume } from '../src/flows/devis-resume.js';
+import { runSubscriptionComplete } from '../src/flows/subscription.js';
 
 describe('flow module surface', () => {
   it('exports runLoginEnsure as a function', () => {
@@ -35,5 +36,10 @@ describe('flow module surface', () => {
   it('exports runDevisResume as a function', () => {
     expect(typeof runDevisResume).toBe('function');
     expect(runDevisResume.length).toBe(1);
+  });
+
+  it('exports runSubscriptionComplete as a function', () => {
+    expect(typeof runSubscriptionComplete).toBe('function');
+    expect(runSubscriptionComplete.length).toBe(1);
   });
 });

@@ -118,6 +118,62 @@ describe('CommandSchema', () => {
     const fail = CommandSchema.safeParse({ id: UUID, kind: 'devis.resume' });
     expect(fail.success).toBe(false);
   });
+
+  // M8.T7 B3 — subscription.complete command.
+  const sampleSubscription = {
+    id: UUID,
+    kind: 'subscription.complete' as const,
+    devisNumber: 'DR0000976146',
+    subscriber: { lastName: 'LEFRIEKH', firstName: 'Ridaa' },
+    bank: {
+      iban: 'FR7630006000011234567890189',
+      bic: 'AGRIFRPP',
+      accountHolder: 'Ridaa LEFRIEKH',
+    },
+    birthPlaceCity: 'Paris',
+  };
+
+  it('accepts a subscription.complete command and defaults dryRun=true + serial', () => {
+    const parsed = CommandSchema.safeParse(sampleSubscription);
+    expect(parsed.success).toBe(true);
+    if (parsed.success && parsed.data.kind === 'subscription.complete') {
+      expect(parsed.data.dryRun).toBe(true);
+      expect(parsed.data.serialNumber).toBe('1234567');
+    }
+  });
+
+  it('accepts subscription.complete with explicit dryRun=false + serial override', () => {
+    const ok = CommandSchema.safeParse({
+      ...sampleSubscription,
+      dryRun: false,
+      serialNumber: '7654321',
+      timeoutMs: 360000,
+    });
+    expect(ok.success).toBe(true);
+    if (ok.success && ok.data.kind === 'subscription.complete') {
+      expect(ok.data.dryRun).toBe(false);
+      expect(ok.data.serialNumber).toBe('7654321');
+    }
+  });
+
+  it('rejects subscription.complete missing the bank block', () => {
+    const fail = CommandSchema.safeParse({
+      id: UUID,
+      kind: 'subscription.complete',
+      devisNumber: 'DR0000976146',
+      subscriber: { lastName: 'X', firstName: 'Y' },
+      birthPlaceCity: 'Paris',
+    });
+    expect(fail.success).toBe(false);
+  });
+
+  it('rejects subscription.complete with a too-short BIC', () => {
+    const fail = CommandSchema.safeParse({
+      ...sampleSubscription,
+      bank: { ...sampleSubscription.bank, bic: 'AGRI' },
+    });
+    expect(fail.success).toBe(false);
+  });
 });
 
 describe('ResponseSchema', () => {
@@ -322,6 +378,77 @@ describe('ResponseSchema', () => {
     if (parsed.side === 'response' && parsed.value.kind === 'devis.resume.ok') {
       expect(parsed.value.devisNumber).toBe('DR0000976146');
     }
+  });
+
+  // M8.T7 B3 — subscription.complete responses.
+  it('accepts a dryRun subscription.complete.ok (stopped before valider, garanties comptant)', () => {
+    const ok = ResponseSchema.safeParse({
+      id: UUID,
+      kind: 'subscription.complete.ok',
+      dryRun: true,
+      stoppedBefore: 'valider_souscription',
+      comptantBreakdown: null,
+      garantiesComptant: { fractionnement: 'mensuel', comptantEur: 21.58, fraisComptantEur: 17 },
+      screenshots: [],
+      finalUrl: 'https://www.maxance.com/Proximeo/souscriptionNaviguerOngletVehicule.do',
+      durationMs: 4321,
+    });
+    expect(ok.success).toBe(true);
+  });
+
+  it('accepts a real-mode subscription.complete.ok at the Paiement page', () => {
+    const ok = ResponseSchema.safeParse({
+      id: UUID,
+      kind: 'subscription.complete.ok',
+      dryRun: false,
+      souscripteurRef: 'T123456789012',
+      montantComptantEur: 52.04,
+      souscripteurEmail: 'r.lefriekh@hotmail.com',
+      comptantBreakdown: {
+        fraisGestionEur: 30,
+        commissionEur: 0.39,
+        fraisDossierEur: 17,
+        comptantDuEur: 52.04,
+      },
+      screenshots: [],
+      finalUrl: 'https://www.maxance.com/Proximeo/souscriptionValiderFinaleMoto.do',
+      durationMs: 23456,
+    });
+    expect(ok.success).toBe(true);
+  });
+
+  it('rejects subscription.complete.ok missing the required comptantBreakdown key', () => {
+    const fail = ResponseSchema.safeParse({
+      id: UUID,
+      kind: 'subscription.complete.ok',
+      dryRun: true,
+      screenshots: [],
+      finalUrl: 'https://www.maxance.com/Proximeo/x',
+      durationMs: 1,
+    });
+    expect(fail.success).toBe(false);
+  });
+
+  it('accepts a subscription.complete.navigating response', () => {
+    const ok = ResponseSchema.safeParse({
+      id: UUID,
+      kind: 'subscription.complete.navigating',
+      fromScreen: 'bancaires',
+      expectedScreen: 'paiement',
+      screenshots: [],
+    });
+    expect(ok.success).toBe(true);
+  });
+
+  it('accepts the rib_rejected error code on an error response', () => {
+    const ok = ResponseSchema.safeParse({
+      id: UUID,
+      kind: 'error',
+      errorCode: 'maxance_subscription_rib_rejected',
+      detail: 'ALERTE: Prélèvement sur RIB de test non autorisé',
+      screenshots: [],
+    });
+    expect(ok.success).toBe(true);
   });
 
   it('accepts an error response with tagged errorCode', () => {

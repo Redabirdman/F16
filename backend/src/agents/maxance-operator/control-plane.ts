@@ -30,6 +30,7 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import type { Context, Next } from 'hono';
 import type {
+  CompleteSubscriptionArgs,
   ExtensionClient,
   ExtensionQuoteParams,
   ExtensionSubscriberInfo,
@@ -96,6 +97,35 @@ const ResumeBodySchema = z.object({
   commissionPct: z.number().min(0).max(100).optional(),
   fractionnement: z.enum(['mensuel', 'annuel']).optional(),
 });
+
+// M8.T7 B3 — subscription.complete body. The Garanties tab must already be
+// resumed (devis.resume first). dryRun defaults TRUE (the destructive Valider
+// souscription click is gated). IBAN/BIC are PII — never logged plaintext.
+const SubscriptionBodySchema = z.object({
+  devisNumber: z.string().min(3),
+  subscriber: z.object({ lastName: z.string().min(1), firstName: z.string().min(1) }),
+  bank: z.object({
+    iban: z.string().min(15),
+    bic: z.string().min(8).max(11),
+    accountHolder: z.string().min(1),
+  }),
+  birthPlaceCity: z.string().min(1),
+  serialNumber: z.string().min(1).optional(),
+  _dryRun: z.boolean().optional(),
+});
+
+/** Build CompleteSubscriptionArgs from the parsed body, omitting undefined optionals. */
+function toSubscriptionArgs(
+  parsed: z.infer<typeof SubscriptionBodySchema>,
+): CompleteSubscriptionArgs {
+  return {
+    devisNumber: parsed.devisNumber,
+    subscriber: parsed.subscriber,
+    bank: parsed.bank,
+    birthPlaceCity: parsed.birthPlaceCity,
+    ...(parsed.serialNumber !== undefined ? { serialNumber: parsed.serialNumber } : {}),
+  };
+}
 
 /** Build ResumeDevisParams from the parsed body, omitting undefined optionals. */
 function toResumeParams(parsed: z.infer<typeof ResumeBodySchema>): ResumeDevisParams {
@@ -264,6 +294,34 @@ export function buildExtensionControlPlane(opts: BuildControlPlaneOptions): Hono
       return c.json(
         {
           error: 'devis_resume_failed',
+          detail: err instanceof Error ? err.message : String(err),
+        },
+        500,
+      );
+    }
+  });
+
+  app.post('/subscription', async (c) => {
+    const body = await parseJsonBody(c);
+    if (!body.ok) return body.res;
+    const parse = SubscriptionBodySchema.safeParse(body.value);
+    if (!parse.success) {
+      return c.json({ error: 'invalid_body', issues: parse.error.issues }, 400);
+    }
+    // Default dryRun TRUE — the destructive Valider souscription click is gated;
+    // flipping requires explicit `_dryRun: false` (live run with Achraf only).
+    const dryRun = parse.data._dryRun ?? true;
+    try {
+      const res = await opts.client.completeSubscription(
+        'maxance-default',
+        toSubscriptionArgs(parse.data),
+        { dryRun },
+      );
+      return c.json(res, 200);
+    } catch (err) {
+      return c.json(
+        {
+          error: 'subscription_failed',
           detail: err instanceof Error ? err.message : String(err),
         },
         500,

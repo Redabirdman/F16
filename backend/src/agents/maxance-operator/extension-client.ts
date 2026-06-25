@@ -97,6 +97,52 @@ export interface ResumeDevisParams {
   fractionnement?: 'mensuel' | 'annuel';
 }
 
+/** Bank coordinates for the souscription bancaires page. PII — never logged plaintext. */
+export interface ExtensionBankInfo {
+  iban: string;
+  bic: string;
+  accountHolder: string;
+}
+
+/** Args for completeSubscription. */
+export interface CompleteSubscriptionArgs {
+  devisNumber: string;
+  subscriber: { lastName: string; firstName: string };
+  bank: ExtensionBankInfo;
+  birthPlaceCity: string;
+  /** N° de série — Achraf's rule defaults to "1234567" if omitted. */
+  serialNumber?: string;
+}
+
+/**
+ * M8.T7 B3: result of completing the souscription. Two outcomes share the
+ * shape — a dryRun stop (before the destructive Valider souscription) and a
+ * real run to the Paiement page STOP. The RIB-test-rejection path throws an
+ * ExtensionClientError with code `maxance_subscription_rib_rejected`.
+ */
+export interface CompleteSubscriptionResult {
+  sessionId: string;
+  durationMs: number;
+  screenshots: { step: string; url: string }[];
+  dryRun: boolean;
+  /** Present in dryRun: the step we stopped before. */
+  stoppedBefore?: 'valider_souscription';
+  /** Maxance souscripteur/instance ref (real mode, Paiement page). */
+  souscripteurRef?: string;
+  /** Montant règlement read off the Paiement page (real mode). */
+  montantComptantEur?: number;
+  /** Email the souscripteur will be notified at (real mode, Paiement page). */
+  souscripteurEmail?: string;
+  /** "Comptant à régler" breakdown from the bancaires page (real mode), or null. */
+  comptantBreakdown: {
+    fraisGestionEur: number | null;
+    commissionEur: number | null;
+    fraisDossierEur: number | null;
+    comptantDuEur: number | null;
+  } | null;
+  finalUrl: string;
+}
+
 export interface ExtensionSubscriberInfo {
   civilite: 'monsieur' | 'madame';
   lastName: string;
@@ -498,6 +544,64 @@ export class ExtensionClient {
           ? { annual: resp.pricePreviewEur.annual }
           : {}),
       },
+      comptantBreakdown: resp.comptantBreakdown,
+      finalUrl: resp.finalUrl,
+    };
+  }
+
+  /**
+   * M8.T7 B3: complete the souscription on a devis already resumed to its
+   * Garanties tab. Drives Valider souscription → Infos complémentaires →
+   * Coordonnées + bancaires → Paiement page STOP (never fills CB). `dryRun`
+   * defaults TRUE — the destructive Valider souscription click is the gate;
+   * dryRun stops before it. IBAN/BIC are PII: passed to the extension only,
+   * never logged here.
+   */
+  async completeSubscription(
+    _sessionName: string,
+    args: CompleteSubscriptionArgs,
+    opts: { dryRun?: boolean; timeoutMs?: number } = {},
+  ): Promise<CompleteSubscriptionResult> {
+    void _sessionName;
+    const dryRun = opts.dryRun ?? true;
+    const cmd: Command = {
+      id: randomUUID(),
+      kind: 'subscription.complete',
+      devisNumber: args.devisNumber,
+      subscriber: {
+        lastName: args.subscriber.lastName,
+        firstName: args.subscriber.firstName,
+      },
+      bank: {
+        iban: args.bank.iban,
+        bic: args.bank.bic,
+        accountHolder: args.bank.accountHolder,
+      },
+      birthPlaceCity: args.birthPlaceCity,
+      serialNumber: args.serialNumber ?? '1234567',
+      dryRun,
+      ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
+    };
+    const resp = await this.send(cmd, opts.timeoutMs);
+    if (resp.kind !== 'subscription.complete.ok') {
+      throw new ExtensionClientError(
+        `extension_subscription_unexpected_kind:${resp.kind}`,
+        'unexpected_kind',
+      );
+    }
+    return {
+      sessionId: cmd.id,
+      durationMs: resp.durationMs,
+      screenshots: this.mapScreenshots(resp.screenshots),
+      dryRun: resp.dryRun,
+      ...(resp.stoppedBefore !== undefined ? { stoppedBefore: resp.stoppedBefore } : {}),
+      ...(resp.souscripteurRef !== undefined ? { souscripteurRef: resp.souscripteurRef } : {}),
+      ...(resp.montantComptantEur !== undefined
+        ? { montantComptantEur: resp.montantComptantEur }
+        : {}),
+      ...(resp.souscripteurEmail !== undefined
+        ? { souscripteurEmail: resp.souscripteurEmail }
+        : {}),
       comptantBreakdown: resp.comptantBreakdown,
       finalUrl: resp.finalUrl,
     };

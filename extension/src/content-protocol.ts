@@ -252,6 +252,84 @@ export type RepriseSubmitResponse =
   | { kind: 'reprise.submit.ok'; log: string[] }
   | { kind: 'reprise.submit.err'; log: string[]; error: string };
 
+/* ────────────────────────────────────────────────────────────────────────── */
+/*  Subscription (M8.T7 B3) — souscription closing steps (MAIN world)          */
+/* ────────────────────────────────────────────────────────────────────────── */
+
+/**
+ * Content → SW: "fill the N° de série on the Infos complémentaires page in
+ * MAIN world" (M8.T7 B3). The serial is a non-PII placeholder ("1234567");
+ * immatriculation is intentionally left empty. The Suivant button afterwards
+ * reuses the existing `click.main-world` path (`#validerSouscription`
+ * container, `.buttonMiddle` "Suivant >>").
+ */
+export interface SubscriptionInfosComplRequest {
+  kind: 'subscription.infos-compl-mw';
+  serialNumber: string;
+}
+
+/** SW → content: outcome of the Infos complémentaires serial fill. */
+export type SubscriptionInfosComplResponse =
+  | { kind: 'subscription.infos.ok'; log: string[] }
+  | { kind: 'subscription.infos.err'; log: string[]; error: string };
+
+/**
+ * Content → SW: "fill the Coordonnées + bancaires page in MAIN world"
+ * (M8.T7 B3). Drives, in order owned by the SW (so it can wait for the
+ * commune-lookup AJAX between steps):
+ *   1. type the commune into `souscripteurNaissanceZonier.rechercheCommune`
+ *      and CLICK its row search link (img search.gif) → INSEE lookup AJAX,
+ *   2. (SW waits) select `souscripteurNaissanceZonier.key` whose value starts
+ *      with the matching INSEE,
+ *   3. split the IBAN across `#ibanPart0..6`, set BIC + Titulaire, verify the
+ *      jour de prélèvement default, check "Je dispose du comptant", and read
+ *      the "Comptant à régler" block + `ErrorMessage()`.
+ *
+ * IBAN/BIC are PII — they appear ONLY inside the MAIN-world func args, never
+ * in the returned `log` (which carries set/missing booleans only).
+ */
+export interface SubscriptionBancairesRequest {
+  kind: 'subscription.bancaires-mw';
+  payload: {
+    birthPlaceCity: string;
+    /** Full IBAN, already normalised (no spaces) by the caller. */
+    iban: string;
+    bic: string;
+    accountHolder: string;
+  };
+}
+
+/** SW → content: outcome of the bancaires fill (+ parsed comptant + validation). */
+export type SubscriptionBancairesResponse =
+  | {
+      kind: 'subscription.bancaires.ok';
+      log: string[];
+      /** Raw "Comptant à régler" body text for the flow to parse. */
+      comptantText: string;
+      /** Non-empty ErrorMessage() output = required-field failure. */
+      errorMessage: string;
+    }
+  | { kind: 'subscription.bancaires.err'; log: string[]; error: string };
+
+/**
+ * Content → SW: "submit the final Valider on the bancaires page in MAIN world"
+ * (M8.T7 B3, the destructive submit). Sets `window.confirm = () => true`
+ * (native fallback), calls
+ * `doSubmitConfirm('SouscriptionContratVehiculeForm', validerFinaleDo,
+ * window.labelAN)`, then — if a ConstructConfirmInfo CONFIRMATION popin
+ * appears — clicks its 'Valider'. NEVER calls `doSubmitForm` directly
+ * (→ "Erreur applicative").
+ */
+export interface SubscriptionValiderFinaleRequest {
+  kind: 'subscription.valider-finale-mw';
+  validerFinaleDo: string;
+}
+
+/** SW → content: outcome of the final Valider submit. */
+export type SubscriptionValiderFinaleResponse =
+  | { kind: 'subscription.valider.ok'; log: string[]; popinClicked: boolean }
+  | { kind: 'subscription.valider.err'; log: string[]; error: string };
+
 /** All possible inbound messages on the SW side. */
 export type SwInbound =
   | FlowOutcome
@@ -264,7 +342,10 @@ export type SwInbound =
   | CourrierFillSendRequest
   | GarantiesConfigureRequest
   | RepriseSearchRequest
-  | RepriseSubmitRequest;
+  | RepriseSubmitRequest
+  | SubscriptionInfosComplRequest
+  | SubscriptionBancairesRequest
+  | SubscriptionValiderFinaleRequest;
 
 /** All possible inbound messages on the content-script side. */
 export type ContentInbound = FlowInvocation;

@@ -38,10 +38,18 @@ import type {
   RepriseSearchResponse,
   RepriseSubmitResponse,
   ScreenshotResponse,
+  SubscriptionBancairesResponse,
+  SubscriptionInfosComplResponse,
+  SubscriptionValiderFinaleResponse,
   SwInbound,
 } from './content-protocol.js';
 import { handleGarantiesConfigureMw } from './garanties-mw.js';
 import { handleRepriseSearchMw, handleRepriseSubmitMw } from './reprise-mw.js';
+import {
+  handleSubscriptionBancairesMw,
+  handleSubscriptionInfosComplMw,
+  handleSubscriptionValiderFinaleMw,
+} from './subscription-mw.js';
 
 /** Backend WS endpoint. Hard-coded for V1 — production = same machine. */
 const BACKEND_WS_URL = 'ws://127.0.0.1:9223';
@@ -111,7 +119,8 @@ async function forwardToContent(command: Command): Promise<Response> {
   if (
     command.kind === 'quote.preview' ||
     command.kind === 'quote.confirm' ||
-    command.kind === 'devis.resume'
+    command.kind === 'devis.resume' ||
+    command.kind === 'subscription.complete'
   ) {
     const resp = await orchestrateNavigatingFlow(tabId, command);
     // Autonomous self-healing (phase-2j, Ridaa 2026-06-03). A flow that
@@ -127,9 +136,15 @@ async function forwardToContent(command: Command): Promise<Response> {
     //   - devis.resume SUCCESS → do NOT reset (M8.T7 B2: it leaves the tab on
     //     the Garanties tab of the resumed devis, which the subscription
     //     flow needs to keep). Errors still reset.
+    //   - subscription.complete SUCCESS → reset (M8.T7 B3: terminal — it ends
+    //     on the Paiement page in real mode, or stops on Garanties in dryRun;
+    //     either way the next flow starts clean). Errors still reset.
     // The response (devisNumber / detail / screenshots) is built before the
     // navigate, so nothing is lost.
-    const shouldReset = resp.kind === 'error' || command.kind === 'quote.confirm';
+    const shouldReset =
+      resp.kind === 'error' ||
+      command.kind === 'quote.confirm' ||
+      command.kind === 'subscription.complete';
     if (shouldReset) {
       await resetMaxanceTabToHome(tabId).catch(() => undefined);
     }
@@ -248,7 +263,8 @@ async function orchestrateNavigatingFlow(tabId: number, command: Command): Promi
     if (
       resp.kind === 'quote.preview.ok' ||
       resp.kind === 'quote.confirm.ok' ||
-      resp.kind === 'devis.resume.ok'
+      resp.kind === 'devis.resume.ok' ||
+      resp.kind === 'subscription.complete.ok'
     ) {
       // Replace the final response's screenshots with the full accumulated
       // set so callers see the entire navigation chain.
@@ -257,7 +273,8 @@ async function orchestrateNavigatingFlow(tabId: number, command: Command): Promi
     if (
       resp.kind === 'quote.preview.navigating' ||
       resp.kind === 'quote.confirm.navigating' ||
-      resp.kind === 'devis.resume.navigating'
+      resp.kind === 'devis.resume.navigating' ||
+      resp.kind === 'subscription.complete.navigating'
     ) {
       console.warn(
         `[f16-ext] orchestrator: iter ${iter} returned navigating from=${resp.fromScreen} expected=${resp.expectedScreen}`,
@@ -471,7 +488,10 @@ chrome.runtime.onMessage.addListener(
         | { kind: 'courrier.err'; error: string }
         | GarantiesConfigureResponse
         | RepriseSearchResponse
-        | RepriseSubmitResponse,
+        | RepriseSubmitResponse
+        | SubscriptionInfosComplResponse
+        | SubscriptionBancairesResponse
+        | SubscriptionValiderFinaleResponse,
     ) => void,
   ) => {
     if (message.kind === 'capture_screenshot') {
@@ -828,6 +848,66 @@ chrome.runtime.onMessage.addListener(
         (err: unknown) =>
           sendResponse({
             kind: 'reprise.submit.err',
+            log: [],
+            error: err instanceof Error ? err.message.slice(0, 240) : String(err).slice(0, 240),
+          }),
+      );
+      return true;
+    }
+    if (message.kind === 'subscription.infos-compl-mw') {
+      // M8.T7 B3: fill the N° de série on the Infos complémentaires page in
+      // MAIN world (logic in subscription-mw.ts). Routing shim.
+      const tabId = sender.tab?.id;
+      if (tabId === undefined) {
+        sendResponse({ kind: 'subscription.infos.err', log: [], error: 'no_sender_tab' });
+        return false;
+      }
+      void handleSubscriptionInfosComplMw(tabId, message.serialNumber).then(
+        (resp) => sendResponse(resp),
+        (err: unknown) =>
+          sendResponse({
+            kind: 'subscription.infos.err',
+            log: [],
+            error: err instanceof Error ? err.message.slice(0, 240) : String(err).slice(0, 240),
+          }),
+      );
+      return true;
+    }
+    if (message.kind === 'subscription.bancaires-mw') {
+      // M8.T7 B3: fill the Coordonnées + bancaires page in MAIN world — commune
+      // search + INSEE select, IBAN split, BIC, Titulaire, checkbox, comptant
+      // read + ErrorMessage (logic in subscription-mw.ts). IBAN/BIC live ONLY
+      // in the MAIN-world args; the returned log carries booleans only.
+      const tabId = sender.tab?.id;
+      if (tabId === undefined) {
+        sendResponse({ kind: 'subscription.bancaires.err', log: [], error: 'no_sender_tab' });
+        return false;
+      }
+      void handleSubscriptionBancairesMw(tabId, message.payload).then(
+        (resp) => sendResponse(resp),
+        (err: unknown) =>
+          sendResponse({
+            kind: 'subscription.bancaires.err',
+            log: [],
+            error: err instanceof Error ? err.message.slice(0, 240) : String(err).slice(0, 240),
+          }),
+      );
+      return true;
+    }
+    if (message.kind === 'subscription.valider-finale-mw') {
+      // M8.T7 B3: the destructive final Valider — set window.confirm=()=>true,
+      // call doSubmitConfirm(...), click the CONFIRMATION popin's Valider
+      // (logic in subscription-mw.ts). NEVER doSubmitForm directly.
+      const tabId = sender.tab?.id;
+      if (tabId === undefined) {
+        sendResponse({ kind: 'subscription.valider.err', log: [], error: 'no_sender_tab' });
+        return false;
+      }
+      void handleSubscriptionValiderFinaleMw(tabId, message.validerFinaleDo).then(
+        (resp) => sendResponse(resp),
+        (err: unknown) =>
+          sendResponse({
+            kind: 'subscription.valider.err',
             log: [],
             error: err instanceof Error ? err.message.slice(0, 240) : String(err).slice(0, 240),
           }),

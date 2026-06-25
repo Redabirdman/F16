@@ -32,6 +32,22 @@ import {
   VALIDER_VEHICULE_ID,
   VALIDER_CONDUCTEUR_ID,
   REPRISE_HEADER_RE,
+  VALIDER_SOUSCRIPTION_ID,
+  SERIE_INPUT_NAME,
+  SERIE_PLACEHOLDER,
+  IBAN_PART_ID_PREFIX,
+  IBAN_PART_COUNT,
+  IBAN_PART_LENGTHS,
+  BIC_INPUT_NAME,
+  TITULAIRE_INPUT_ID,
+  NAISSANCE_COMMUNE_INPUT_NAME,
+  NAISSANCE_KEY_SELECT_NAME,
+  COMPTANT_CHECKBOX_NAME,
+  VALIDER_FINALE_DO,
+  RIB_REJECT_RE,
+  PAIEMENT_ENCAISSEMENT_RE,
+  parseEurFromRe,
+  COMPTANT_DU_RE,
 } from '../src/maxance/selectors.js';
 
 describe('maxance selectors (extension/src/maxance/selectors)', () => {
@@ -90,5 +106,50 @@ describe('maxance selectors (extension/src/maxance/selectors)', () => {
     // tolerant of the ASCII "no" and missing space variants
     expect(REPRISE_HEADER_RE.test('Reprise du devis no DR0000976146')).toBe(true);
     expect(REPRISE_HEADER_RE.test('Visualisation du devis DR0000976146')).toBe(false);
+  });
+
+  // M8.T7 B3 — souscription selectors (live-verified 2026-06-11).
+  it('pins the souscription gate + infos complémentaires selectors', () => {
+    expect(VALIDER_SOUSCRIPTION_ID).toBe('validerSouscription');
+    expect(SERIE_INPUT_NAME).toBe('mouvement.numeroSerieVehicule');
+    expect(SERIE_PLACEHOLDER).toBe('1234567');
+  });
+
+  it('pins the IBAN segmentation (7 parts, lengths sum to 27)', () => {
+    expect(IBAN_PART_ID_PREFIX).toBe('ibanPart');
+    expect(IBAN_PART_COUNT).toBe(7);
+    expect(IBAN_PART_LENGTHS).toHaveLength(7);
+    expect(IBAN_PART_LENGTHS.reduce((a, b) => a + b, 0)).toBe(27);
+  });
+
+  it('pins the bancaires field selectors', () => {
+    expect(BIC_INPUT_NAME).toBe('bicIban.bic');
+    expect(TITULAIRE_INPUT_ID).toBe('nomTitulaireCompte');
+    expect(NAISSANCE_COMMUNE_INPUT_NAME).toBe('souscripteurNaissanceZonier.rechercheCommune');
+    expect(NAISSANCE_KEY_SELECT_NAME).toBe('souscripteurNaissanceZonier.key');
+    expect(COMPTANT_CHECKBOX_NAME).toBe('flagPrimeRecue');
+    expect(VALIDER_FINALE_DO).toBe('souscriptionValiderFinaleMoto.do');
+  });
+
+  it('detects the RIB-test rejection ALERTE text', () => {
+    expect(
+      RIB_REJECT_RE.test('3_Validation impossible. Prélèvement sur RIB de test non autorisé'),
+    ).toBe(true);
+    expect(RIB_REJECT_RE.test('Encaissement relatif au souscripteur : T123456789012')).toBe(false);
+  });
+
+  it('matches the Paiement encaissement marker + extracts the souscripteur ref', () => {
+    const m = PAIEMENT_ENCAISSEMENT_RE.exec('Encaissement relatif au souscripteur : T123456789012');
+    expect(m?.[1]).toBe('T123456789012');
+  });
+
+  it('parses a EUR amount from the Comptant dû line', () => {
+    expect(
+      parseEurFromRe(
+        COMPTANT_DU_RE,
+        'Frais de gestion 30.00 € Commission 0.39 € Frais de dossier 17.00 € Comptant dû 52.04 €',
+      ),
+    ).toBe(52.04);
+    expect(parseEurFromRe(COMPTANT_DU_RE, 'no comptant here')).toBeNull();
   });
 });

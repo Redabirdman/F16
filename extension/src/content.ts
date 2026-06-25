@@ -15,6 +15,7 @@ import { runLoginEnsure } from './flows/login.js';
 import { runQuotePreview } from './flows/quote-preview.js';
 import { runQuoteConfirm } from './flows/quote-confirm.js';
 import { runDevisResume } from './flows/devis-resume.js';
+import { runSubscriptionComplete } from './flows/subscription.js';
 
 console.info('[f16-ext] content script loaded on', location.href);
 
@@ -50,6 +51,8 @@ async function handleFlow(command: Command): Promise<Response> {
         return await runQuoteConfirm(command);
       case 'devis.resume':
         return await runDevisResume(command);
+      case 'subscription.complete':
+        return await runSubscriptionComplete(command);
     }
   } catch (err) {
     return ErrorResponseSchema.parse({
