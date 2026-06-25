@@ -110,6 +110,83 @@ describe('ResponseSchema', () => {
     expect(ok.success).toBe(true);
   });
 
+  // M8.T7 B1 — Garanties comptant breakdown threading.
+  it('accepts a quote.preview.ok carrying a comptantBreakdown', () => {
+    const ok = ResponseSchema.safeParse({
+      id: UUID,
+      kind: 'quote.preview.ok',
+      pricePreviewEur: { monthly: 83.71, annual: 95.71 },
+      comptantBreakdown: {
+        fractionnement: 'mensuel',
+        comptantEur: 21.58,
+        termeSuivantEur: 7.97,
+        coutAnnuelBrutEur: 95.71,
+        fraisComptantEur: 17,
+      },
+      screenshots: [],
+      finalUrl: 'https://www.maxance.com/Proximeo/x',
+      durationMs: 1234,
+    });
+    expect(ok.success).toBe(true);
+  });
+
+  it('accepts a comptantBreakdown with null fraisComptantEur (popup absent)', () => {
+    const ok = ResponseSchema.safeParse({
+      id: UUID,
+      kind: 'quote.preview.ok',
+      pricePreviewEur: { monthly: 83.71 },
+      comptantBreakdown: { fraisComptantEur: null },
+      screenshots: [],
+      finalUrl: 'https://www.maxance.com/Proximeo/x',
+      durationMs: 1234,
+    });
+    expect(ok.success).toBe(true);
+  });
+
+  it('rejects a comptantBreakdown missing the required fraisComptantEur field', () => {
+    const fail = ResponseSchema.safeParse({
+      id: UUID,
+      kind: 'quote.preview.ok',
+      pricePreviewEur: { monthly: 83.71 },
+      comptantBreakdown: { comptantEur: 21.58 },
+      screenshots: [],
+      finalUrl: 'https://www.maxance.com/Proximeo/x',
+      durationMs: 1234,
+    });
+    expect(fail.success).toBe(false);
+  });
+
+  it('accepts a quote.confirm.ok carrying a comptantBreakdown (reserved for B2/B3)', () => {
+    const ok = ResponseSchema.safeParse({
+      id: UUID,
+      kind: 'quote.confirm.ok',
+      devisNumber: 'DR0000973579',
+      pdfSentTo: 'r.lefriekh@hotmail.com',
+      comptantBreakdown: { fractionnement: 'annuel', fraisComptantEur: 17 },
+      screenshots: [],
+      finalUrl: 'https://www.maxance.com/Proximeo/souscriptionDevisValiderFinaleMoto.do',
+      durationMs: 5678,
+    });
+    expect(ok.success).toBe(true);
+  });
+
+  it('round-trips a quote.preview.ok with breakdown through parseFrame', () => {
+    const frame: Response = {
+      id: UUID,
+      kind: 'quote.preview.ok',
+      pricePreviewEur: { monthly: 83.71 },
+      comptantBreakdown: { fractionnement: 'mensuel', comptantEur: 21.58, fraisComptantEur: null },
+      screenshots: [],
+      finalUrl: 'https://www.maxance.com/Proximeo/x',
+      durationMs: 1,
+    };
+    const parsed = parseFrame(JSON.stringify(frame));
+    expect(parsed.side).toBe('response');
+    if (parsed.side === 'response' && parsed.value.kind === 'quote.preview.ok') {
+      expect(parsed.value.comptantBreakdown).toEqual(frame.comptantBreakdown);
+    }
+  });
+
   it('accepts a quote.confirm.ok response with devisNumber', () => {
     const ok = ResponseSchema.safeParse({
       id: UUID,

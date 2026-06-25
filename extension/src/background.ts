@@ -34,9 +34,11 @@ import {
 import type {
   ContentInbound,
   FlowOutcome,
+  GarantiesConfigureResponse,
   ScreenshotResponse,
   SwInbound,
 } from './content-protocol.js';
+import { handleGarantiesConfigureMw } from './garanties-mw.js';
 
 /** Backend WS endpoint. Hard-coded for V1 — production = same machine. */
 const BACKEND_WS_URL = 'ws://127.0.0.1:9223';
@@ -169,9 +171,12 @@ const NAV_COMPLETE_TIMEOUT_MS = 20_000;
  *  inline `MainMenu_0CreateOnglet(...)`-style scripts time to render the
  *  DOM before our next advance hits `detectCurrentScreen`. */
 const POST_NAV_SETTLE_MS = 800;
-/** Per-advance content-script timeout. Smaller than the legacy 60s
- *  because each advance is now short (one screen of work). */
-const ADVANCE_TIMEOUT_MS = 60_000;
+/** Per-advance content-script timeout. M8.T7 B1 bumped 60s → 90s: the
+ *  Garanties advance now applies up to three closing controls, each with
+ *  its own ~5-6s AJAX re-render wait (worst-case budgets 15+20+15s),
+ *  BEFORE the 20s price-extraction poll — the old 60s budget could expire
+ *  on a slow-but-succeeding run. */
+const ADVANCE_TIMEOUT_MS = 90_000;
 
 /**
  * Drive a navigation-prone flow (quote.preview / quote.confirm) across
@@ -445,7 +450,8 @@ chrome.runtime.onMessage.addListener(
         | { kind: 'mdi.ok' }
         | { kind: 'mdi.err'; error: string }
         | { kind: 'courrier.ok'; log: string[]; filledFrame: boolean; sent: boolean }
-        | { kind: 'courrier.err'; error: string },
+        | { kind: 'courrier.err'; error: string }
+        | GarantiesConfigureResponse,
     ) => void,
   ) => {
     if (message.kind === 'capture_screenshot') {
@@ -746,6 +752,28 @@ chrome.runtime.onMessage.addListener(
           });
         }
       })();
+      return true;
+    }
+    if (message.kind === 'garanties.configure-mw') {
+      // M8.T7 B1: apply the Garanties closing controls (formule radio,
+      // commission — ALWAYS, default 22 —, fractionnement) via SW-
+      // orchestrated main-world steps. Logic lives in garanties-mw.ts;
+      // this is just the routing shim (same shape as devis.fill-and-
+      // submit-mw, which it patterns after).
+      const tabId = sender.tab?.id;
+      if (tabId === undefined) {
+        sendResponse({ kind: 'garanties.err', log: [], error: 'no_sender_tab' });
+        return false;
+      }
+      void handleGarantiesConfigureMw(tabId, message.payload).then(
+        (resp) => sendResponse(resp),
+        (err: unknown) =>
+          sendResponse({
+            kind: 'garanties.err',
+            log: [],
+            error: err instanceof Error ? err.message.slice(0, 240) : String(err).slice(0, 240),
+          }),
+      );
       return true;
     }
     if (message.kind === 'click.contact-nouveau') {

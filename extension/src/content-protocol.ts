@@ -181,6 +181,37 @@ export type CourrierFillSendResponse =
   | { kind: 'courrier.ok'; log: string[]; filledFrame: boolean; sent: boolean }
   | { kind: 'courrier.err'; error: string };
 
+/**
+ * Content → SW: "apply the Garanties closing controls — formule radio,
+ * commission %, fractionnement — in the page's MAIN world" (M8.T7 B1).
+ *
+ * All three controls are Maxance framework widgets whose inline handlers
+ * (`submitFormule()`, the generated commission onblur, the fractionnement
+ * `doSubmitFormCustomWithCacheAJAX` onchange) each fire an AJAX re-render
+ * (~5-6s, "Chargement" indicator in the body text while in-flight). The SW
+ * orchestrates the steps sequentially — set control → wait for the
+ * re-render to clear — using the same multi-step main-world pattern as
+ * devis.fill-and-submit-mw (one self-contained sync func per step, sleeps
+ * owned by the SW). Codes are pre-mapped by the content script from the
+ * canonical selectors module (FORMULE_CODE / FRACTIONNEMENT_CODE).
+ */
+export interface GarantiesConfigureRequest {
+  kind: 'garanties.configure-mw';
+  payload: {
+    /** Maxance radio value (NV10/NV20/NV30). Absent = leave as rendered. */
+    formuleCode?: 'NV10' | 'NV20' | 'NV30';
+    /** Target commission % — already clamped by the caller (9..22). */
+    commissionPct: number;
+    /** Fractionnement option value (M/A). Absent = leave as rendered. */
+    fractionnementCode?: 'M' | 'A';
+  };
+}
+
+/** SW → content: outcome of the main-world Garanties configuration. */
+export type GarantiesConfigureResponse =
+  | { kind: 'garanties.ok'; log: string[]; finalCommission: string }
+  | { kind: 'garanties.err'; log: string[]; error: string };
+
 /** All possible inbound messages on the SW side. */
 export type SwInbound =
   | FlowOutcome
@@ -190,7 +221,8 @@ export type SwInbound =
   | ContactWidgetNouveauRequest
   | DevisFillAndSubmitRequest
   | OpenMdiWindowRequest
-  | CourrierFillSendRequest;
+  | CourrierFillSendRequest
+  | GarantiesConfigureRequest;
 
 /** All possible inbound messages on the content-script side. */
 export type ContentInbound = FlowInvocation;

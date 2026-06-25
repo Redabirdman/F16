@@ -25,7 +25,12 @@
 import { WebSocketServer, WebSocket as WsClient } from 'ws';
 import { randomUUID } from 'node:crypto';
 import { logger } from '../../logger.js';
-import { parseFrame, type Command, type Response } from '@f16/extension/wire';
+import {
+  parseFrame,
+  type Command,
+  type ComptantBreakdown,
+  type Response,
+} from '@f16/extension/wire';
 
 const DEFAULT_WS_PORT = 9223;
 const DEFAULT_TIMEOUT_MS = 6 * 60_000;
@@ -38,6 +43,13 @@ export interface QuotePreviewResult {
   screenshots: { step: string; url: string }[];
   dryRun: boolean;
   pricePreviewEur: { monthly?: number; annual?: number };
+  /**
+   * M8.T7 B1: Garanties comptant breakdown (fractionnement, comptant,
+   * terme suivant, coût annuel brut, frais comptant) extracted after the
+   * closing controls were applied (commission forced to 22 by default).
+   * Absent when the extension build predates B1.
+   */
+  comptantBreakdown?: ComptantBreakdown;
   finalUrl: string;
 }
 export interface LoginResult {
@@ -54,6 +66,10 @@ export interface ConfirmQuoteResult {
   screenshots: { step: string; url: string }[];
   devisNumber: string;
   pdfSentTo: string;
+  /** M8.T7 B1: optional — reserved on the wire; the confirm flow doesn't
+   *  populate it yet (its final response is built 2 navigations past the
+   *  Garanties tab). Threaded through when present for forward-compat. */
+  comptantBreakdown?: ComptantBreakdown;
   finalUrl: string;
 }
 
@@ -363,6 +379,9 @@ export class ExtensionClient {
           ? { annual: resp.pricePreviewEur.annual }
           : {}),
       },
+      ...(resp.comptantBreakdown !== undefined
+        ? { comptantBreakdown: resp.comptantBreakdown }
+        : {}),
       finalUrl: resp.finalUrl,
     };
   }
@@ -408,6 +427,9 @@ export class ExtensionClient {
       screenshots: this.mapScreenshots(resp.screenshots),
       devisNumber: resp.devisNumber,
       pdfSentTo: resp.pdfSentTo,
+      ...(resp.comptantBreakdown !== undefined
+        ? { comptantBreakdown: resp.comptantBreakdown }
+        : {}),
       finalUrl: resp.finalUrl,
     };
   }

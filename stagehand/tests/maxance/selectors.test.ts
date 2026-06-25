@@ -12,11 +12,18 @@
 import { describe, it, expect } from 'vitest';
 import {
   CIVILITE_VALUE,
+  COMMISSION_INPUT_ID,
+  COMPTANT_POPUP_ID_PREFIX,
   COURRIER_POPUP_FALLBACK_COORDS,
   COURRIER_POPUP_IFRAME_ID,
   COURRIER_POPUP_URL_PATH,
   CYLINDREE_TROTTINETTE,
   EMAIL_ROLE_GESTION,
+  FORMULE_CODE,
+  FORMULE_RADIO_NAME,
+  FRACTIONNEMENT_CODE,
+  FRACTIONNEMENT_SELECT_NAME,
+  FRAIS_COMPTANT_REGEX,
   MARQUE_TROTTINETTE,
   PHONE_COUNTRY_FR,
   PHONE_TYPE_MOBILE,
@@ -31,6 +38,7 @@ import {
   formatIsoDateFr,
   formuleLabel,
   fractionnementLabel,
+  parseFraisComptant,
   stationnementOption,
   trottinetteVersionBand,
 } from '../../src/maxance/selectors.js';
@@ -157,6 +165,53 @@ describe('clampCommissionPct', () => {
   });
   it('defaults to 9 when undefined', () => {
     expect(clampCommissionPct(undefined)).toBe(9);
+  });
+});
+
+describe('Garanties closing controls (M8.T7 B1, live-verified 2026-06-11)', () => {
+  it('pins the formule radio group name', () => {
+    expect(FORMULE_RADIO_NAME).toBe('codeFormuleSelected');
+  });
+  it('pins the formule radio values NV10/NV20/NV30', () => {
+    expect(FORMULE_CODE.tiers_illimite).toBe('NV10');
+    expect(FORMULE_CODE.vol_incendie).toBe('NV20');
+    expect(FORMULE_CODE.dommages_tous_accidents).toBe('NV30');
+  });
+  it('pins the commission input id (id === name on the live portal)', () => {
+    expect(COMMISSION_INPUT_ID).toBe('garantieTauxCommissionEffectif');
+  });
+  it('pins the fractionnement select name', () => {
+    expect(FRACTIONNEMENT_SELECT_NAME).toBe('mouvement.codeFractionnement');
+  });
+  it('pins the fractionnement option values (M=Mensuel, A=Annuel)', () => {
+    expect(FRACTIONNEMENT_CODE.mensuel).toBe('M');
+    expect(FRACTIONNEMENT_CODE.annuel).toBe('A');
+  });
+  it("pins the frais-comptant popup id prefix (Maxance's own typo)", () => {
+    expect(COMPTANT_POPUP_ID_PREFIX).toBe('commptant_');
+  });
+  it('FRAIS_COMPTANT_REGEX matches the live popup text shape', () => {
+    const m = FRAIS_COMPTANT_REGEX.exec(
+      '30.00 (Frais de gestion) + 0.39 (Commission) + 17.00 (Frais comptant) + 4.65 (Taxes)',
+    );
+    expect(m?.[1]).toBe('17.00');
+  });
+});
+
+describe('parseFraisComptant', () => {
+  it('extracts the EUR amount from the commptant popup text', () => {
+    expect(
+      parseFraisComptant('30.00 (Frais de gestion) + 17.00 (Frais comptant) + 4.65 (Taxes)'),
+    ).toBe(17);
+  });
+  it('accepts a comma decimal separator', () => {
+    expect(parseFraisComptant('17,50 (Frais comptant)')).toBe(17.5);
+  });
+  it('returns null on no match / null / empty', () => {
+    expect(parseFraisComptant('30.00 (Frais de gestion)')).toBeNull();
+    expect(parseFraisComptant(null)).toBeNull();
+    expect(parseFraisComptant('')).toBeNull();
+    expect(parseFraisComptant(undefined)).toBeNull();
   });
 });
 

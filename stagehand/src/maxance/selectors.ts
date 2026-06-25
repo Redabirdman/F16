@@ -168,6 +168,70 @@ export function clampCommissionPct(raw: number | undefined): number {
 }
 
 /* ────────────────────────────────────────────────────────────────────────── */
+/*  Garanties closing controls (M8.T7 B1) — live-verified 2026-06-11           */
+/* ────────────────────────────────────────────────────────────────────────── */
+
+/**
+ * Formule radio group name on the Garanties tab. Each radio carries an
+ * inline `onclick="submitFormule();"` (page-global fn) that triggers the
+ * AJAX price re-render.
+ */
+export const FORMULE_RADIO_NAME = 'codeFormuleSelected' as const;
+
+/** Formule radio `value` attributes, live-verified 2026-06-11. */
+export const FORMULE_CODE: Record<MaxanceFormule, 'NV10' | 'NV20' | 'NV30'> = {
+  tiers_illimite: 'NV10',
+  vol_incendie: 'NV20',
+  dommages_tous_accidents: 'NV30',
+};
+
+/**
+ * Commission text input — id AND name are both this value. Default "9.0",
+ * max 22. Set mechanism (verified live): native value setter + dispatch
+ * input/change/blur — the generated inline onblur handler
+ * (`garantieTauxCommissionEffectifsetSliderValue0`) runs the AJAX
+ * re-render (~5-6s, "Chargement" indicator in body text while in-flight).
+ */
+export const COMMISSION_INPUT_ID = 'garantieTauxCommissionEffectif' as const;
+
+/**
+ * Fractionnement select on the Garanties tab. Inline
+ * `onchange=doSubmitFormCustomWithCacheAJAX(...)` — set value + dispatch
+ * a change event, then wait for the AJAX re-render.
+ */
+export const FRACTIONNEMENT_SELECT_NAME = 'mouvement.codeFractionnement' as const;
+
+/**
+ * Fractionnement option values: M=Mensuel / S=Semestriel / A=Annuel.
+ * V1 only ever sets M or A (semestriel unused commercially).
+ */
+export const FRACTIONNEMENT_CODE: Record<MaxanceFractionnement, 'M' | 'A'> = {
+  mensuel: 'M',
+  annuel: 'A',
+};
+
+/**
+ * Hidden frais-comptant popup div id prefix. Full id = prefix + the
+ * CURRENT fractionnement code (e.g. `commptant_M` when Mensuel,
+ * `commptant_A` when Annuel). NB: Maxance's typo ("commptant") is theirs.
+ */
+export const COMPTANT_POPUP_ID_PREFIX = 'commptant_' as const;
+
+/**
+ * Matches the "Frais comptant" line inside the commptant_<code> popup
+ * textContent, e.g. "… + 17.00 (Frais comptant) + …".
+ */
+export const FRAIS_COMPTANT_REGEX = /(\d+[.,]\d{2})\s*\(Frais comptant\)/i;
+
+/** Parse the frais-comptant EUR amount from the popup text. Null on no match. */
+export function parseFraisComptant(text: string | null | undefined): number | null {
+  if (!text) return null;
+  const m = FRAIS_COMPTANT_REGEX.exec(text);
+  if (!m?.[1]) return null;
+  return Number.parseFloat(m[1].replace(',', '.'));
+}
+
+/* ────────────────────────────────────────────────────────────────────────── */
 /*  Devis tab (M8.T6)                                                          */
 /* ────────────────────────────────────────────────────────────────────────── */
 

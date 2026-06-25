@@ -55,6 +55,27 @@ export const SubscriberInfoSchema = z.object({
 });
 export type SubscriberInfo = z.infer<typeof SubscriberInfoSchema>;
 
+/**
+ * Comptant breakdown read from the Garanties tab AFTER the closing
+ * controls (formule / commission 22 / fractionnement) are applied
+ * (M8.T7 B1). Sources, live-verified 2026-06-11:
+ *   - fractionnement: the `mouvement.codeFractionnement` select value
+ *     (M/S/A → mensuel/semestriel/annuel).
+ *   - comptant / terme suivant / coût annuel brut: the three decimal
+ *     numbers after the "Mensuel Semestriel Annuel" words in the
+ *     fractionnement table's body text.
+ *   - fraisComptantEur: "NN.NN (Frais comptant)" inside the hidden
+ *     `commptant_<code>` popup div; null when the popup/line is absent.
+ */
+export const ComptantBreakdownSchema = z.object({
+  fractionnement: z.enum(['mensuel', 'semestriel', 'annuel']).optional(),
+  comptantEur: z.number().nonnegative().optional(),
+  termeSuivantEur: z.number().nonnegative().optional(),
+  coutAnnuelBrutEur: z.number().nonnegative().optional(),
+  fraisComptantEur: z.number().nonnegative().nullable(),
+});
+export type ComptantBreakdown = z.infer<typeof ComptantBreakdownSchema>;
+
 /** One screenshot result reported back to the backend (data URL). */
 export const ScreenshotSchema = z.object({
   step: z.string(),
@@ -143,6 +164,12 @@ export const QuotePreviewResponseSchema = z.object({
     monthly: z.number().nonnegative().optional(),
     annual: z.number().nonnegative().optional(),
   }),
+  /**
+   * M8.T7 B1: Garanties comptant breakdown extracted after the closing
+   * controls (commission ALWAYS forced to 22 by default) were applied.
+   * Optional for wire-compat with older extension builds.
+   */
+  comptantBreakdown: ComptantBreakdownSchema.optional(),
   screenshots: z.array(ScreenshotSchema),
   finalUrl: z.string().url(),
   durationMs: z.number().nonnegative(),
@@ -192,6 +219,14 @@ export const QuoteConfirmResponseSchema = z.object({
    * real-mode (dryRun=false) responses.
    */
   courrierDryRunStatus: z.string().optional(),
+  /**
+   * M8.T7 B1: optional Garanties comptant breakdown. NOT populated by the
+   * confirm flow yet — confirm's final response is built on the Edition à
+   * imprimer page (2 navigations after Garanties), so the breakdown read on
+   * Garanties doesn't survive to it without SW-side carry. Reserved for the
+   * B2 devis.resume / B3 subscription flows, which DO end on/near Garanties.
+   */
+  comptantBreakdown: ComptantBreakdownSchema.optional(),
 });
 
 /** Mirror of QuotePreviewNavigatingResponseSchema for the confirm flow. */

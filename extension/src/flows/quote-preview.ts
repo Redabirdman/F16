@@ -34,7 +34,6 @@ import {
   clampCommissionPct,
   formatIsoDateFr,
   formuleLabel,
-  fractionnementLabel,
   stationnementOption,
   trottinetteVersionBand,
 } from '@f16/stagehand/maxance/selectors';
@@ -51,7 +50,9 @@ import {
   sleep,
   waitFor,
 } from '../dom.js';
+import { applyGarantiesConfig, extractComptantBreakdown } from './garanties-controls.js';
 import {
+  type ComptantBreakdown,
   type QuotePreviewCommandSchema,
   QuotePreviewResponseSchema,
   QuotePreviewNavigatingResponseSchema,
@@ -391,7 +392,7 @@ async function fillConducteurTab(cmd: QuotePreviewCommand): Promise<void> {
 
 async function configureGarantiesAndExtract(
   cmd: QuotePreviewCommand,
-): Promise<{ monthly?: number; annual?: number }> {
+): Promise<{ monthly?: number; annual?: number; comptantBreakdown: ComptantBreakdown }> {
   const { params } = cmd;
   // Caller has established we're on garanties_tab via the SW-orchestrated
   // advance.
@@ -408,12 +409,23 @@ async function configureGarantiesAndExtract(
   //   Fractionnement   Comptant  Terme suivant  Coût annuel brut**
   //                     25.99      7.57          90.85
   //
-  // There is NO click required to surface the price — no formule click,
-  // no commission slider, no fractionnement select. Those controls do
-  // exist but they re-compute the price; the DEFAULT render already shows
-  // all three formules. For the preview we just extract the number for
-  // the requested formule. The CONFIRM flow (M8.T6) handles real
-  // configuration when the customer commits.
+  // M8.T7 B1 (2026-06-11): those default prices are at the DEFAULT
+  // commission (9%) — wrong per Achraf (commission must ALWAYS be 22%).
+  // So BEFORE extracting we now apply the closing controls via the SW's
+  // garanties.configure-mw main-world handler: commission forced to
+  // clamp(params.commissionPct ?? 22) ALWAYS (even when params omit it),
+  // formule radio + fractionnement only when requested. Each control
+  // fires an AJAX re-render (~5-6s) that the handler awaits — prices in
+  // the body text below are therefore the CONFIGURED ones (verified live:
+  // Tiers illimité 78.85 → 83.71 at 22%).
+  await reportProgress(cmd.id, 'garanties_apply_config');
+  const cfgResult = await applyGarantiesConfig({
+    commissionPct: clampCommissionPct(params.commissionPct ?? 22),
+    ...(params.formule !== undefined ? { formule: params.formule } : {}),
+    ...(params.fractionnement !== undefined ? { fractionnement: params.fractionnement } : {}),
+  });
+  await reportProgress(cmd.id, 'garanties_config_applied', JSON.stringify(cfgResult));
+
   await reportProgress(cmd.id, 'garanties_tab_extract');
 
   const formule = params.formule ?? 'tiers_illimite';
@@ -437,16 +449,14 @@ async function configureGarantiesAndExtract(
   const annualRaw = annualMatch?.[1] ?? annualFallback?.[1];
   const annual = annualRaw ? Number.parseFloat(annualRaw.replace(',', '.')) : null;
 
-  const out: { monthly?: number; annual?: number } = {};
+  const out: { monthly?: number; annual?: number; comptantBreakdown: ComptantBreakdown } = {
+    // M8.T7 B1: read the comptant breakdown off the configured tab —
+    // fractionnement row numbers + Frais comptant from the hidden
+    // commptant_<code> popup. Best-effort pure DOM read.
+    comptantBreakdown: extractComptantBreakdown(),
+  };
   if (priceMonthly != null && Number.isFinite(priceMonthly)) out.monthly = priceMonthly;
   if (annual != null && Number.isFinite(annual)) out.annual = annual;
-  // Touch unused-arg eslint guards — clampCommissionPct / fractionnementLabel /
-  // parseEurPrice / setSelectByLabel are still imported for the confirm
-  // flow's future use; we just don't need them in the preview path.
-  void clampCommissionPct;
-  void fractionnementLabel;
-  void parseEurPrice;
-  void setSelectByLabel;
   return out;
 }
 
@@ -595,12 +605,13 @@ export async function runQuotePreview(cmd: QuotePreviewCommand): Promise<Respons
 
       if (screen === 'garanties_tab' || screen === 'price_preview') {
         await shoot('garanties_tab_pre');
-        const price = await configureGarantiesAndExtract(cmd);
+        const { comptantBreakdown, ...price } = await configureGarantiesAndExtract(cmd);
         await shoot('price_preview');
         return QuotePreviewResponseSchema.parse({
           id: cmd.id,
           kind: 'quote.preview.ok',
           pricePreviewEur: price,
+          comptantBreakdown,
           screenshots,
           finalUrl: location.href,
           durationMs: Date.now() - t0,
