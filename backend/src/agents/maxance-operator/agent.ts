@@ -53,7 +53,16 @@ import {
   getDefaultMaxanceDriverClient,
   readErrorCode,
 } from './driver-client.js';
-import { markQuoteConfirmed, markQuotePreview } from '../../db/repositories/quotes.js';
+import {
+  markQuoteConfirmed,
+  markQuotePreview,
+  markSubscriptionFailed,
+} from '../../db/repositories/quotes.js';
+import {
+  handleSubscriptionRequested,
+  type InspectorScreenshotSender,
+} from './subscription-handler.js';
+import { WahaClient } from '../../channels/whatsapp/waha-client.js';
 
 /** Recognised MAXANCE_DRIVER values. Anything else → driver disabled. */
 type MaxanceDriver = 'chrome_extension' | 'stagehand_legacy_DO_NOT_USE_IN_PROD';
@@ -90,12 +99,23 @@ export class MaxanceOperatorAgent extends BaseAgent {
    */
   private client: MaxanceDriverClient | null;
 
+  /**
+   * Optional inspector-handoff screenshot sender. Injected in tests; in prod
+   * it's lazily built from env (WAHA + HUMAN_ACTION_GROUP_CHAT_ID) on first use.
+   * `undefined` = not yet resolved; `null` = resolved-but-unconfigured.
+   */
+  private screenshotSender: InspectorScreenshotSender | null | undefined;
+
   constructor(
     cfg: ConstructorParameters<typeof BaseAgent>[0],
-    deps: { client?: MaxanceDriverClient } = {},
+    deps: {
+      client?: MaxanceDriverClient;
+      screenshotSender?: InspectorScreenshotSender | null;
+    } = {},
   ) {
     super(cfg);
     this.client = deps.client ?? null;
+    this.screenshotSender = deps.screenshotSender;
   }
 
   /**
@@ -115,6 +135,8 @@ export class MaxanceOperatorAgent extends BaseAgent {
         return this.handleQuoteRequested(envelope);
       case 'QUOTE.CONFIRM_REQUESTED':
         return this.handleQuoteConfirmRequested(envelope);
+      case 'SUBSCRIPTION.REQUESTED':
+        return this.handleSubscriptionRequested(envelope);
       default:
         logger.debug(
           { intent: envelope.intent, instanceId: this.instanceId },
@@ -122,6 +144,131 @@ export class MaxanceOperatorAgent extends BaseAgent {
         );
         return { ok: true, result: { skipped: 'unhandled-intent', intent: envelope.intent } };
     }
+  }
+
+  /**
+   * SUBSCRIPTION.REQUESTED handler (M8.T7 task C2 — the closing capstone).
+   *
+   * Driver gate + client resolution mirror the quote handlers; the orchestration
+   * (resume → complete → frais → Stripe → READY → inspector handoff) lives in
+   * `subscription-handler.ts` to keep this file under budget. The handler is
+   * given an explicit context (db / identity / client resolver / screenshot
+   * sender) so it stays unit-testable without a full BaseAgent.
+   */
+  private async handleSubscriptionRequested(
+    envelope: AgentMessageEnvelope,
+  ): Promise<MessageHandlerResult> {
+    const payload = envelope.payload as {
+      quoteId: string;
+      customerId: string;
+      leadId?: string | null;
+    };
+
+    // Driver gate — disabled → SUBSCRIPTION.FAILED (same posture as quotes).
+    let driver: MaxanceDriver;
+    try {
+      driver = readDriverFromEnv();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.warn(
+        { quoteId: payload.quoteId, err: msg },
+        'maxance-operator: driver gate refused — emitting SUBSCRIPTION.FAILED',
+      );
+      await this.emitSubscriptionFailed(payload, 'maxance_driver_disabled', msg);
+      return { ok: false, error: 'maxance_driver_disabled' };
+    }
+
+    let client: MaxanceDriverClient;
+    try {
+      client = await this.getClient(driver);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      await this.emitSubscriptionFailed(payload, 'maxance_driver_init_failed', msg);
+      return { ok: false, error: 'maxance_driver_init_failed' };
+    }
+
+    return handleSubscriptionRequested(
+      {
+        db: this.db,
+        role: this.role,
+        instanceId: this.instanceId,
+        getClient: () => this.getClient(driver),
+        screenshotSender: this.resolveScreenshotSender(),
+      },
+      envelope,
+      client,
+    );
+  }
+
+  /**
+   * Mark the quote failed + emit SUBSCRIPTION.FAILED for the pre-orchestration
+   * gates (driver disabled / init failed). Best-effort persist — the emit is
+   * what the sales-agent reacts to.
+   */
+  private async emitSubscriptionFailed(
+    payload: { quoteId: string; customerId: string; leadId?: string | null },
+    errorCode: string,
+    detail?: string,
+  ): Promise<void> {
+    try {
+      await markSubscriptionFailed(this.db, payload.quoteId, { errorCode });
+    } catch (err) {
+      logger.warn(
+        { quoteId: payload.quoteId, err: err instanceof Error ? err.message : String(err) },
+        'maxance-operator: markSubscriptionFailed threw at gate (non-fatal)',
+      );
+    }
+    await sendMessage(
+      { db: this.db },
+      {
+        fromRole: this.role,
+        fromInstance: this.instanceId,
+        toRole: 'sales-agent',
+        ...(payload.leadId ? { toInstance: `lead-${payload.leadId}` } : {}),
+        intent: 'SUBSCRIPTION.FAILED',
+        payload: {
+          quoteId: payload.quoteId,
+          customerId: payload.customerId,
+          errorCode,
+          ...(detail ? { detail } : {}),
+          screenshots: [],
+        },
+        correlationId: payload.quoteId,
+      },
+    );
+  }
+
+  /**
+   * Resolve the inspector-handoff screenshot sender. Injected sender (tests)
+   * wins. Otherwise build a WAHA-backed one from env when WAHA_BASE_URL +
+   * HUMAN_ACTION_GROUP_CHAT_ID are set; null = unconfigured (handoff text still
+   * reaches the WA group via the reporter-agent, just without the image).
+   */
+  private resolveScreenshotSender(): InspectorScreenshotSender | null {
+    if (this.screenshotSender !== undefined) return this.screenshotSender;
+
+    const baseUrl = process.env.WAHA_BASE_URL;
+    const groupChatId = process.env.HUMAN_ACTION_GROUP_CHAT_ID;
+    if (!baseUrl || !groupChatId) {
+      this.screenshotSender = null;
+      return null;
+    }
+    const wahaOptions: ConstructorParameters<typeof WahaClient>[0] = { baseUrl };
+    if (process.env.WAHA_API_KEY) wahaOptions.apiKey = process.env.WAHA_API_KEY;
+    if (process.env.WAHA_SESSION) wahaOptions.session = process.env.WAHA_SESSION;
+    const waha = new WahaClient(wahaOptions);
+    this.screenshotSender = {
+      send: async ({ base64Png, caption }) => {
+        await waha.sendImage({
+          chatId: groupChatId,
+          data: base64Png,
+          mimetype: 'image/png',
+          filename: 'souscription.png',
+          caption,
+        });
+      },
+    };
+    return this.screenshotSender;
   }
 
   /**
