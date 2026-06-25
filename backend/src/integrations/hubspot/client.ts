@@ -425,6 +425,72 @@ export class HubSpotClient {
     );
   }
 
+  /**
+   * Best-effort archive of a contact found by phone (or email) + its associated
+   * deals. Returns 'archived' | 'not_found' | 'error'. NEVER throws — the caller
+   * (simulation reset) must not fail the F16 purge on a HubSpot hiccup.
+   *
+   * Uses CRM v3 search to resolve the contact, v4 associations to enumerate its
+   * deals, then DELETE (HubSpot "archive") on each deal and the contact. We hit
+   * `rawRequest` directly (not `request`) so a non-2xx never throws past us.
+   *
+   * PII discipline: logs ids/booleans only — never the phone/email searched.
+   */
+  async archiveContactByPhoneOrEmail(input: {
+    phone?: string;
+    email?: string;
+  }): Promise<'archived' | 'not_found' | 'error'> {
+    try {
+      const filter = input.phone
+        ? { propertyName: 'phone', operator: 'EQ', value: input.phone }
+        : input.email
+          ? { propertyName: 'email', operator: 'EQ', value: input.email }
+          : null;
+      if (!filter) return 'not_found';
+
+      const search = await this.rawRequest('POST', '/crm/v3/objects/contacts/search', {
+        filterGroups: [{ filters: [filter] }],
+        properties: ['hs_object_id'],
+        limit: 1,
+      });
+      const searchBody = (await search.json()) as { results?: Array<{ id: string }> };
+      const contactId = searchBody.results?.[0]?.id;
+      if (!contactId) return 'not_found';
+
+      // Archive associated deals first (best-effort).
+      const assoc = await this.rawRequest(
+        'GET',
+        `/crm/v4/objects/contacts/${encodeURIComponent(contactId)}/associations/deals`,
+        null,
+      );
+      const assocBody = (await assoc.json()) as { results?: Array<{ toObjectId: string }> };
+      const dealIds = (assocBody.results ?? []).map((r) => r.toObjectId);
+      for (const dealId of dealIds) {
+        await this.rawRequest(
+          'DELETE',
+          `/crm/v3/objects/deals/${encodeURIComponent(dealId)}`,
+          null,
+        );
+      }
+      await this.rawRequest(
+        'DELETE',
+        `/crm/v3/objects/contacts/${encodeURIComponent(contactId)}`,
+        null,
+      );
+      logger.info(
+        { contactId, deals: dealIds.length },
+        'hubspot: contact archived (simulation reset)',
+      );
+      return 'archived';
+    } catch (err) {
+      logger.warn(
+        { err: err instanceof Error ? err.message : String(err) },
+        'hubspot archive failed',
+      );
+      return 'error';
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // Phase 3 — Activity timeline engagements
   //
