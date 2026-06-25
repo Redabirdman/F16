@@ -26,6 +26,8 @@ import { buildAdminAdsRouter } from './admin/ads.js';
 import { buildAdminKnowledgeRouter } from './admin/knowledge-search.js';
 import { buildAdminPromptsRouter } from './admin/prompts.js';
 import { buildAdminTeamChatRouter } from './admin/team-chat.js';
+import { buildAdminSimRouter } from './admin/sim-control.js';
+import { HubSpotClient } from './integrations/hubspot/client.js';
 import { WahaClient } from './channels/whatsapp/waha-client.js';
 import { requireAdminAuth } from './admin/auth.js';
 import type { RealtimeListener } from './realtime/notify.js';
@@ -245,6 +247,15 @@ export function buildApp(opts: BuildAppOptions = {}): Hono {
     // M14.T6 — agent prompt editor (registry-backed overrides).
     const adminPromptsApp = buildAdminPromptsRouter({ db: opts.db });
     app.route('/', adminPromptsApp);
+    // M8-sim — simulation control (inject fake FB lead / reset / status).
+    const simHubspot = process.env.HUBSPOT_API_KEY
+      ? new HubSpotClient({ accessToken: process.env.HUBSPOT_API_KEY })
+      : undefined;
+    const adminSimApp = buildAdminSimRouter({
+      db: opts.db,
+      ...(simHubspot ? { hubspot: simHubspot } : {}),
+    });
+    app.route('/', adminSimApp);
     // M14.T10 — team-chat: operator timeline + send-to-WA-group.
     const teamChatWaha = process.env.WAHA_BASE_URL
       ? new WahaClient({
