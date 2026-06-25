@@ -26,6 +26,10 @@ const ACCOUNT_ID = process.env.CLOUDFLARE_ACCOUNT_ID ?? '';
 const TUNNEL_NAME = process.env.CLOUDFLARE_TUNNEL_NAME ?? 'f16';
 const HOSTNAME = process.env.F16_PUBLIC_HOSTNAME ?? 'hooks.assuryalconseil.fr';
 const SERVICE = 'http://localhost:3001';
+// Admin UI host (gated by Cloudflare Access). The admin app is served as static
+// on :5173; its API (/v1/admin) + realtime (/ws) go straight to the backend.
+const ADMIN_HOSTNAME = process.env.F16_ADMIN_HOSTNAME ?? 'admin.assuryalconseil.fr';
+const ADMIN_APP_SERVICE = 'http://localhost:5173';
 
 if (!TOKEN || !ZONE_ID || !ACCOUNT_ID) {
   console.error(
@@ -93,28 +97,38 @@ async function main(): Promise<void> {
   // 2. Run-token (what `cloudflared tunnel run --token` consumes).
   const runToken = await cf<string>('GET', `/accounts/${ACCOUNT_ID}/cfd_tunnel/${tunnelId}/token`);
 
-  // 3. Ingress config — hooks hostname → backend; everything else 404.
+  // 3. Ingress config — path-ordered. Admin host: /v1/admin + /ws → backend,
+  //    everything else → the static admin app. Hooks host → backend. Else 404.
   await cf('PUT', `/accounts/${ACCOUNT_ID}/cfd_tunnel/${tunnelId}/configurations`, {
     config: {
-      ingress: [{ hostname: HOSTNAME, service: SERVICE }, { service: 'http_status:404' }],
+      ingress: [
+        { hostname: ADMIN_HOSTNAME, path: '^/(v1/admin|ws)(/|$)', service: SERVICE },
+        { hostname: ADMIN_HOSTNAME, service: ADMIN_APP_SERVICE },
+        { hostname: HOSTNAME, service: SERVICE },
+        { service: 'http_status:404' },
+      ],
     },
   });
-  console.log(`ingress set: ${HOSTNAME} -> ${SERVICE}`);
+  console.log(`ingress set: ${HOSTNAME} -> ${SERVICE}; ${ADMIN_HOSTNAME} -> app+api`);
 
-  // 4. DNS CNAME (proxied) → <tunnelId>.cfargotunnel.com. Upsert.
+  // 4. DNS CNAMEs (proxied) → <tunnelId>.cfargotunnel.com. Upsert each host.
   const cname = `${tunnelId}.cfargotunnel.com`;
-  const records = await cf<Array<{ id: string; name: string }>>(
-    'GET',
-    `/zones/${ZONE_ID}/dns_records?type=CNAME&name=${encodeURIComponent(HOSTNAME)}`,
-  );
-  const recBody = { type: 'CNAME', name: HOSTNAME, content: cname, proxied: true, ttl: 1 };
-  if (records.length > 0 && records[0]) {
-    await cf('PUT', `/zones/${ZONE_ID}/dns_records/${records[0].id}`, recBody);
-    console.log(`updated CNAME ${HOSTNAME} -> ${cname}`);
-  } else {
-    await cf('POST', `/zones/${ZONE_ID}/dns_records`, recBody);
-    console.log(`created CNAME ${HOSTNAME} -> ${cname}`);
+  async function upsertCname(hostname: string): Promise<void> {
+    const records = await cf<Array<{ id: string; name: string }>>(
+      'GET',
+      `/zones/${ZONE_ID}/dns_records?type=CNAME&name=${encodeURIComponent(hostname)}`,
+    );
+    const recBody = { type: 'CNAME', name: hostname, content: cname, proxied: true, ttl: 1 };
+    if (records.length > 0 && records[0]) {
+      await cf('PUT', `/zones/${ZONE_ID}/dns_records/${records[0].id}`, recBody);
+      console.log(`updated CNAME ${hostname} -> ${cname}`);
+    } else {
+      await cf('POST', `/zones/${ZONE_ID}/dns_records`, recBody);
+      console.log(`created CNAME ${hostname} -> ${cname}`);
+    }
   }
+  await upsertCname(HOSTNAME);
+  await upsertCname(ADMIN_HOSTNAME);
 
   // 5. Persist the run-token + stable URL.
   const publicUrl = `https://${HOSTNAME}`;
