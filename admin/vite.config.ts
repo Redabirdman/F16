@@ -30,6 +30,15 @@ export default defineConfig({
   preview: {
     port: 5173,
     strictPort: true,
+    host: true,
+    // Served behind the Cloudflare tunnel at this hostname (gated by Access).
+    allowedHosts: ['admin.assuryalconseil.fr'],
+    // Mirror the dev proxy so direct localhost:5173 access also works; over the
+    // tunnel, cloudflared routes /v1/admin + /ws straight to :3001 instead.
+    proxy: {
+      '/v1': { target: 'http://localhost:3001', changeOrigin: true },
+      '/ws': { target: 'ws://localhost:3001', ws: true, changeOrigin: true },
+    },
   },
   build: {
     outDir: 'dist',
