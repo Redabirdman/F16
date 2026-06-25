@@ -28,7 +28,13 @@ Spec: `docs/superpowers/specs/2026-06-11-m8t7-maxance-closing-design.md`. Subage
 
 ## Phase A — Ground truth
 
-- [ ] **A1. Live DOM survey** (lead, Claude-in-Chrome MCP, read-only-ish): search bar + GO, Visualisation page markers, ACTION menu → Reprise du devis, reprise Conducteur/Garanties markers, commission slider mechanism, Infos complémentaires fields (N° série), bancaires fields (IBAN segmentation, lieu de naissance, je-dispose-du-comptant, Valider), paiement page markers. On a test devis; NEVER click Valider souscription. Output: survey notes appended to this plan + selectors list.
+- [x] **A1. Live DOM survey** — DONE 2026-06-11 on the real portal (devis DR0000976146, Ridaa authorized Valider souscription on the test instance). Full notes in ruflo `m8t7-live-DOM-survey-garanties-reprise-2026-06-11` + `m8t7-live-DOM-survey-souscription-pages-2026-06-11`. Key verified facts:
+  - Search: `RechercheGeneriqueForm` — `select[name=critereSelected]`='NO', `#valeurCritere`=devis#, click `a#mainSearchLink` → "Visualisation du devis".
+  - Reprise: `doSubmit('repriseDevisMoto.do')` (no params; session-scoped) → lands on **Véhicule** tab → Suivant ×2 (`#validerVehicule`, `#validerConducteur`) → Garanties (`#validerDevis` + `#validerSouscription`).
+  - Garanties: formule radios `codeFormuleSelected` NV10/NV20/NV30 (onclick `submitFormule()`); commission input `#garantieTauxCommissionEffectif` — native set + blur (onblur `…setSliderValue0`) → AJAX ~6s → verified 78.85→83.71 at 22%; **commission resets to 9.0 on every reprise** → always re-apply; fractionnement `select[name="mouvement.codeFractionnement"]` M/S/A; frais comptant from hidden popup `#commptant_M` text "… 17.00 (Frais comptant) …".
+  - Infos complémentaires: `mouvement.numeroSerieVehicule`='1234567'; Suivant = reused `#validerSouscription`.
+  - Bancaires: IBAN parts `#ibanPart0..6` (4,4,4,4,4,4,3); BIC `bicIban.bic` (must match IBAN bank code — not auto-filled); `#nomTitulaireCompte`; lieu de naissance via `souscripteurNaissanceZonier.rechercheCommune` + its row search link (AJAX) → `souscripteurNaissanceZonier.key`; checkbox `flagPrimeRecue` ("Je dispose du comptant"); Valider = `doSubmitConfirm('SouscriptionContratVehiculeForm','souscriptionValiderFinaleMoto.do',labelAN)` then click **Valider** in the CONFIRMATION popin (never bypass via doSubmitForm → "Erreur applicative").
+  - ⚠️ **Test RIBs rejected**: ALERTE "3_Validation impossible. Prélèvement sur RIB de test non autorisé" → flow must surface `maxance_subscription_rib_rejected`; the **Paiement page is only reachable with a real IBAN** → its extraction markers are coded from Achraf's screenshot 11 and live-verified at P6.
 
 ## Phase B — Extension
 
