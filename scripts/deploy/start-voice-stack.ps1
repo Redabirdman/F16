@@ -64,8 +64,11 @@ if ($tunnelUp) {
   if (-not $tunnelToken) {
     Write-Host '  ⚠️  CLOUDFLARE_TUNNEL_TOKEN missing in backend\.env — run: npx tsx scripts/cf-tunnel-setup.ts'
   } else {
+    # --protocol http2: force TCP transport. QUIC (UDP/443) gets throttled on
+    # restrictive/hotspot networks → "timeout: no recent network activity" drops
+    # → intermittent Error 1033. HTTP/2 is slower-handshake but stays connected.
     Start-Process -WindowStyle Hidden -FilePath $cf `
-      -ArgumentList 'tunnel','run','--token',$tunnelToken `
+      -ArgumentList 'tunnel','run','--protocol','http2','--token',$tunnelToken `
       -RedirectStandardOutput $tunnelLog -RedirectStandardError "$tunnelLog.err"
     Start-Sleep -Seconds 6
     Set-Content -Path $tunnelUrlFile -Value 'https://hooks.assuryalconseil.fr'
