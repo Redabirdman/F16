@@ -434,6 +434,5 @@ describe.skipIf(skip)('M6.T8 — end-to-end sales pipeline (LIVE Claude)', () =>
       .from(agentsState)
       .where(eq(agentsState.role, 'sales-agent'));
     expect(stateRow?.status).toBe('running');
-  }, // tail — Haiku scorer + Haiku compliance × 2 + Sonnet reply. // 3-minute timeout for the whole pipeline. Live Claude is the long
-  180_000);
+  }, 180_000); // tail — Haiku scorer + Haiku compliance × 2 + Sonnet reply. // 3-minute timeout for the whole pipeline. Live Claude is the long
 });

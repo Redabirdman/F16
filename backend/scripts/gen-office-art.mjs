@@ -38,22 +38,35 @@ const STYLE = [
 /** role/asset → subject description. */
 const ASSETS = {
   // --- 9 character sprites ---
-  'char-sales-agent': 'a friendly young insurance salesperson wearing a telephone headset and a smart-casual blue blazer, smiling, holding a small tablet',
-  'char-voice-operator': 'a friendly call-centre voice agent wearing a large headset with a boom microphone, mid-conversation gesture, purple-accented outfit',
-  'char-maxance-operator': 'a focused technician seated-style posture working at a computer terminal, amber/yellow outfit, operator vibe',
-  'char-supervisor': 'a confident team manager in a smart red-accented blazer holding a clipboard, supervisory posture',
-  'char-human-router': 'a tidy office messenger/secretary holding a stack of papers and a pen, green-accented outfit, helpful expression',
-  'char-engagement-agent': 'a cheerful customer-care person waving warmly with a small chat speech-bubble, teal-accented outfit',
-  'char-ads-manager-agent': 'an energetic marketer holding a megaphone, orange-accented outfit, dynamic confident pose',
-  'char-creative-agent': 'a creative designer holding an artist palette and a stylus tablet, pink-accented outfit, artistic flair',
-  'char-lead-scorer': 'a sharp data analyst holding a magnifying glass over a small bar chart, grey/slate outfit, studious look',
+  'char-sales-agent':
+    'a friendly young insurance salesperson wearing a telephone headset and a smart-casual blue blazer, smiling, holding a small tablet',
+  'char-voice-operator':
+    'a friendly call-centre voice agent wearing a large headset with a boom microphone, mid-conversation gesture, purple-accented outfit',
+  'char-maxance-operator':
+    'a focused technician seated-style posture working at a computer terminal, amber/yellow outfit, operator vibe',
+  'char-supervisor':
+    'a confident team manager in a smart red-accented blazer holding a clipboard, supervisory posture',
+  'char-human-router':
+    'a tidy office messenger/secretary holding a stack of papers and a pen, green-accented outfit, helpful expression',
+  'char-engagement-agent':
+    'a cheerful customer-care person waving warmly with a small chat speech-bubble, teal-accented outfit',
+  'char-ads-manager-agent':
+    'an energetic marketer holding a megaphone, orange-accented outfit, dynamic confident pose',
+  'char-creative-agent':
+    'a creative designer holding an artist palette and a stylus tablet, pink-accented outfit, artistic flair',
+  'char-lead-scorer':
+    'a sharp data analyst holding a magnifying glass over a small bar chart, grey/slate outfit, studious look',
   // --- environment props (these can keep a tiny base since they sit ON the floor) ---
-  'prop-desk': 'a single cute isometric office desk with a computer monitor and keyboard, warm wood and white',
-  'prop-plant': 'a single cute isometric potted office plant, lush green leaves in a terracotta pot',
-  'prop-maxance': 'a single cute isometric computer workstation booth/kiosk with a glowing screen, techy but cozy',
+  'prop-desk':
+    'a single cute isometric office desk with a computer monitor and keyboard, warm wood and white',
+  'prop-plant':
+    'a single cute isometric potted office plant, lush green leaves in a terracotta pot',
+  'prop-maxance':
+    'a single cute isometric computer workstation booth/kiosk with a glowing screen, techy but cozy',
   'prop-door': 'a single cute isometric office glass entrance door in a frame, warm welcoming',
   // floor tile is generated separately (no chroma key needed — it tiles)
-  'floor-tile': 'a single seamless isometric diamond-shaped warm light-wood floor tile, top-down isometric, subtle plank texture',
+  'floor-tile':
+    'a single seamless isometric diamond-shaped warm light-wood floor tile, top-down isometric, subtle plank texture',
 };
 
 function extractImageDataUrl(json) {
