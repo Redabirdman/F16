@@ -265,3 +265,38 @@ Chrome-extension WS bridge must be up.
 | DNS                | CNAME `admin` → `<CLOUDFLARE_TUNNEL_ID>.cfargotunnel.com` (proxied)                 |
 | Gate               | Cloudflare Access (Allow: Achraf + Ridaa, one-time PIN) + `requireAdminAuth` bearer |
 | Existing host      | `hooks.assuryalconseil.fr` → `:3001` (keep it in ingress)                           |
+
+---
+
+## 6. Google sign-in (recommended — replaces the flaky OTP email)
+
+Cloudflare Access one-time-PIN emails proved unreliable for this account. Use
+Google as the login method instead (both operators are Gmail). Team domain:
+`sparkling-union-0132.cloudflareaccess.com`.
+
+**A. Google OAuth client** (console.cloud.google.com):
+
+1. Create/select a project (e.g. "F16 Admin").
+2. APIs & Services -> OAuth consent screen: User type **External**; app name
+   `Assuryal F16 Admin`; support + developer email = a Gmail; default scopes
+   (email/profile/openid); **Test users** = `ridaa.birdman@gmail.com` +
+   `Achraf.mortady@gmail.com`. Leave publishing status "Testing" (works
+   indefinitely for added test users; no Google verification needed).
+3. APIs & Services -> Credentials -> Create Credentials -> OAuth client ID:
+   - Type **Web application**, name `Cloudflare Access`.
+   - Authorized JavaScript origin: `https://sparkling-union-0132.cloudflareaccess.com`
+   - Authorized redirect URI (exact):
+     `https://sparkling-union-0132.cloudflareaccess.com/cdn-cgi/access/callback`
+   - Copy the **Client ID** + **Client secret**.
+
+**B. Add Google to Cloudflare** (Zero Trust -> Settings -> Authentication ->
+Login methods -> Add new -> Google): paste App ID (Client ID) + Client secret ->
+Save -> Test.
+
+**C. Point the admin app at Google** (Zero Trust -> Access -> Applications ->
+`admin` -> Login methods): select **Google** (optionally turn **off** One-time
+PIN). The existing policy (Include -> Emails = Ridaa + Achraf) still restricts
+who can enter. Save.
+
+Verify: open `https://admin.assuryalconseil.fr` -> "Sign in with Google" ->
+pick the Gmail account -> admin loads. No email codes.
