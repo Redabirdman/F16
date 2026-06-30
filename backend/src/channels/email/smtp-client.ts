@@ -27,7 +27,7 @@ export interface EmailTransportLike {
   verify(): Promise<true>;
 }
 
-/** Connection config read from BILLIONMAIL_* env vars. */
+/** Connection config read from SMTP_* env vars (BILLIONMAIL_* accepted for back-compat). */
 export interface SmtpConfig {
   host: string;
   port: number;
@@ -44,26 +44,29 @@ export interface SmtpConfig {
  * callers should guard with `try/catch` or check at startup, not per-send.
  */
 export function loadSmtpConfigFromEnv(env: NodeJS.ProcessEnv = process.env): SmtpConfig {
-  const host = env.BILLIONMAIL_SMTP_HOST;
-  const portRaw = env.BILLIONMAIL_SMTP_PORT;
-  const fromAddress = env.BILLIONMAIL_FROM_ADDRESS;
-  const fromName = env.BILLIONMAIL_FROM_NAME;
-  if (!host) throw new Error('BILLIONMAIL_SMTP_HOST is required');
-  if (!portRaw) throw new Error('BILLIONMAIL_SMTP_PORT is required');
-  if (!fromAddress) throw new Error('BILLIONMAIL_FROM_ADDRESS is required');
-  if (!fromName) throw new Error('BILLIONMAIL_FROM_NAME is required');
+  // Provider-agnostic SMTP_* env, with back-compat fallback to the original
+  // BILLIONMAIL_* names. Works with any SMTP server — Gmail / Google Workspace
+  // (smtp.gmail.com:587 + App Password), a self-hosted relay, or dev mailpit.
+  const host = env.SMTP_HOST ?? env.BILLIONMAIL_SMTP_HOST;
+  const portRaw = env.SMTP_PORT ?? env.BILLIONMAIL_SMTP_PORT;
+  const fromAddress = env.SMTP_FROM_ADDRESS ?? env.BILLIONMAIL_FROM_ADDRESS;
+  const fromName = env.SMTP_FROM_NAME ?? env.BILLIONMAIL_FROM_NAME;
+  if (!host) throw new Error('SMTP_HOST is required');
+  if (!portRaw) throw new Error('SMTP_PORT is required');
+  if (!fromAddress) throw new Error('SMTP_FROM_ADDRESS is required');
+  if (!fromName) throw new Error('SMTP_FROM_NAME is required');
   const port = Number.parseInt(portRaw, 10);
   if (!Number.isFinite(port) || port <= 0) {
-    throw new Error(`BILLIONMAIL_SMTP_PORT is not a valid port: ${portRaw}`);
+    throw new Error(`SMTP_PORT is not a valid port: ${portRaw}`);
   }
   return {
     host,
     port,
     // SMTPS = 465 (implicit TLS); everything else negotiates with STARTTLS or
-    // runs plaintext (dev mailhog on 1025).
+    // runs plaintext (dev mailpit on 1025).
     secure: port === 465,
-    user: env.BILLIONMAIL_SMTP_USER,
-    pass: env.BILLIONMAIL_SMTP_PASS,
+    user: env.SMTP_USER ?? env.BILLIONMAIL_SMTP_USER,
+    pass: env.SMTP_PASS ?? env.BILLIONMAIL_SMTP_PASS,
     fromAddress,
     fromName,
   };

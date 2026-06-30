@@ -37,7 +37,10 @@ const ENV_KEYS = [
   'MAXANCE_DRIVER',
   'ANTHROPIC_API_KEY',
   'OPENROUTER_API_KEY',
-  'BILLIONMAIL_API_KEY',
+  // Email (SMTP) — clear both the generic and legacy host vars so the
+  // "all unconfigured" probe stays hermetic when the host .env has SMTP set.
+  'SMTP_HOST',
+  'BILLIONMAIL_SMTP_HOST',
   'OPENAI_API_KEY',
   'OPENAI_WEBHOOK_SECRET',
 ] as const;

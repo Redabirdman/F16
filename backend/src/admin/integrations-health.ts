@@ -31,7 +31,7 @@
  *   - Anthropic      — env-presence only (ANTHROPIC_API_KEY). A live
  *                      probe burns tokens; not worth it.
  *   - OpenRouter     — env-presence only (OPENROUTER_API_KEY)
- *   - BillionMail    — env-presence only (BILLIONMAIL_SMTP_HOST)
+ *   - Email (SMTP)   — env-presence only (SMTP_HOST / legacy BILLIONMAIL_SMTP_HOST)
  *
  * PII discipline: probe error messages are passed through `String(err)`
  * — no secrets are echoed since we never include the key in the request
@@ -78,7 +78,7 @@ export function buildAdminIntegrationsRouter(opts: AdminIntegrationsRouterOption
       envPresenceProbe('maxance', 'MAXANCE_DRIVER'),
       envPresenceProbe('anthropic', 'ANTHROPIC_API_KEY'),
       envPresenceProbe('openrouter', 'OPENROUTER_API_KEY'),
-      envPresenceProbe('billionmail', 'BILLIONMAIL_SMTP_HOST'),
+      probeEmail(),
     ]);
     const body: IntegrationsHealthResponse = {
       generatedAt: new Date().toISOString(),
@@ -257,6 +257,19 @@ function envPresenceProbe(name: string, envVar: string): IntegrationHealth {
     return { name, status: 'ok', detail: 'env var set', required: false };
   }
   return { name, status: 'unconfigured', required: false };
+}
+
+/**
+ * Email (SMTP) presence — provider-agnostic. `ok` when an SMTP host is set
+ * via SMTP_HOST (preferred) or the legacy BILLIONMAIL_SMTP_HOST. Used with
+ * Gmail / Google Workspace (smtp.gmail.com + App Password) or any relay.
+ */
+function probeEmail(): IntegrationHealth {
+  const host = process.env.SMTP_HOST ?? process.env.BILLIONMAIL_SMTP_HOST;
+  if (host && host.length > 0) {
+    return { name: 'email', status: 'ok', detail: 'SMTP configured', required: false };
+  }
+  return { name: 'email', status: 'unconfigured', required: false };
 }
 
 /**

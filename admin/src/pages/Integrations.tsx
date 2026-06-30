@@ -40,7 +40,7 @@ const INTEGRATION_LABELS: Record<string, string> = {
   maxance: 'Maxance (broker)',
   anthropic: 'Anthropic API',
   openrouter: 'OpenRouter',
-  billionmail: 'BillionMail',
+  email: 'Email',
 };
 
 export default function IntegrationsPage(): ReactElement {

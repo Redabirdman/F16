@@ -58,11 +58,13 @@ export async function registerConfiguredChannels(
     registered.push('whatsapp');
   }
 
-  // --- Email (BillionMail / SMTP) -------------------------------------------
+  // --- Email (SMTP: Gmail / Google Workspace / self-host relay) -------------
   // verifyOnCreate:false → no network call here, so a down mail server can
   // never block or crash boot. Any failure (bad config) is logged and swallowed
-  // so the rest of the server still comes up.
-  if (env.BILLIONMAIL_SMTP_HOST && !tryGetChannel('email')) {
+  // so the rest of the server still comes up. Gated on SMTP_HOST (legacy
+  // BILLIONMAIL_SMTP_HOST still accepted by loadSmtpConfigFromEnv).
+  const smtpHost = env.SMTP_HOST ?? env.BILLIONMAIL_SMTP_HOST;
+  if (smtpHost && !tryGetChannel('email')) {
     try {
       const cfg = loadSmtpConfigFromEnv(env);
       const transport = await createTransport({ config: cfg, verifyOnCreate: false });
