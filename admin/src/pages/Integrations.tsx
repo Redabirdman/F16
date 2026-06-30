@@ -33,7 +33,7 @@ const STATUS_PRESENTATION: Record<
 };
 
 const INTEGRATION_LABELS: Record<string, string> = {
-  waha: 'WhatsApp (WAHA)',
+  waha: 'WhatsApp',
   hubspot: 'HubSpot CRM',
   openai_sip: 'Voix IA (OpenAI SIP)',
   voice: 'Voix (OVH / Asterisk)',
