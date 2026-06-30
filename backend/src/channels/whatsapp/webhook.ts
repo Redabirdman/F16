@@ -148,8 +148,27 @@ export function buildWhatsAppWebhook(opts: WhatsAppWebhookOptions): Hono {
     const groupChatId = opts.humanActionGroupChatId;
     if (groupChatId && msg.from === groupChatId) {
       const outcome = await tryResolveHumanActionFromGroup(opts, msg);
-      // Always 200 — we don't want WAHA to retry an operator reply.
-      return c.json({ accepted: true, humanAction: outcome }, 200);
+      // Resolved an approval → done. (Always 200 so WAHA doesn't retry.)
+      if (outcome.resolved) {
+        return c.json({ accepted: true, humanAction: outcome }, 200);
+      }
+      // Not an approval. PRODUCTION: the operator number is the approval
+      // channel only, so we stop here (behaviour unchanged). SELF-TEST
+      // EXCEPTION: when this same number has injected itself via /sim (its
+      // latest lead is f16_simulation), fall through to the customer path so
+      // the agent actually replies. `chatIdToE164` returns null for @g.us
+      // groups, so a real group is never treated as a customer; and a real
+      // operator number has no sim lead → identical to before.
+      const opE164 = chatIdToE164(msg.from);
+      const selfTest = opE164 ? await isSimulationContact(opts.db, opE164) : false;
+      if (!selfTest) {
+        return c.json({ accepted: true, humanAction: outcome }, 200);
+      }
+      logger.info(
+        { reason: outcome.reason },
+        'waha webhook: operator number is a sim contact — routing reply as a customer message',
+      );
+      // fall through to the customer-message handling below.
     }
 
     // 5c. Other group chats (not the human-action group) are ignored —
@@ -265,6 +284,29 @@ async function findActiveLeadForCustomer(
   const TERMINAL: ReadonlySet<string> = new Set(['closed_won', 'closed_lost', 'dormant']);
   const active = rows.find((r) => !TERMINAL.has(r.status));
   return active ? { id: active.id } : null;
+}
+
+/**
+ * Is this phone currently a SIMULATION contact — i.e. an operator who injected
+ * themselves via `/sim` (their most-recent lead carries
+ * `attribution.f16_simulation = 'true'`)?
+ *
+ * Used by the operator-number intercept so the SAME number can be both the
+ * human-action approval channel AND a test "customer" during a sim session,
+ * WITHOUT changing production behaviour: a real operator number never has a
+ * sim lead, so `false` is returned and the intercept stays as-is.
+ */
+async function isSimulationContact(db: Database, e164: string): Promise<boolean> {
+  const existing = await getCustomerByPhone(db, e164);
+  if (!existing) return false;
+  const [row] = await db
+    .select({ attribution: leads.attribution })
+    .from(leads)
+    .where(eq(leads.customerId, existing.id))
+    .orderBy(desc(leads.createdAt))
+    .limit(1);
+  const attr = (row?.attribution ?? null) as Record<string, unknown> | null;
+  return attr?.['f16_simulation'] === 'true';
 }
 
 /**

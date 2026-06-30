@@ -20,8 +20,14 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from
 import { createHmac, randomBytes } from 'node:crypto';
 import { sql, eq } from 'drizzle-orm';
 import { createDb, type Database } from '../../../src/db/index.js';
-import { agentMessages, customers, conversationTurns } from '../../../src/db/schema/index.js';
+import {
+  agentMessages,
+  customers,
+  conversationTurns,
+  leads,
+} from '../../../src/db/schema/index.js';
 import { hashPII } from '../../../src/db/crypto.js';
+import { insertCustomer } from '../../../src/db/repositories/customers.js';
 import { buildWhatsAppWebhook } from '../../../src/channels/whatsapp/webhook.js';
 import { __resetForTests, shutdownQueues } from '../../../src/queue/index.js';
 
@@ -161,7 +167,8 @@ d('WAHA inbound webhook (live)', () => {
     expect(msg).toBeDefined();
     expect(msg!.intent).toBe('CUSTOMER.MESSAGE_RECEIVED');
     expect(msg!.toRole).toBe('sales-agent');
-    expect(msg!.toInstance).toBe(`customer-${j.customerId}`);
+    // Singleton model: addressed to the sales-agent by role only (no instance).
+    expect(msg!.toInstance).toBeNull();
     const payload = msg!.payload as Record<string, unknown>;
     expect(payload['customerId']).toBe(j.customerId);
     expect(payload['channel']).toBe('whatsapp');
@@ -211,12 +218,14 @@ d('WAHA inbound webhook (live)', () => {
     // Only ONE customer row (phone_hash UNIQUE worked + the find branch ran).
     const all = await db.select().from(customers);
     expect(all).toHaveLength(1);
-    // Two agent_messages emitted, both correlated to that customer.
+    // Two CUSTOMER.MESSAGE_RECEIVED emitted, both correlated to that customer.
+    // (Filter by intent — the customer path may also emit a HUBSPOT.LOG_ACTIVITY
+    // per message when F16_HUBSPOT_ACTIVITIES is enabled in the env.)
     const msgs = await db
       .select()
       .from(agentMessages)
       .where(eq(agentMessages.correlationId, j1.customerId));
-    expect(msgs).toHaveLength(2);
+    expect(msgs.filter((m) => m.intent === 'CUSTOMER.MESSAGE_RECEIVED')).toHaveLength(2);
   });
 
   // -------------------------------------------------------------------------
@@ -434,5 +443,105 @@ d('WAHA inbound webhook (live)', () => {
     expect(turns[0]!.content).toBe('photo');
     expect(turns[0]!.attachments).toHaveLength(1);
     expect(turns[0]!.attachments![0]!.url).toBe('https://files.waha.example.com/abc.jpg');
+  });
+
+  // -------------------------------------------------------------------------
+  // 12. Operator-number SELF-TEST: a message from the human-action number that
+  //     does NOT resolve an approval falls through to the customer path WHEN
+  //     that number injected itself via /sim (latest lead f16_simulation).
+  // -------------------------------------------------------------------------
+  it('test 12 (operator self-test): sim contact on the operator number routes as a customer message', async () => {
+    const operatorPhone = '33699999012';
+    const operatorChatId = `${operatorPhone}@c.us`;
+    // Seed the operator as a SIMULATION contact (as /sim inject-lead would).
+    const cust = await insertCustomer(db, { fullName: 'Operator Sim', phone: `+${operatorPhone}` });
+    await db.insert(leads).values({
+      customerId: cust.id,
+      source: 'meta',
+      productLine: 'scooter',
+      status: 'new',
+      attribution: { f16_simulation: 'true' },
+    });
+
+    const app = buildWhatsAppWebhook({
+      db,
+      hmacSecret: SECRET,
+      hmacAlgo: 'sha256',
+      humanActionGroupChatId: operatorChatId,
+    });
+    const body = buildBody({ phone: operatorPhone, body: 'Bonjour' });
+    const res = await app.request('/webhooks/waha', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-webhook-hmac': sign(body, SECRET) },
+      body,
+    });
+    expect(res.status).toBe(200);
+
+    // Fell through → a CUSTOMER.MESSAGE_RECEIVED was emitted for this customer.
+    // (correlationId is the active lead's id, so match on payload.customerId.)
+    const msgs = await db.select().from(agentMessages);
+    const custMsg = msgs.find(
+      (m) =>
+        m.intent === 'CUSTOMER.MESSAGE_RECEIVED' &&
+        (m.payload as Record<string, unknown>)['customerId'] === cust.id,
+    );
+    expect(custMsg).toBeDefined();
+    expect(custMsg!.toRole).toBe('sales-agent');
+    expect(custMsg!.toInstance).toBeNull();
+    // Inbound was also audited as a conversation turn.
+    const turns = await db
+      .select()
+      .from(conversationTurns)
+      .where(eq(conversationTurns.customerId, cust.id));
+    expect(turns.some((t) => t.direction === 'inbound' && t.content === 'Bonjour')).toBe(true);
+  });
+
+  // -------------------------------------------------------------------------
+  // 13. PRODUCTION unchanged: a non-resolving message from the operator number
+  //     that is NOT a sim contact is intercepted (no customer message emitted).
+  // -------------------------------------------------------------------------
+  it('test 13 (operator prod): non-sim operator message is intercepted, not routed to sales', async () => {
+    const operatorPhone = '33699999013';
+    const operatorChatId = `${operatorPhone}@c.us`;
+    // Operator exists but with a NON-simulation lead (real operator number).
+    const cust = await insertCustomer(db, {
+      fullName: 'Operator Real',
+      phone: `+${operatorPhone}`,
+    });
+    await db.insert(leads).values({
+      customerId: cust.id,
+      source: 'website',
+      productLine: 'scooter',
+      status: 'new',
+    });
+
+    const app = buildWhatsAppWebhook({
+      db,
+      hmacSecret: SECRET,
+      hmacAlgo: 'sha256',
+      humanActionGroupChatId: operatorChatId,
+    });
+    const body = buildBody({ phone: operatorPhone, body: 'un message libre' });
+    const res = await app.request('/webhooks/waha', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-webhook-hmac': sign(body, SECRET) },
+      body,
+    });
+    expect(res.status).toBe(200);
+    const j = (await res.json()) as { humanAction?: { resolved: boolean } };
+    expect(j.humanAction).toBeDefined();
+    expect(j.humanAction!.resolved).toBe(false);
+
+    // Intercepted — NO customer message emitted, NO inbound turn recorded.
+    const msgs = await db
+      .select()
+      .from(agentMessages)
+      .where(eq(agentMessages.correlationId, cust.id));
+    expect(msgs.some((m) => m.intent === 'CUSTOMER.MESSAGE_RECEIVED')).toBe(false);
+    const turns = await db
+      .select()
+      .from(conversationTurns)
+      .where(eq(conversationTurns.customerId, cust.id));
+    expect(turns).toHaveLength(0);
   });
 });
