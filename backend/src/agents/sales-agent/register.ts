@@ -40,6 +40,13 @@ export function registerSalesAgentClass(): void {
       // onMessage handler. `queues[0]` ('lead') is reported as the primary
       // queue in agents_state for the admin's at-a-glance summary.
       queues: [QUEUE_NAMES.LEAD, QUEUE_NAMES.CUSTOMER, QUEUE_NAMES.QUOTE],
+      // Singleton model: one sales-agent handles every lead, so allow a few
+      // messages in flight per queue for cross-lead throughput (each message
+      // resolves its own lead context from the DB). Concurrency is bounded —
+      // two messages for the SAME lead overlapping is rare and the turns are
+      // timestamped; a per-lead serialization guarantee isn't needed at V1
+      // volume. Bump (or add keyed concurrency) only if throughput demands it.
+      concurrency: 5,
       db: cfg.db,
       ...(cfg.meta ? { meta: cfg.meta } : {}),
     });

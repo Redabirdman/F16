@@ -211,14 +211,14 @@ async function persistAndEmit(
     .where(eq(leads.id, leadId));
   await setLeadStatus(db, leadId, 'scored');
 
-  // Fan-out (M5.T4): emit LEAD.SCORED twice on the same queue, addressed to
-  // two different roles:
-  //   1. sales-spawn-orchestrator → spawns the per-lead Sales Agent instance
-  //      if it isn't already running.
-  //   2. sales-agent / lead-<id>  → the actual conversation event. Sits
-  //      durably until the orchestrator brings the instance online, then
-  //      gets claimed by its BullMQ worker. claimSpecific is role-scoped,
-  //      so the orchestrator and the instance never race for the same row.
+  // Emit LEAD.SCORED to the Sales Agent SINGLETON (role-only, no instance
+  // targeting). One sales-agent handles every lead, resolving conversation
+  // context from the DB by leadId/correlationId. This replaced the earlier
+  // fan-out (sales-spawn-orchestrator + a per-lead `sales-agent/lead-<id>`
+  // instance): per-lead instances each spun a worker on the shared lead/
+  // customer/quote queues and were never reaped, so they accumulated and —
+  // because claimSpecific is role-scoped — raced to claim (and drop) each
+  // other's instance-targeted messages, starving LEAD.NEW/LEAD.SCORED.
   const basePayload = {
     leadId,
     score: score.score,
@@ -230,20 +230,7 @@ async function persistAndEmit(
     { db },
     {
       fromRole: 'lead-scorer',
-      toRole: 'sales-spawn-orchestrator',
-      intent: 'LEAD.SCORED',
-      payload: basePayload,
-      correlationId: leadId,
-      priority: 4,
-    },
-  );
-
-  await sendMessage(
-    { db },
-    {
-      fromRole: 'lead-scorer',
       toRole: 'sales-agent',
-      toInstance: `lead-${leadId}`,
       intent: 'LEAD.SCORED',
       payload: basePayload,
       correlationId: leadId,

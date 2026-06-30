@@ -182,17 +182,12 @@ export function buildWhatsAppWebhook(opts: WhatsAppWebhookOptions): Hono {
     });
 
     // 8. Resolve the live conversation instance. The Sales Agent is spawned
-    // per-lead (`lead-<leadId>`) by the M5.T4 orchestrator, so we look up the
-    // customer's most-recent lead to find the running instance. Falls back
-    // to `customer-<id>` (the legacy addressing) when no lead exists yet —
-    // WhatsApp-first strangers who haven't gone through the website intake
-    // still need a deliverable target.
-    //
-    // `correlationId` carries the leadId when known so the SalesAgent's
-    // `handleCustomerMessage` can resolve the conversation context even
-    // when the agent's `meta.leadId` isn't set (e.g. cross-process replay).
+    // Addressed to the sales-agent SINGLETON by role only (no instance
+    // targeting). `correlationId` carries the leadId when known so the
+    // SalesAgent's `handleCustomerMessage` resolves the conversation context
+    // by lead; it falls back to the customerId when the customer has no lead
+    // yet (WhatsApp-first strangers who never went through website intake).
     const activeLead = await findActiveLeadForCustomer(opts.db, customer.id);
-    const toInstance = activeLead ? `lead-${activeLead.id}` : `customer-${customer.id}`;
     const correlationId = activeLead?.id ?? customer.id;
 
     await sendMessage(
@@ -200,7 +195,6 @@ export function buildWhatsAppWebhook(opts: WhatsAppWebhookOptions): Hono {
       {
         fromRole: 'channel.whatsapp',
         toRole: 'sales-agent',
-        toInstance,
         intent: 'CUSTOMER.MESSAGE_RECEIVED',
         payload: {
           customerId: customer.id,

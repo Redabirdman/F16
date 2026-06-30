@@ -163,14 +163,14 @@ d('lead-scorer worker (stubbed LLM)', () => {
     expect(final!.status).toBe('scored');
     expect(final!.scoredAt).not.toBeNull();
 
-    // M5.T4 fan-out: TWO LEAD.SCORED rows on the same correlationId, one
-    // addressed to the spawn orchestrator and one to the per-lead instance.
+    // Singleton model: exactly ONE LEAD.SCORED row, addressed to the
+    // sales-agent singleton by role only (no instance targeting).
     await waitFor(async () => {
       const rows = await db
         .select()
         .from(agentMessages)
         .where(eq(agentMessages.correlationId, leadId));
-      return rows.filter((r) => r.intent === 'LEAD.SCORED').length >= 2;
+      return rows.filter((r) => r.intent === 'LEAD.SCORED').length >= 1;
     });
 
     const rows = await db
@@ -178,23 +178,16 @@ d('lead-scorer worker (stubbed LLM)', () => {
       .from(agentMessages)
       .where(eq(agentMessages.correlationId, leadId));
     const scoredRows = rows.filter((r) => r.intent === 'LEAD.SCORED');
-    expect(scoredRows).toHaveLength(2);
+    expect(scoredRows).toHaveLength(1);
+    expect(scoredRows[0]!.toRole).toBe('sales-agent');
+    expect(scoredRows[0]!.toInstance).toBeNull();
 
-    const toOrchestrator = scoredRows.find((r) => r.toRole === 'sales-spawn-orchestrator');
-    const toInstance = scoredRows.find((r) => r.toRole === 'sales-agent');
-    expect(toOrchestrator).toBeDefined();
-    expect(toOrchestrator!.toInstance).toBeNull();
-    expect(toInstance).toBeDefined();
-    expect(toInstance!.toInstance).toBe(`lead-${leadId}`);
-
-    // Both rows carry the same payload.
-    for (const r of scoredRows) {
-      const payload = r.payload as Record<string, unknown>;
-      expect(payload['leadId']).toBe(leadId);
-      expect(payload['score']).toBe(85);
-      expect(payload['channel']).toBe('whatsapp');
-      expect(typeof payload['opening']).toBe('string');
-    }
+    // Payload carries the lead context.
+    const payload = scoredRows[0]!.payload as Record<string, unknown>;
+    expect(payload['leadId']).toBe(leadId);
+    expect(payload['score']).toBe(85);
+    expect(payload['channel']).toBe('whatsapp');
+    expect(typeof payload['opening']).toBe('string');
 
     // LLM was called exactly once with haiku tier + cached rubric.
     expect(stub.calls).toHaveLength(1);

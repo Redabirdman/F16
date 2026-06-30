@@ -12,8 +12,10 @@ import type { Database } from '../../src/db/index.js';
 vi.mock('../../src/agents/lead-scorer/index.js', () => ({
   startLeadScorerWorker: vi.fn(() => ({ close: vi.fn().mockResolvedValue(undefined) })),
 }));
-vi.mock('../../src/orchestration/index.js', () => ({
-  startSalesSpawnOrchestrator: vi.fn(() => ({ close: vi.fn().mockResolvedValue(undefined) })),
+// Sales-agent class registration is a side effect we don't want in unit tests;
+// the singleton itself is spawned via the (mocked) registry.spawn below.
+vi.mock('../../src/agents/sales-agent/index.js', () => ({
+  registerSalesAgentClass: vi.fn(),
 }));
 // Track HubSpotClient construction calls without `new` from vi.fn.
 const hubspotClientCalls: Array<{ accessToken?: string }> = [];
@@ -75,7 +77,7 @@ vi.mock('../../src/agents/supervisor-agent/index.js', () => ({
 
 const { startWorkers } = await import('../../src/supervisor/index.js');
 const leadScorerMod = await import('../../src/agents/lead-scorer/index.js');
-const orchestrationMod = await import('../../src/orchestration/index.js');
+const salesAgentMod = await import('../../src/agents/sales-agent/index.js');
 const hubspotMod = await import('../../src/integrations/hubspot/index.js');
 const registryMod = await import('../../src/agents/registry.js');
 const maxanceMod = await import('../../src/agents/maxance-operator/index.js');
@@ -85,7 +87,16 @@ const knowledgeMod = await import('../../src/knowledge/index.js');
 const engagementMod = await import('../../src/agents/engagement-agent/index.js');
 const supervisorAgentMod = await import('../../src/agents/supervisor-agent/index.js');
 
-const fakeDb = {} as unknown as Database;
+// fakeDb only needs `execute` (the supervisor reaps stale sales-agent rows
+// with a single UPDATE before spawning the singleton). Everything else the
+// workers would touch is mocked away.
+const dbExecute = vi.fn().mockResolvedValue(undefined);
+const fakeDb = { execute: dbExecute } as unknown as Database;
+
+/** Default spawn impl — returns a stoppable agent. Re-applied each test. */
+const defaultSpawn = async (): Promise<{ stop: ReturnType<typeof vi.fn> }> => ({
+  stop: vi.fn().mockResolvedValue(undefined),
+});
 
 const ENV_KEYS = [
   'HUBSPOT_API_KEY',
@@ -106,10 +117,15 @@ beforeEach(() => {
     delete process.env[k];
   }
   vi.mocked(leadScorerMod.startLeadScorerWorker).mockClear();
-  vi.mocked(orchestrationMod.startSalesSpawnOrchestrator).mockClear();
+  vi.mocked(salesAgentMod.registerSalesAgentClass).mockClear();
   vi.mocked(hubspotMod.startHubSpotSyncWorker).mockClear();
   hubspotClientCalls.length = 0;
-  vi.mocked(registryMod.spawn).mockClear();
+  // mockClear keeps the base impl but NOT a per-test mockImplementation — so
+  // re-pin the default here to undo any role-targeted override from a prior
+  // error-tolerance test.
+  vi.mocked(registryMod.spawn).mockReset();
+  vi.mocked(registryMod.spawn).mockImplementation(defaultSpawn as never);
+  dbExecute.mockClear();
   vi.mocked(maxanceMod.registerMaxanceOperatorClass).mockClear();
   vi.mocked(reporterMod.registerReporterAgentClass).mockClear();
   vi.mocked(voiceOperatorMod.registerVoiceOperatorClass).mockClear();
@@ -131,10 +147,17 @@ afterEach(() => {
 });
 
 describe('startWorkers — env-gated startup', () => {
-  it('always starts lead-scorer + sales-spawn-orchestrator + knowledge-curator + engagement-agent + supervisor-agent', async () => {
+  it('always starts lead-scorer + sales-agent singleton + knowledge-curator + engagement-agent + supervisor-agent', async () => {
     const set = await startWorkers({ db: fakeDb });
     expect(leadScorerMod.startLeadScorerWorker).toHaveBeenCalledTimes(1);
-    expect(orchestrationMod.startSalesSpawnOrchestrator).toHaveBeenCalledTimes(1);
+    // sales-agent singleton: class registered once, spawned once, stale rows reaped.
+    expect(salesAgentMod.registerSalesAgentClass).toHaveBeenCalledTimes(1);
+    expect(registryMod.spawn).toHaveBeenCalledWith(
+      expect.objectContaining({ role: 'sales-agent', instanceId: 'singleton' }),
+    );
+    // The sales-agent boot reaps stale rows via db.execute (other boot paths
+    // may also use execute, so assert it ran rather than an exact count).
+    expect(dbExecute).toHaveBeenCalled();
     expect(knowledgeMod.bootstrapKnowledgeSources).toHaveBeenCalledTimes(1);
     expect(knowledgeMod.startKnowledgeCurator).toHaveBeenCalledTimes(1);
     expect(engagementMod.registerEngagementAgentClass).toHaveBeenCalledTimes(1);
@@ -143,7 +166,8 @@ describe('startWorkers — env-gated startup', () => {
     expect(supervisorAgentMod.startArbitration).toHaveBeenCalledTimes(1);
     // Strategy review default-off — should NOT have been started.
     expect(supervisorAgentMod.startStrategyReview).not.toHaveBeenCalled();
-    expect(set.workers).toHaveLength(2);
+    // Only lead-scorer is a BullMQ worker now (the sales-agent is a BaseAgent).
+    expect(set.workers).toHaveLength(1);
     expect(set.knowledgeCurator).not.toBeNull();
     expect(set.engagementScheduler).not.toBeNull();
     expect(set.supervisorArbitration).not.toBeNull();
@@ -154,9 +178,18 @@ describe('startWorkers — env-gated startup', () => {
     expect(registryMod.spawn).toHaveBeenCalledWith(
       expect.objectContaining({ role: 'supervisor', instanceId: 'singleton' }),
     );
-    // engagement + supervisor agents spawned via registry. voice-operator is
-    // env-gated on ASTERISK_ARI_URL (cleared in beforeEach → off by default);
-    // its gating has dedicated tests below.
+    // sales-agent + engagement + supervisor singletons. voice-operator is
+    // env-gated on ASTERISK_ARI_URL (cleared in beforeEach → off by default).
+    expect(set.agents).toHaveLength(3);
+  });
+
+  it('skips sales-agent singleton when flag is false', async () => {
+    const set = await startWorkers({ db: fakeDb, flags: { salesAgent: false } });
+    expect(salesAgentMod.registerSalesAgentClass).not.toHaveBeenCalled();
+    expect(registryMod.spawn).not.toHaveBeenCalledWith(
+      expect.objectContaining({ role: 'sales-agent' }),
+    );
+    // engagement + supervisor only.
     expect(set.agents).toHaveLength(2);
   });
 
@@ -195,7 +228,7 @@ describe('startWorkers — env-gated startup', () => {
     const set = await startWorkers({ db: fakeDb });
     expect(hubspotClientCalls).toEqual([{ accessToken: 'pat-na1-test-key' }]);
     expect(hubspotMod.startHubSpotSyncWorker).toHaveBeenCalledTimes(1);
-    expect(set.workers).toHaveLength(3); // lead-scorer + sales-spawn + hubspot-sync
+    expect(set.workers).toHaveLength(2); // lead-scorer + hubspot-sync
   });
 
   it('skips reporter-agent when HUMAN_ACTION_GROUP_CHAT_ID is missing', async () => {
@@ -218,9 +251,9 @@ describe('startWorkers — env-gated startup', () => {
     expect(registryMod.spawn).toHaveBeenCalledWith(
       expect.objectContaining({ role: 'human-router', instanceId: 'singleton' }),
     );
-    // reporter + engagement-agent + supervisor-agent (always-on singletons;
-    // voice-operator is gated off — ASTERISK_ARI_URL cleared in beforeEach).
-    expect(set.agents).toHaveLength(3);
+    // sales-agent + reporter + engagement-agent + supervisor-agent (always-on
+    // singletons; voice-operator is gated off — ASTERISK_ARI_URL cleared).
+    expect(set.agents).toHaveLength(4);
   });
 
   it('skips maxance-operator when MAXANCE_DRIVER is unset', async () => {
@@ -235,9 +268,9 @@ describe('startWorkers — env-gated startup', () => {
     expect(registryMod.spawn).toHaveBeenCalledWith(
       expect.objectContaining({ role: 'maxance-operator', instanceId: 'singleton' }),
     );
-    // maxance + engagement-agent + supervisor-agent (always-on singletons;
-    // voice-operator is gated off — ASTERISK_ARI_URL cleared in beforeEach).
-    expect(set.agents).toHaveLength(3);
+    // sales-agent + maxance + engagement-agent + supervisor-agent (always-on
+    // singletons; voice-operator is gated off — ASTERISK_ARI_URL cleared).
+    expect(set.agents).toHaveLength(4);
   });
 
   it('skips voice-operator when ASTERISK_ARI_URL is unset', async () => {
@@ -245,8 +278,8 @@ describe('startWorkers — env-gated startup', () => {
     expect(registryMod.spawn).not.toHaveBeenCalledWith(
       expect.objectContaining({ role: 'voice-operator' }),
     );
-    // engagement + supervisor only.
-    expect(set.agents).toHaveLength(2);
+    // sales-agent + engagement + supervisor.
+    expect(set.agents).toHaveLength(3);
   });
 
   it('starts voice-operator when ASTERISK_ARI_URL is set', async () => {
@@ -255,15 +288,15 @@ describe('startWorkers — env-gated startup', () => {
     expect(registryMod.spawn).toHaveBeenCalledWith(
       expect.objectContaining({ role: 'voice-operator', instanceId: 'singleton' }),
     );
-    // engagement + supervisor + voice-operator.
-    expect(set.agents).toHaveLength(3);
+    // sales-agent + engagement + supervisor + voice-operator.
+    expect(set.agents).toHaveLength(4);
   });
 
   it('honors explicit flags overriding env', async () => {
     process.env.HUBSPOT_API_KEY = 'pat-na1-test';
     const set = await startWorkers({ db: fakeDb, flags: { hubspotSync: false } });
     expect(hubspotMod.startHubSpotSyncWorker).not.toHaveBeenCalled();
-    expect(set.workers).toHaveLength(2);
+    expect(set.workers).toHaveLength(1); // lead-scorer only
   });
 });
 
@@ -271,22 +304,41 @@ describe('startWorkers — error tolerance', () => {
   it('logs an error and continues if the reporter spawn throws', async () => {
     process.env.HUMAN_ACTION_GROUP_CHAT_ID = '120363012345@g.us';
     process.env.WAHA_BASE_URL = 'http://127.0.0.1:3000';
-    vi.mocked(registryMod.spawn).mockRejectedValueOnce(new Error('boom_register_throw'));
+    // Role-targeted rejection (sales-agent spawns first, so a one-shot reject
+    // would hit the wrong agent) — only the reporter (human-router) throws.
+    vi.mocked(registryMod.spawn).mockImplementation((async (args: { role: string }) => {
+      if (args.role === 'human-router') throw new Error('boom_register_throw');
+      return { stop: vi.fn().mockResolvedValue(undefined) };
+    }) as never);
     const set = await startWorkers({ db: fakeDb });
-    // lead-scorer + sales-spawn still up; reporter failed silently. The
-    // engagement-agent + supervisor-agent spawns (after reporter) still
-    // succeed. voice-operator gated off (ASTERISK_ARI_URL cleared).
-    expect(set.workers).toHaveLength(2);
-    expect(set.agents).toHaveLength(2);
+    // lead-scorer worker still up; reporter failed silently. sales-agent +
+    // engagement-agent + supervisor-agent spawns succeed. voice-operator gated
+    // off (ASTERISK_ARI_URL cleared).
+    expect(set.workers).toHaveLength(1);
+    expect(set.agents).toHaveLength(3);
   });
 
   it('logs an error and continues if maxance-operator spawn throws', async () => {
     process.env.MAXANCE_DRIVER = 'chrome_extension';
-    vi.mocked(registryMod.spawn).mockRejectedValueOnce(new Error('boom_maxance_spawn'));
+    vi.mocked(registryMod.spawn).mockImplementation((async (args: { role: string }) => {
+      if (args.role === 'maxance-operator') throw new Error('boom_maxance_spawn');
+      return { stop: vi.fn().mockResolvedValue(undefined) };
+    }) as never);
     const set = await startWorkers({ db: fakeDb });
-    expect(set.workers).toHaveLength(2);
-    // maxance failed; engagement-agent + supervisor-agent (booted after) still
-    // up. voice-operator gated off (ASTERISK_ARI_URL cleared).
+    expect(set.workers).toHaveLength(1);
+    // maxance failed; sales-agent + engagement-agent + supervisor-agent (booted
+    // around it) still up. voice-operator gated off (ASTERISK_ARI_URL cleared).
+    expect(set.agents).toHaveLength(3);
+  });
+
+  it('continues booting when the sales-agent singleton spawn throws', async () => {
+    vi.mocked(registryMod.spawn).mockImplementation((async (args: { role: string }) => {
+      if (args.role === 'sales-agent') throw new Error('boom_sales_spawn');
+      return { stop: vi.fn().mockResolvedValue(undefined) };
+    }) as never);
+    const set = await startWorkers({ db: fakeDb });
+    expect(set.workers).toHaveLength(1); // lead-scorer
+    // sales-agent failed; engagement + supervisor still up.
     expect(set.agents).toHaveLength(2);
   });
 });

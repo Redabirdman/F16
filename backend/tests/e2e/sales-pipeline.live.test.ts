@@ -8,15 +8,14 @@
  *     → LEAD.NEW × 2 (lead-scorer + hubspot-sync)
  *     → hubspot-sync writes contact + deal (M5.T2) — STUB HubSpot
  *     → lead-scorer scores via LIVE Haiku (M5.T3)
- *     → LEAD.SCORED × 2 (orchestrator + sales-agent)
- *     → orchestrator spawns SalesAgent instance (M5.T4)
+ *     → LEAD.SCORED → sales-agent singleton (role-only, no instance targeting)
  *     → SalesAgent.handleLeadScored:
  *         → compliance on opener (LIVE Haiku)
  *         → sendViaChannel — STUB WAHA channel
  *         → leads.status → 'qualifying'
  *
  *   POST /webhooks/waha (simulated WAHA inbound)
- *     → CUSTOMER.MESSAGE_RECEIVED to sales-agent#lead-<leadId>
+ *     → CUSTOMER.MESSAGE_RECEIVED to the sales-agent singleton
  *     → SalesAgent.handleCustomerMessage:
  *         → callClaudeWithTools (LIVE Sonnet, 5 tools)
  *         → compliance on draft (LIVE Haiku)
@@ -45,7 +44,6 @@ import { conversationTurns, agentsState } from '../../src/db/schema/index.js';
 import { leads } from '../../src/db/schema/leads.js';
 import { buildApp } from '../../src/index.js';
 import { startLeadScorerWorker } from '../../src/agents/lead-scorer/worker.js';
-import { startSalesSpawnOrchestrator } from '../../src/orchestration/sales-spawn.js';
 import { startHubSpotSyncWorker } from '../../src/integrations/hubspot/dual-write.js';
 import { HubSpotClient } from '../../src/integrations/hubspot/client.js';
 import { registerChannel, __resetChannelsForTests } from '../../src/channels/registry.js';
@@ -55,8 +53,16 @@ import type {
   DeliveryReceipt,
   SendOptions,
 } from '../../src/channels/types.js';
-import { killAll, listRunning, __resetAgentRegistryForTests } from '../../src/agents/registry.js';
-import { __resetSalesAgentRegistrationForTests } from '../../src/agents/sales-agent/register.js';
+import {
+  spawn,
+  killAll,
+  listRunning,
+  __resetAgentRegistryForTests,
+} from '../../src/agents/registry.js';
+import {
+  registerSalesAgentClass,
+  __resetSalesAgentRegistrationForTests,
+} from '../../src/agents/sales-agent/register.js';
 import { __resetForTests, shutdownQueues } from '../../src/queue/index.js';
 
 // Skip the whole file if any required env is missing. ANTHROPIC_API_KEY is
@@ -199,11 +205,11 @@ describe.skipIf(skip)('M6.T8 — end-to-end sales pipeline (LIVE Claude)', () =>
     stubChannel = new StubWhatsAppChannel();
     registerChannel(stubChannel);
 
-    // Start the three workers we need. Each one wraps a BullMQ Worker —
-    // they share the singleton ioredis client via the REDIS_URL we set
-    // above.
+    // Start the workers we need. Each one wraps a BullMQ Worker — they share
+    // the singleton ioredis client via the REDIS_URL we set above. The
+    // sales-agent itself is a BaseAgent singleton spawned per-test in
+    // beforeEach (after the truncate) so its agents_state row is fresh.
     workers.push(startLeadScorerWorker({ db }));
-    workers.push(startSalesSpawnOrchestrator({ db }));
     workers.push(
       startHubSpotSyncWorker({
         db,
@@ -262,6 +268,12 @@ describe.skipIf(skip)('M6.T8 — end-to-end sales pipeline (LIVE Claude)', () =>
                  human_actions, maxance_actions, quotes, leads, customers,
                  agents_state CASCADE
       `);
+    // Singleton model: ONE sales-agent handles every lead (replaced the
+    // per-lead spawn orchestrator). Respawn it fresh after the truncate so its
+    // agents_state row exists for this test.
+    await killAll(db).catch(() => undefined);
+    registerSalesAgentClass();
+    await spawn({ role: 'sales-agent', instanceId: 'singleton', db });
   });
 
   it('full pipeline: website lead → live scorer → live sales welcome → stubbed WAHA reply → live sales response', async () => {
@@ -426,9 +438,9 @@ describe.skipIf(skip)('M6.T8 — end-to-end sales pipeline (LIVE Claude)', () =>
     // reflects 'running'.
     // ---------------------------------------------------------------
     const running = listRunning();
-    expect(
-      running.some((r) => r.role === 'sales-agent' && r.instanceId === `lead-${ingest.leadId}`),
-    ).toBe(true);
+    expect(running.some((r) => r.role === 'sales-agent' && r.instanceId === 'singleton')).toBe(
+      true,
+    );
     const [stateRow] = await db
       .select()
       .from(agentsState)

@@ -223,7 +223,6 @@ export async function handleSubscriptionRequested(
       fromRole: ctx.role,
       fromInstance: ctx.instanceId,
       toRole: 'sales-agent',
-      ...salesTarget(payload),
       intent: 'SUBSCRIPTION.READY',
       payload: {
         quoteId,
@@ -294,7 +293,6 @@ async function raiseInspectorHandoff(
       fromRole: ctx.role,
       fromInstance: ctx.instanceId,
       toRole: 'sales-agent',
-      ...salesTarget(payload),
       intent: 'CONTRACT.PENDING_HUMAN',
       payload: { quoteId },
       correlationId: quoteId,
@@ -409,7 +407,6 @@ async function failSubscription(
       fromRole: ctx.role,
       fromInstance: ctx.instanceId,
       toRole: 'sales-agent',
-      ...salesTarget(payload),
       intent: 'SUBSCRIPTION.FAILED',
       payload: {
         quoteId: payload.quoteId,
@@ -424,15 +421,6 @@ async function failSubscription(
 }
 
 // ── pure helpers ──────────────────────────────────────────────────────────
-
-/**
- * The sales-agent instance for this lead, as a spread so `toInstance` is OMITTED
- * (not set to undefined) when the quote isn't lead-linked — required under
- * exactOptionalPropertyTypes.
- */
-function salesTarget(payload: SubscriptionRequestedPayload): { toInstance?: string } {
-  return payload.leadId ? { toInstance: `lead-${payload.leadId}` } : {};
-}
 
 /** Split a stored full name into {lastName, firstName} (best-effort). */
 function splitName(fullName: string): { lastName: string; firstName: string } {

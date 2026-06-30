@@ -224,7 +224,6 @@ export class MaxanceOperatorAgent extends BaseAgent {
         fromRole: this.role,
         fromInstance: this.instanceId,
         toRole: 'sales-agent',
-        ...(payload.leadId ? { toInstance: `lead-${payload.leadId}` } : {}),
         intent: 'SUBSCRIPTION.FAILED',
         payload: {
           quoteId: payload.quoteId,
@@ -382,7 +381,6 @@ export class MaxanceOperatorAgent extends BaseAgent {
         fromRole: this.role,
         fromInstance: this.instanceId,
         toRole: 'sales-agent',
-        toInstance: `lead-${payload.leadId}`,
         intent: 'QUOTE.READY',
         payload: {
           quoteId: payload.quoteId,
@@ -577,7 +575,6 @@ export class MaxanceOperatorAgent extends BaseAgent {
         fromRole: this.role,
         fromInstance: this.instanceId,
         toRole: 'sales-agent',
-        toInstance: `lead-${payload.leadId}`,
         intent: 'QUOTE.PREVIEW_READY',
         payload: {
           quoteId: payload.quoteId,
@@ -719,7 +716,9 @@ export class MaxanceOperatorAgent extends BaseAgent {
   private async emitFailed(
     quoteId: string,
     customerId: string,
-    leadId: string,
+    // Retained for call-site symmetry; QUOTE.FAILED now targets the sales-agent
+    // singleton by role (no per-lead instance), so the leadId is unused here.
+    _leadId: string,
     errorCode: string,
     detail?: string,
   ): Promise<void> {
@@ -729,7 +728,6 @@ export class MaxanceOperatorAgent extends BaseAgent {
         fromRole: this.role,
         fromInstance: this.instanceId,
         toRole: 'sales-agent',
-        toInstance: `lead-${leadId}`,
         intent: 'QUOTE.FAILED',
         payload: {
           quoteId,

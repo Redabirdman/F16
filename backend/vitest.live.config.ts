@@ -17,7 +17,7 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     environment: 'node',
-    include: ['tests/e2e/sales-pipeline.live.test.ts', 'tests/orchestration/sales-spawn.test.ts'],
+    include: ['tests/e2e/sales-pipeline.live.test.ts'],
     setupFiles: ['./tests/setup.ts'],
     // Activates the `RUN_LIVE_TESTS` opt-in gates in the test files.
     env: { RUN_LIVE_TESTS: '1' },

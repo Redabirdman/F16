@@ -23,10 +23,11 @@
  * workerSet.stop() so BullMQ workers drain cleanly.
  */
 import type { Worker } from 'bullmq';
+import { sql } from 'drizzle-orm';
 import type { Database } from '../db/index.js';
 import { logger } from '../logger.js';
 import { startLeadScorerWorker } from '../agents/lead-scorer/index.js';
-import { startSalesSpawnOrchestrator } from '../orchestration/index.js';
+import { registerSalesAgentClass } from '../agents/sales-agent/index.js';
 import { HubSpotClient, startHubSpotSyncWorker } from '../integrations/hubspot/index.js';
 import { spawn } from '../agents/registry.js';
 import { registerMaxanceOperatorClass } from '../agents/maxance-operator/index.js';
@@ -100,7 +101,7 @@ export interface StartWorkersOptions {
   flags?: {
     leadScorer?: boolean;
     hubspotSync?: boolean;
-    salesSpawn?: boolean;
+    salesAgent?: boolean;
     reporter?: boolean;
     maxanceOperator?: boolean;
     voiceOperator?: boolean;
@@ -124,7 +125,7 @@ export async function startWorkers(opts: StartWorkersOptions): Promise<WorkerSet
   const flags = {
     leadScorer: opts.flags?.leadScorer ?? true,
     hubspotSync: opts.flags?.hubspotSync ?? Boolean(process.env.HUBSPOT_API_KEY),
-    salesSpawn: opts.flags?.salesSpawn ?? true,
+    salesAgent: opts.flags?.salesAgent ?? true,
     reporter:
       opts.flags?.reporter ??
       Boolean(process.env.HUMAN_ACTION_GROUP_CHAT_ID && process.env.WAHA_BASE_URL),
@@ -197,14 +198,38 @@ export async function startWorkers(opts: StartWorkersOptions): Promise<WorkerSet
     logger.info('supervisor: hubspot-sync worker SKIPPED (no HUBSPOT_API_KEY)');
   }
 
-  // 3. sales-spawn-orchestrator (always — spawns sales-agent per lead on
-  //    LEAD.SCORED). Idempotently registers the SalesAgent class as a
-  //    side effect.
-  if (flags.salesSpawn) {
-    workers.push(startSalesSpawnOrchestrator({ db: opts.db }));
-    logger.info('supervisor: sales-spawn-orchestrator started');
+  // 3. sales-agent SINGLETON (always). ONE agent handles every lead — it
+  //    consumes LEAD.SCORED + CUSTOMER.MESSAGE_RECEIVED + QUOTE.*/SUBSCRIPTION.*
+  //    and resolves per-lead context from the DB by leadId. This replaced the
+  //    per-lead spawn-orchestrator + per-lead instances, which each spun a
+  //    worker on the shared lead/customer/quote queues, were never reaped, and
+  //    — because claimSpecific is role-scoped — raced to claim+drop each
+  //    other's instance-targeted messages, starving new-lead scoring.
+  if (flags.salesAgent) {
+    try {
+      // Reap stale per-lead sales-agent rows from the old model (or a prior
+      // crash) so the admin office view shows only the live singleton.
+      await opts.db.execute(
+        sql`UPDATE agents_state SET status = 'stopped', stopped_at = now()
+            WHERE role = 'sales-agent' AND instance_id <> 'singleton'
+              AND status IN ('starting', 'running', 'stopping')`,
+      );
+      registerSalesAgentClass();
+      const agent = await spawn({
+        role: 'sales-agent',
+        instanceId: 'singleton',
+        db: opts.db,
+      });
+      agents.push(agent);
+      logger.info('supervisor: sales-agent singleton started');
+    } catch (err) {
+      logger.error(
+        { err: err instanceof Error ? err.message : String(err) },
+        'supervisor: sales-agent singleton failed to start',
+      );
+    }
   } else {
-    logger.info('supervisor: sales-spawn-orchestrator SKIPPED by flag');
+    logger.info('supervisor: sales-agent singleton SKIPPED by flag');
   }
 
   // 4. reporter-agent singleton (option G). Posts human-action events to
