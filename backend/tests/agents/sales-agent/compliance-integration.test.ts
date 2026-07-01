@@ -109,6 +109,8 @@ class StubChannel implements ConversationChannel {
 class StubAnthropic {
   public sonnetCalls: Array<{ model: string }> = [];
   public haikuCalls: Array<{ model: string }> = [];
+  /** Qualification-extractor Haiku calls — tracked separately so they don't inflate the sentry count. */
+  public extractorCalls: Array<{ model: string }> = [];
   /** Queue of texts the Sonnet (Sales LLM) stub returns. Single fallback when empty. */
   public sonnetTexts: string[] = [];
   public sonnetDefault = 'Bonjour, je peux vous aider.';
@@ -116,8 +118,20 @@ class StubAnthropic {
   public sentryTexts: string[] = [];
   public sentryDefault = '{"verdict":"pass","reasons":[]}';
   public messages = {
-    create: async (req: { model: string }) => {
+    create: async (req: { model: string; system?: unknown; messages?: unknown }) => {
       if (req.model.includes('haiku')) {
+        // The qualification extractor also runs on Haiku (WhatsApp turns). Keep
+        // it OUT of the sentry count and return an empty extraction (no-op) so
+        // these compliance tests measure only the Sentry's Haiku calls.
+        const blob = JSON.stringify(req.system ?? '') + JSON.stringify(req.messages ?? '');
+        if (blob.includes('ÉTAT DÉJÀ COLLECTÉ') || blob.includes('extrais des champs structurés')) {
+          this.extractorCalls.push({ model: req.model });
+          return {
+            content: [{ type: 'text' as const, text: '{}' }],
+            stop_reason: 'end_turn' as const,
+            usage: { input_tokens: 20, output_tokens: 3 },
+          };
+        }
         this.haikuCalls.push({ model: req.model });
         const text = this.sentryTexts.length > 0 ? this.sentryTexts.shift()! : this.sentryDefault;
         return {

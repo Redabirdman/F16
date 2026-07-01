@@ -11,6 +11,7 @@
  */
 import type { SystemFragment } from '../../../llm/cache.js';
 import type { Database } from '../../../db/index.js';
+import type { QualificationState } from '../qualification.js';
 import { registerPrompt, resolvePrompt } from '../../../prompts/registry.js';
 import { BRAND_VOICE_FRAGMENT } from './brand.js';
 import { PRODUCTS_FRAGMENT } from './products.js';
@@ -72,6 +73,12 @@ export interface SalesAgentTurnContext {
   }>;
   /** Optional: facts the memory layer surfaced as relevant ("client a déjà refusé voiture Sept 2024"). */
   recalledFacts?: string[];
+  /**
+   * Progressive quote qualification (trottinette V1) — the fields collected so
+   * far, maintained by the qualification extractor. Rendered as a ✓/✗ checklist
+   * so the agent asks only for missing fields and never re-asks.
+   */
+  qualification?: QualificationState;
   /** Optional: opening suggested by Lead Scorer on LEAD.SCORED (first turn only). */
   suggestedOpening?: string;
   /** Channel of THIS turn (so the model knows whether to write WhatsApp-short or email-long). */
@@ -96,6 +103,28 @@ export function buildTurnContextFragment(ctx: SalesAgentTurnContext): SystemFrag
   if (ctx.lead.score !== null) lines.push(`- Score : ${ctx.lead.score}/100`);
   lines.push(`- Devis : ${ctx.lead.quoteState}`);
   lines.push('');
+  // Progressive qualification checklist (trottinette V1). The single most
+  // reliable guard against re-asking answered questions: the agent sees exactly
+  // what's already collected (✓) vs still needed (✗) and asks only for gaps.
+  if (ctx.customer.productLine === 'scooter') {
+    const q = ctx.qualification ?? {};
+    const rows: Array<[string, string | undefined]> = [
+      ["Prix d'achat", q.purchasePriceEur !== undefined ? `${q.purchasePriceEur} €` : undefined],
+      ["Date d'achat", q.purchaseDate],
+      ['Code postal', q.postalCode],
+      ['Date de naissance', q.clientDateOfBirth],
+      ['Stationnement la nuit', q.stationnement],
+    ];
+    lines.push('## État de la qualification (devis trottinette)');
+    lines.push(
+      'Les champs ✓ sont DÉJÀ collectés — ne les redemande JAMAIS. Demande UNIQUEMENT les champs ✗, un seul à la fois. ' +
+        'Quand les 5 sont ✓, appelle `quote.request` (les identifiants client/lead sont injectés automatiquement — ne les demande pas).',
+    );
+    for (const [label, value] of rows) {
+      lines.push(value ? `- ✓ ${label} : ${value}` : `- ✗ ${label} : à demander`);
+    }
+    lines.push('');
+  }
   if (ctx.recalledFacts && ctx.recalledFacts.length > 0) {
     lines.push('## Faits mémorisés sur ce client');
     for (const f of ctx.recalledFacts) lines.push(`- ${f}`);

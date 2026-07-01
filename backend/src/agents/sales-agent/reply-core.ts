@@ -33,6 +33,11 @@ import { sendMessage } from '../../messaging/dispatcher.js';
 import { listTools } from '../../tools/index.js';
 import { recallCustomerFacts } from '../../memory/index.js';
 import { cleanLLMReply, summarizeJson } from './text-utils.js';
+import {
+  extractQualification,
+  saveQualification,
+  type QualificationState,
+} from './qualification.js';
 
 const MAX_HISTORY_TURNS = 10;
 const MAX_REPLY_CHARS = 1500;
@@ -168,6 +173,27 @@ export async function generateSalesReply(
     return { outcome: 'skip', reason: 'no-contact-address' };
   }
 
+  // Progressive qualification memory — merge any quote fields THIS message
+  // provides into the durable per-lead state, so the prompt can render a ✓/✗
+  // checklist and the agent never re-asks an answered question. Skip on voice
+  // (extra Haiku call = latency on a live call; the short voice qualifying
+  // conversation rides the history instead).
+  let qualification: QualificationState = (lead.qualification as QualificationState | null) ?? {};
+  if (channel !== 'voice') {
+    try {
+      const updated = await extractQualification({ current: qualification, message: content, db });
+      if (JSON.stringify(updated) !== JSON.stringify(qualification)) {
+        await saveQualification(db, lead.id, updated);
+      }
+      qualification = updated;
+    } catch (err) {
+      logger.warn(
+        { err: err instanceof Error ? err.message : String(err), leadId: lead.id },
+        'sales-agent: qualification extraction failed; continuing without it',
+      );
+    }
+  }
+
   // Build context — pull last N turns across any channel, oldest first.
   const recentTurnsDesc = await listTurns(db, {
     customerId: customer.id,
@@ -227,6 +253,7 @@ export async function generateSalesReply(
       at: t.occurredAt,
     })),
     ...(recalledFacts.length > 0 ? { recalledFacts } : {}),
+    qualification,
     channel,
   };
 

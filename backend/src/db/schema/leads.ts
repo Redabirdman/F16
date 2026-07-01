@@ -53,6 +53,13 @@ export const leads = pgTable(
     rawPayload: jsonb('raw_payload').$type<Record<string, unknown>>(),
     hubspotDealId: text('hubspot_deal_id'),
 
+    // Progressive quote qualification state — the structured fields the Sales
+    // Agent has collected so far for this lead (price, dates, postal code,
+    // stationnement, ...). Maintained turn-by-turn by the qualification
+    // extractor so the agent asks ONLY for missing fields and never re-asks.
+    // Nullable until the first field is captured.
+    qualification: jsonb('qualification').$type<Record<string, unknown>>(),
+
     // --- M12 paid-acquisition attribution + contact preferences -------------
     // The Meta `leadgen_id` from the webhook — unique per submission. Used to
     // dedup webhook re-deliveries (Meta retries on any non-2xx). Null for
