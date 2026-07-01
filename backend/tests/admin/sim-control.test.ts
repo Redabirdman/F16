@@ -14,10 +14,11 @@ import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { randomBytes } from 'node:crypto';
 import { createDb, type Database } from '../../src/db/index.js';
 import { buildAdminSimRouter } from '../../src/admin/sim-control.js';
+import type { LeadIntakePayload } from '../../src/leads/intake.js';
 
 describe('admin sim-control (unit)', () => {
   it('inject-lead maps to ingestLead with source=meta + simulation flag', async () => {
-    const ingestLead = vi.fn(async () => ({
+    const ingestLead = vi.fn(async (_db: Database, _payload: LeadIntakePayload) => ({
       leadId: 'L1',
       customerId: 'C1',
       dedup: 'new_customer' as const,

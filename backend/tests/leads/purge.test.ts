@@ -49,10 +49,10 @@ d('purgeContact', () => {
       .returning();
     await insertQuote(db, {
       customerId: cust.id,
-      leadId: lead.id,
+      leadId: lead!.id,
       product: 'scooter',
       productVariant: 'trottinette',
-      sessionId: `sess-${lead.id}`,
+      sessionId: `sess-${lead!.id}`,
     });
     await db.insert(conversationTurns).values({
       customerId: cust.id,

@@ -131,6 +131,8 @@ function autoReplyTo(sock: WsClient, cmd: Command): void {
         durationMs: 5678,
       };
       break;
+    default:
+      throw new Error(`autoReplyTo: unhandled command kind '${(cmd as { kind: string }).kind}'`);
   }
   sock.send(JSON.stringify(resp));
 }

@@ -177,10 +177,10 @@ describe('subscription.request — handler', () => {
     const intents = sendMessageMock.mock.calls.map((c) => (c[1] as { intent: string }).intent);
     expect(intents).toEqual(['QUOTE.ACCEPTED', 'SUBSCRIPTION.REQUESTED']);
 
-    const acceptedPayload = (sendMessageMock.mock.calls[0][1] as { payload: unknown }).payload;
+    const acceptedPayload = (sendMessageMock.mock.calls[0]![1] as { payload: unknown }).payload;
     expect(acceptedPayload).toEqual({ quoteId: QUOTE_ID });
 
-    const subPayload = (sendMessageMock.mock.calls[1][1] as { payload: Record<string, unknown> })
+    const subPayload = (sendMessageMock.mock.calls[1]![1] as { payload: Record<string, unknown> })
       .payload;
     expect(subPayload.bankRef).toBe('customer');
     expect(subPayload).not.toHaveProperty('iban');
