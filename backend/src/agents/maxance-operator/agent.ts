@@ -129,6 +129,35 @@ export class MaxanceOperatorAgent extends BaseAgent {
     return this.client;
   }
 
+  /**
+   * Pre-warm the driver at boot so the Chrome extension can connect and hold a
+   * PERSISTENT link BEFORE any quote arrives. Without this the WS server only
+   * starts lazily on the first quote, and since the extension client `send()`
+   * fails fast when no socket is connected, that first quote would race and
+   * fail with `no_active_connection`. Best-effort: a disabled/misconfigured
+   * driver just no-ops here (the handlers still resolve it lazily).
+   */
+  protected override async onStart(): Promise<void> {
+    let driver: MaxanceDriver;
+    try {
+      driver = readDriverFromEnv();
+    } catch {
+      return; // driver disabled — nothing to pre-warm
+    }
+    try {
+      await this.getClient(driver);
+      logger.info(
+        { driver },
+        'maxance-operator: driver pre-warmed at boot (extension WS server listening)',
+      );
+    } catch (err) {
+      logger.warn(
+        { err: err instanceof Error ? err.message : String(err) },
+        'maxance-operator: pre-warm failed; will resolve lazily on the first quote',
+      );
+    }
+  }
+
   protected async onMessage(envelope: AgentMessageEnvelope): Promise<MessageHandlerResult> {
     switch (envelope.intent) {
       case 'QUOTE.REQUESTED':
