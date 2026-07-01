@@ -47,6 +47,16 @@ export interface ToolContext {
   agentInstance: string;
   /** Free-form correlation key — lead_id, customer_id, conversation_id, ... */
   correlationId?: string;
+  /**
+   * Server-authoritative customer id. When set, `invokeTool` injects it into
+   * the tool input, OVERRIDING any value the LLM supplied. The LLM is never
+   * told these internal UUIDs (they're stripped from the JSON Schema it sees),
+   * and identity must never be trusted from the model — this prevents a tool
+   * from acting on the wrong customer.
+   */
+  customerId?: string;
+  /** Server-authoritative lead id — injected + override, same rationale as customerId. */
+  leadId?: string;
 }
 
 /**
@@ -120,7 +130,14 @@ export async function invokeTool(
   const tool = _registry.get(name);
   if (!tool) throw new Error(`Unknown tool: ${name}`);
 
-  const inputParse = tool.inputSchema.safeParse(rawInput);
+  // Inject server-authoritative identity (customerId/leadId) from the context,
+  // OVERRIDING anything the model supplied. The LLM never sees these internal
+  // UUIDs (they're stripped from the JSON Schema handed to it), so it can't
+  // pass them — and even if it tried, it must not be trusted to. For tools
+  // that don't declare these fields, zod's default object parsing strips them.
+  const effectiveInput = withContextIds(ctx, rawInput);
+
+  const inputParse = tool.inputSchema.safeParse(effectiveInput);
   if (!inputParse.success) {
     throw new Error(`Invalid input for tool ${name}: ${JSON.stringify(inputParse.error.issues)}`);
   }
@@ -136,6 +153,23 @@ export async function invokeTool(
     return outputParse.data;
   }
   return output;
+}
+
+/**
+ * Merge the context's server-authoritative `customerId`/`leadId` onto the raw
+ * tool input, with the CONTEXT winning. Returns the input unchanged when the
+ * context carries neither id. Keys the tool schema doesn't declare are dropped
+ * by zod's default object parsing, so this is safe to apply to every tool.
+ */
+function withContextIds(ctx: ToolContext, rawInput: unknown): unknown {
+  if (ctx.customerId === undefined && ctx.leadId === undefined) return rawInput;
+  const base =
+    rawInput && typeof rawInput === 'object' ? (rawInput as Record<string, unknown>) : {};
+  return {
+    ...base,
+    ...(ctx.customerId !== undefined ? { customerId: ctx.customerId } : {}),
+    ...(ctx.leadId !== undefined ? { leadId: ctx.leadId } : {}),
+  };
 }
 
 /**

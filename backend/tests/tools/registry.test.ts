@@ -190,4 +190,62 @@ describe('tool registry', () => {
     const described = describeForLLM({ allowed: ['fixture.y'] });
     expect(described.map((t) => t.name)).toEqual(['fixture.y']);
   });
+
+  // Server-authoritative identity injection — the internal customerId/leadId
+  // are supplied from ToolContext, NOT the model (the model never sees them in
+  // the JSON schema). This is the fix for the "customerId/leadId manquants"
+  // tool failure + a guard against the model targeting the wrong customer.
+  const A_CUSTOMER = '11111111-1111-4111-8111-111111111111';
+  const A_LEAD = '22222222-2222-4222-8222-222222222222';
+  const idCtx: ToolContext = { ...ctx, customerId: A_CUSTOMER, leadId: A_LEAD };
+
+  it('test 11 (id injection): fills customerId/leadId from ctx when the input omits them', async () => {
+    registerTool({
+      name: 'fixture.needs-ids',
+      description: 'requires the internal ids',
+      inputSchema: z.object({
+        customerId: z.string().uuid(),
+        leadId: z.string().uuid(),
+        note: z.string(),
+      }),
+      handler: async (_c, input) => input,
+    });
+    // The "model" supplies only `note`; the ids come from context.
+    const out = (await invokeTool(idCtx, 'fixture.needs-ids', { note: 'hi' })) as {
+      customerId: string;
+      leadId: string;
+      note: string;
+    };
+    expect(out.customerId).toBe(A_CUSTOMER);
+    expect(out.leadId).toBe(A_LEAD);
+    expect(out.note).toBe('hi');
+  });
+
+  it('test 12 (id injection overrides): ctx ids win over any model-supplied value', async () => {
+    registerTool({
+      name: 'fixture.needs-ids2',
+      description: 'requires the internal ids',
+      inputSchema: z.object({ customerId: z.string().uuid(), leadId: z.string().uuid() }),
+      handler: async (_c, input) => input,
+    });
+    // Model tries to target a DIFFERENT customer/lead — must be overridden.
+    const other = '99999999-9999-4999-8999-999999999999';
+    const out = (await invokeTool(idCtx, 'fixture.needs-ids2', {
+      customerId: other,
+      leadId: other,
+    })) as { customerId: string; leadId: string };
+    expect(out.customerId).toBe(A_CUSTOMER);
+    expect(out.leadId).toBe(A_LEAD);
+  });
+
+  it('test 13 (id injection is harmless): tools that do not declare the ids drop them', async () => {
+    registerTool({
+      name: 'fixture.no-ids',
+      description: 'does not use the internal ids',
+      inputSchema: z.object({ q: z.string() }),
+      handler: async (_c, input) => input,
+    });
+    const out = await invokeTool(idCtx, 'fixture.no-ids', { q: 'search' });
+    expect(out).toEqual({ q: 'search' });
+  });
 });

@@ -550,4 +550,52 @@ describe('callClaudeWithTools (unit, stub Anthropic + fixture tools)', () => {
     expect(sys[1]!.cache_control).toEqual({ type: 'ephemeral' });
     expect(sys[2]!.text).toBe('Per-turn note');
   });
+
+  // The model must receive a REAL argument schema (so it fills formData etc.
+  // correctly instead of guessing from prose) — and the internal identity
+  // fields customerId/leadId must be STRIPPED (they're injected server-side).
+  it('sends a real json schema and strips internal customerId/leadId from the model view', async () => {
+    stub.push({
+      content: [{ type: 'text', text: 'ok' }],
+      stop_reason: 'end_turn',
+      usage: usage(5, 2),
+    });
+
+    await callClaudeWithTools({
+      tier: 'sonnet',
+      userPrompt: 'go',
+      tools: [
+        {
+          name: 'quote.request',
+          description: 'launch a quote',
+          inputSchema: z.object({
+            customerId: z.string().uuid(),
+            leadId: z.string().uuid(),
+            formData: z.object({
+              vehicleKind: z.literal('trottinette'),
+              postalCode: z.string(),
+            }),
+          }),
+          handler: async () => null,
+        },
+      ],
+      toolContext: fakeToolContext,
+    });
+
+    const sentTool = stub.lastCall.tools?.[0];
+    expect(sentTool?.name).toBe('quote_request');
+    const schema = sentTool?.input_schema as {
+      type: string;
+      properties: Record<string, unknown>;
+      required?: string[];
+    };
+    expect(schema.type).toBe('object');
+    // Business field IS present, so the model knows to send it.
+    expect(schema.properties).toHaveProperty('formData');
+    // Internal ids are STRIPPED — the model never sees or supplies them.
+    expect(schema.properties).not.toHaveProperty('customerId');
+    expect(schema.properties).not.toHaveProperty('leadId');
+    expect(schema.required ?? []).not.toContain('customerId');
+    expect(schema.required ?? []).not.toContain('leadId');
+  });
 });

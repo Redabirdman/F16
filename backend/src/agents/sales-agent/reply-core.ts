@@ -255,6 +255,10 @@ export async function generateSalesReply(
       agentRole,
       agentInstance,
       correlationId: lead.id,
+      // Server-authoritative identity — injected into every tool call so the
+      // model never has to (and never gets to) supply the internal UUIDs.
+      customerId: customer.id,
+      leadId: lead.id,
     },
     // Voice replies must be ONE short spoken sentence (see the voice channel
     // instruction in the system prompt) — a tighter cap is a backstop so a

@@ -111,12 +111,42 @@ function toAnthropicName(name: string): string {
  * the `zod-to-json-schema` package for callers that need strict validation
  * before the tool's own `inputSchema.safeParse` runs inside `invokeTool`.
  */
-function zodToJsonSchema(_schema: z.ZodTypeAny): AnthropicTool['input_schema'] {
-  return {
-    type: 'object',
-    properties: {},
-    additionalProperties: true,
-  } as unknown as AnthropicTool['input_schema'];
+const PERMISSIVE_SCHEMA = {
+  type: 'object',
+  properties: {},
+  additionalProperties: true,
+} as unknown as AnthropicTool['input_schema'];
+
+/**
+ * Convert a tool's zod input schema into the JSON Schema Anthropic hands to the
+ * model, so it knows the exact arguments to pass (field names, enums, formats)
+ * instead of guessing from the prose description.
+ *
+ * Two deliberate transforms:
+ *   - Internal identity fields (`customerId`/`leadId`) are STRIPPED from the
+ *     model-facing schema: they're injected server-side from ToolContext (see
+ *     registry.invokeTool), never supplied — or trustable — from the model.
+ *   - On any conversion failure (an unrepresentable zod construct), fall back to
+ *     the permissive `{type:'object'}` stub so a tool can never break the loop.
+ */
+function zodToJsonSchema(schema: z.ZodTypeAny): AnthropicTool['input_schema'] {
+  try {
+    const json = z.toJSONSchema(schema, { unrepresentable: 'any' }) as Record<string, unknown>;
+    if (!json || json['type'] !== 'object') return PERMISSIVE_SCHEMA;
+    const props = json['properties'];
+    if (props && typeof props === 'object') {
+      delete (props as Record<string, unknown>)['customerId'];
+      delete (props as Record<string, unknown>)['leadId'];
+    }
+    if (Array.isArray(json['required'])) {
+      json['required'] = (json['required'] as string[]).filter(
+        (r) => r !== 'customerId' && r !== 'leadId',
+      );
+    }
+    return json as unknown as AnthropicTool['input_schema'];
+  } catch {
+    return PERMISSIVE_SCHEMA;
+  }
 }
 
 /**
