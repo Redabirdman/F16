@@ -38,7 +38,11 @@ import {
   formuleLabel,
 } from '../maxance/selectors.js';
 import { captureScreenshot, clickMaxanceButton, sleep, waitFor } from '../dom.js';
-import { applyGarantiesConfig, extractComptantBreakdown } from './garanties-controls.js';
+import {
+  GarantiesNavigatedError,
+  applyGarantiesConfig,
+  extractComptantBreakdown,
+} from './garanties-controls.js';
 import {
   type ComptantBreakdown,
   type DevisResumeCommandSchema,
@@ -250,18 +254,31 @@ export async function runDevisResume(cmd: DevisResumeCommand): Promise<Response>
 
       if (screen === 'garanties') {
         await shoot('resume_garanties_pre');
-        const { comptantBreakdown, ...price } = await configureGarantiesAndExtract(cmd);
-        await shoot('resume_garanties_configured');
-        return DevisResumeResponseSchema.parse({
-          id: cmd.id,
-          kind: 'devis.resume.ok',
-          devisNumber: cmd.devisNumber,
-          pricePreviewEur: price,
-          comptantBreakdown,
-          screenshots,
-          finalUrl: location.href,
-          durationMs: Date.now() - t0,
-        });
+        try {
+          const { comptantBreakdown, ...price } = await configureGarantiesAndExtract(cmd);
+          await shoot('resume_garanties_configured');
+          return DevisResumeResponseSchema.parse({
+            id: cmd.id,
+            kind: 'devis.resume.ok',
+            devisNumber: cmd.devisNumber,
+            pricePreviewEur: price,
+            comptantBreakdown,
+            screenshots,
+            finalUrl: location.href,
+            durationMs: Date.now() - t0,
+          });
+        } catch (gErr) {
+          // Same nav-resilience as quote.preview: a Garanties control (the
+          // commission onblur) navigates instead of AJAX-refreshing. Hand back
+          // to the SW orchestrator to await the reload + re-invoke; the applied
+          // control reads 'already' on the fresh page so the step converges.
+          if (gErr instanceof GarantiesNavigatedError) {
+            await shoot('resume_garanties_navigated');
+            await reportProgress(cmd.id, 'resume_garanties_navigated', `url=${location.href}`);
+            return navigating('garanties', 'garanties');
+          }
+          throw gErr;
+        }
       }
 
       // unknown — settle and retry detection once

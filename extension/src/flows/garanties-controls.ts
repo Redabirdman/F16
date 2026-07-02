@@ -36,9 +36,32 @@ export interface GarantiesConfig {
 }
 
 /**
+ * Distinct signal: a Garanties closing control triggered a FULL top-frame
+ * navigation (not the expected in-place AJAX re-render), so the content
+ * script running the flow was torn down before the SW handler could reply —
+ * `chrome.runtime.sendMessage` resolved `undefined`. Live-observed 2026-07-02:
+ * the commission `onblur` (garantieTauxCommissionEffectif → setSliderValue0)
+ * now navigates instead of AJAX-refreshing (it did the latter on 2026-06-11).
+ *
+ * The caller (runQuotePreview / runDevisResume) catches this and returns a
+ * `*.navigating` response so the SW orchestrator awaits the reload and
+ * re-invokes on the fresh page — where the just-applied control reads
+ * `'already'` (its value persisted server-side by the navigation), so the
+ * step converges instead of dying. Mirrors the wizard-tab nav pattern.
+ */
+export class GarantiesNavigatedError extends Error {
+  constructor() {
+    super('maxance_garanties_navigated');
+    this.name = 'GarantiesNavigatedError';
+  }
+}
+
+/**
  * Apply the Garanties closing controls via the SW's main-world handler.
- * Throws a tagged `maxance_garanties_config_failed:<reason>` error on any
- * failure so the flow's catch-all maps it to the standard errorCode shape.
+ * Throws `GarantiesNavigatedError` when the round-trip yielded no response
+ * (the control navigated — see above), or a tagged
+ * `maxance_garanties_config_failed:<reason>` error on any other failure so
+ * the flow's catch-all maps it to the standard errorCode shape.
  */
 export async function applyGarantiesConfig(
   cfg: GarantiesConfig,
@@ -54,7 +77,10 @@ export async function applyGarantiesConfig(
     },
   };
   const resp = (await chrome.runtime.sendMessage(msg)) as GarantiesConfigureResponse | undefined;
-  if (!resp) throw new Error('maxance_garanties_config_failed:no_response');
+  // `undefined` = the message channel closed before the SW handler replied,
+  // i.e. this content script was torn down by a top-frame navigation the
+  // control triggered. Signal it distinctly so the flow re-invokes.
+  if (!resp) throw new GarantiesNavigatedError();
   if (resp.kind !== 'garanties.ok') {
     throw new Error(`maxance_garanties_config_failed:${resp.error} [${resp.log.join(',')}]`);
   }

@@ -95,6 +95,89 @@ async function waitForRerender(
 }
 
 /**
+ * Dismiss the NVEI speed-limit ALERTE popin if Maxance raised it on the
+ * Garanties tab. Live-observed 2026-07-02 (Ridaa's screenshot): the notice
+ * "La vitesse du NVEI doit être limitée à 25Km/h" renders as a
+ * `ConstructAlertInfo` MODAL popin with an OK button — NOT inline text as the
+ * 2026-05-25 code assumed. Left undismissed it blocks the later "Valider
+ * devis" click (the flow "doesn't proceed to the next steps").
+ *
+ * SAFETY: the Garanties tab also hosts the DESTRUCTIVE "Valider souscription"
+ * button, so this dismisser is deliberately narrow — it only acts on a VISIBLE
+ * popin whose text matches the NVEI warning, and clicks ONLY an exact "OK"
+ * button inside it (never a "Valider"). Falls back to hiding the popin so it
+ * can't block, without clicking anything ambiguous. Best-effort; returns a
+ * short status for the log.
+ */
+export async function dismissNveiSpeedAlert(tabId: number): Promise<string> {
+  const res = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: 'MAIN',
+    func: (): { status: string } => {
+      const isVisible = (el: Element): boolean => {
+        const r = (el as HTMLElement).getBoundingClientRect();
+        return r.width > 0 && r.height > 0;
+      };
+      const containerSel = [
+        '#alertDiv',
+        '.alertInfo',
+        '.alerte',
+        '.popin',
+        '.popup',
+        '[id*="alert" i]',
+        '[class*="alert" i]',
+        '[role="dialog"]',
+      ].join(',');
+      // Match the NVEI speed-limit notice specifically (accent/spacing tolerant).
+      const nvei = /vitesse|NVEI|25\s*km/i;
+      const containers = Array.from(document.querySelectorAll(containerSel)).filter(isVisible);
+      for (const c of containers) {
+        const txt = (c as HTMLElement).innerText || '';
+        if (!nvei.test(txt)) continue;
+        // Click ONLY an exact "OK" (case-insensitive) control inside the popin.
+        // Never match "Valider"/"Valider souscription" — those are destructive
+        // on this tab and live OUTSIDE the popin anyway.
+        const ok = Array.from(
+          c.querySelectorAll<HTMLElement>(
+            'button, input[type="button"], input[type="submit"], a, .buttonMiddle, .bouton, img',
+          ),
+        ).find((b) => {
+          const t = (
+            b.innerText ||
+            (b as HTMLInputElement).value ||
+            b.getAttribute('alt') ||
+            ''
+          ).trim();
+          return /^ok$/i.test(t);
+        });
+        if (ok) {
+          const r = ok.getBoundingClientRect();
+          const init = {
+            bubbles: true,
+            cancelable: true,
+            view: window,
+            button: 0,
+            buttons: 1,
+            clientX: r.left + r.width / 2,
+            clientY: r.top + r.height / 2,
+          } as const;
+          for (const k of ['mousedown', 'mouseup', 'click'] as const) {
+            ok.dispatchEvent(new MouseEvent(k, init));
+          }
+          return { status: 'ok_clicked' };
+        }
+        // No OK button found — hide the popin so it can't block. Never click a
+        // Valider fallback (destructive-click risk).
+        (c as HTMLElement).style.display = 'none';
+        return { status: 'hidden' };
+      }
+      return { status: 'no_nvei_popin' };
+    },
+  });
+  return (res[0]?.result as { status: string } | undefined)?.status ?? 'null';
+}
+
+/**
  * Apply the requested Garanties configuration. Steps run in order:
  *   (a) formule radio (when provided and not already checked),
  *   (b) commission (ALWAYS — skip-set only when the input already matches),
@@ -215,6 +298,11 @@ export async function handleGarantiesConfigureMw(
         log.push(await waitForRerender(tabId, { timeoutMs: RERENDER_TIMEOUT_MS }));
       }
     }
+
+    // Maxance raises the "vitesse du NVEI limitée à 25Km/h" ALERTE modal
+    // during/after the recompute (live-observed 2026-07-02). Dismiss it here so
+    // the tab is left clean — otherwise it blocks the later Valider devis click.
+    log.push('nveiAlert=' + (await dismissNveiSpeedAlert(tabId)));
 
     // Final commission read — proof that the forced 22% actually stuck.
     const finalState = await readRenderState(tabId);

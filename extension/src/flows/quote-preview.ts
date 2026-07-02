@@ -50,7 +50,11 @@ import {
   sleep,
   waitFor,
 } from '../dom.js';
-import { applyGarantiesConfig, extractComptantBreakdown } from './garanties-controls.js';
+import {
+  GarantiesNavigatedError,
+  applyGarantiesConfig,
+  extractComptantBreakdown,
+} from './garanties-controls.js';
 import {
   type ComptantBreakdown,
   type QuotePreviewCommandSchema,
@@ -605,17 +609,31 @@ export async function runQuotePreview(cmd: QuotePreviewCommand): Promise<Respons
 
       if (screen === 'garanties_tab' || screen === 'price_preview') {
         await shoot('garanties_tab_pre');
-        const { comptantBreakdown, ...price } = await configureGarantiesAndExtract(cmd);
-        await shoot('price_preview');
-        return QuotePreviewResponseSchema.parse({
-          id: cmd.id,
-          kind: 'quote.preview.ok',
-          pricePreviewEur: price,
-          comptantBreakdown,
-          screenshots,
-          finalUrl: location.href,
-          durationMs: Date.now() - t0,
-        });
+        try {
+          const { comptantBreakdown, ...price } = await configureGarantiesAndExtract(cmd);
+          await shoot('price_preview');
+          return QuotePreviewResponseSchema.parse({
+            id: cmd.id,
+            kind: 'quote.preview.ok',
+            pricePreviewEur: price,
+            comptantBreakdown,
+            screenshots,
+            finalUrl: location.href,
+            durationMs: Date.now() - t0,
+          });
+        } catch (gErr) {
+          // A Garanties control triggered a full top-frame navigation (the
+          // commission onblur — live-observed 2026-07-02). The content script
+          // was torn down; hand back to the SW orchestrator, which awaits the
+          // reload and re-invokes. On the fresh page the applied control reads
+          // 'already' (value persisted by the nav), so the step converges.
+          if (gErr instanceof GarantiesNavigatedError) {
+            await shoot('garanties_navigated');
+            await reportProgress(cmd.id, 'garanties_navigated', `url=${location.href}`);
+            return navigating('garanties_tab', 'garanties_tab');
+          }
+          throw gErr;
+        }
       }
 
       // unknown — give the page another short moment then retry once

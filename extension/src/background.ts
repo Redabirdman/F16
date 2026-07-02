@@ -43,7 +43,7 @@ import type {
   SubscriptionValiderFinaleResponse,
   SwInbound,
 } from './content-protocol.js';
-import { handleGarantiesConfigureMw } from './garanties-mw.js';
+import { dismissNveiSpeedAlert, handleGarantiesConfigureMw } from './garanties-mw.js';
 import {
   dismissDuplicateAlert,
   probeContactDuplicate,
@@ -191,8 +191,17 @@ async function forwardToContent(command: Command): Promise<Response> {
 
 /** Max advance iterations before giving up — comfortably above the 4-screen
  *  quote-preview chain (vehicle_picker → vehicule_tab → conducteur_tab →
- *  garanties_tab) plus any intra-page bridge-modal dismissals. */
-const ORCHESTRATE_MAX_ITERATIONS = 8;
+ *  garanties_tab), any intra-page bridge-modal dismissals, PLUS the extra
+ *  re-invoke(s) the garanties step now needs: each closing control (commission
+ *  / formule / fractionnement) can trigger a full nav (live-observed 2026-07-02
+ *  for commission), and the flow re-enters garanties once per navigating
+ *  control before it settles. 8 → 12 gives headroom for all three. */
+const ORCHESTRATE_MAX_ITERATIONS = 12;
+/** How many times we tolerate re-entering the garanties step (a
+ *  garanties→garanties navigating hand-back) before declaring non-convergence.
+ *  A control that navigates but whose value does NOT persist server-side would
+ *  otherwise loop until the hard deadline; bail fast with a clear code instead. */
+const GARANTIES_MAX_REINVOKES = 3;
 /** How long the SW waits for chrome.webNavigation.onCompleted after a
  *  navigating response. If no nav fires within this window we assume the
  *  click didn't navigate (e.g. it popped a same-page modal) and just
@@ -228,6 +237,8 @@ async function orchestrateNavigatingFlow(tabId: number, command: Command): Promi
   const envelope: ContentInbound = { kind: 'flow', command };
   const start = Date.now();
   const hardDeadline = 'timeoutMs' in command ? (command.timeoutMs ?? 240_000) : 240_000;
+  /** Count garanties→garanties hand-backs to detect a non-converging control. */
+  let garantiesReinvokeCount = 0;
 
   for (let iter = 0; iter < ORCHESTRATE_MAX_ITERATIONS; iter += 1) {
     if (Date.now() - start > hardDeadline) {
@@ -285,6 +296,26 @@ async function orchestrateNavigatingFlow(tabId: number, command: Command): Promi
       console.warn(
         `[f16-ext] orchestrator: iter ${iter} returned navigating from=${resp.fromScreen} expected=${resp.expectedScreen}`,
       );
+      // Garanties non-convergence guard: a garanties→garanties hand-back means
+      // a closing control navigated but we're still on garanties. That's normal
+      // ONCE (the nav persists the value; next pass reads 'already'). If it
+      // recurs past the bound, the value isn't sticking — bail fast rather than
+      // looping to the hard deadline.
+      if (
+        String(resp.expectedScreen).startsWith('garanties') &&
+        resp.fromScreen === resp.expectedScreen
+      ) {
+        garantiesReinvokeCount += 1;
+        if (garantiesReinvokeCount > GARANTIES_MAX_REINVOKES) {
+          return ErrorResponseSchema.parse({
+            id: command.id,
+            kind: 'error',
+            errorCode: 'maxance_garanties_nav_not_converging',
+            detail: `garanties re-invoked ${garantiesReinvokeCount}x without settling — a closing control keeps navigating and its value is not persisting`,
+            screenshots: accumulatedScreenshots,
+          });
+        }
+      }
       try {
         await waitForNavigationComplete(tabId, NAV_COMPLETE_TIMEOUT_MS);
       } catch {
@@ -1092,42 +1123,47 @@ chrome.runtime.onMessage.addListener(
         sendResponse({ kind: 'click.err', error: 'no_sender_tab' });
         return false;
       }
-      void chrome.scripting
-        .executeScript({
-          target: { tabId },
-          world: 'MAIN',
-          func: (containerId: string) => {
-            const c = document.getElementById(containerId);
-            if (!c) return { ok: false, error: 'container_not_found' };
-            const t = (c.querySelector('.buttonMiddle') as HTMLElement | null) ?? c;
-            const r = t.getBoundingClientRect();
-            const init = {
-              bubbles: true,
-              cancelable: true,
-              view: window,
-              button: 0,
-              buttons: 1,
-              clientX: r.left + r.width / 2,
-              clientY: r.top + r.height / 2,
-            } as const;
-            for (const k of ['mousedown', 'mouseup', 'click'] as const) {
-              t.dispatchEvent(new MouseEvent(k, init));
-            }
-            return { ok: true };
-          },
-          args: [message.containerId],
-        })
-        .then((results) => {
+      void (async () => {
+        try {
+          // Before any Maxance framework button click, clear a blocking NVEI
+          // speed-limit ALERTE popin if one is up (live-observed 2026-07-02: it
+          // blocks the Valider devis click on the Garanties tab). Narrow +
+          // OK-only + no-op when absent — see garanties-mw.dismissNveiSpeedAlert.
+          await dismissNveiSpeedAlert(tabId);
+          const results = await chrome.scripting.executeScript({
+            target: { tabId },
+            world: 'MAIN',
+            func: (containerId: string) => {
+              const c = document.getElementById(containerId);
+              if (!c) return { ok: false, error: 'container_not_found' };
+              const t = (c.querySelector('.buttonMiddle') as HTMLElement | null) ?? c;
+              const r = t.getBoundingClientRect();
+              const init = {
+                bubbles: true,
+                cancelable: true,
+                view: window,
+                button: 0,
+                buttons: 1,
+                clientX: r.left + r.width / 2,
+                clientY: r.top + r.height / 2,
+              } as const;
+              for (const k of ['mousedown', 'mouseup', 'click'] as const) {
+                t.dispatchEvent(new MouseEvent(k, init));
+              }
+              return { ok: true };
+            },
+            args: [message.containerId],
+          });
           const r = results[0]?.result as { ok: boolean; error?: string } | undefined;
           if (r?.ok) sendResponse({ kind: 'click.ok' });
           else sendResponse({ kind: 'click.err', error: r?.error ?? 'unknown' });
-        })
-        .catch((err: unknown) => {
+        } catch (err) {
           sendResponse({
             kind: 'click.err',
             error: err instanceof Error ? err.message : String(err),
           });
-        });
+        }
+      })();
       return true;
     }
     if (message.kind === 'open.mdi-window') {
