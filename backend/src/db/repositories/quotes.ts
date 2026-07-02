@@ -28,6 +28,14 @@ import { emitHubSpotSync } from './leads.js';
 
 /** Input for `insertQuote` — only the fields a freshly-requested quote needs. */
 export interface InsertQuoteInput {
+  /**
+   * Explicit row id. The `quote.request` tool passes the QUOTE.REQUESTED
+   * payload's `quoteId` here so the DB row and the intent share one UUID —
+   * every downstream markQuote* and markSubscription* call correlates by
+   * `payload.quoteId`, so the two MUST be the same id. Omit to let the DB
+   * defaultRandom (fine for tests/backfills that never leave the DB).
+   */
+  id?: string;
   customerId: string;
   leadId?: string | null;
   product: 'scooter' | 'car';
@@ -41,6 +49,7 @@ export async function insertQuote(db: Database, input: InsertQuoteInput): Promis
   const [row] = await db
     .insert(quotes)
     .values({
+      ...(input.id != null ? { id: input.id } : {}),
       customerId: input.customerId,
       leadId: input.leadId ?? null,
       product: input.product,

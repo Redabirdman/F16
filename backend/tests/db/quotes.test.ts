@@ -87,6 +87,28 @@ d('quotes + maxance_actions (live)', () => {
     expect(row!.rawFormData).toEqual({ vehicleType: 'Trottinette électrique' });
   });
 
+  it('insertQuote honors an explicit caller-supplied id (QUOTE.REQUESTED correlation)', async () => {
+    // Regression (2026-07-02): quote.request generates payload.quoteId and must
+    // insert the row under that exact id, or every markQuote*(payload.quoteId)
+    // downstream misses the row ("no quote with id=…").
+    const { customerId, leadId } = await seedCustomerAndLead();
+    const explicitId = randomUUID();
+
+    const inserted = await insertQuote(db, {
+      id: explicitId,
+      customerId,
+      leadId,
+      product: 'scooter',
+      productVariant: 'trottinette',
+      sessionId: randomUUID(),
+    });
+
+    expect(inserted.id).toBe(explicitId);
+    const [row] = await db.select().from(quotes).where(eq(quotes.id, explicitId));
+    expect(row).toBeDefined();
+    expect(row!.status).toBe('requested');
+  });
+
   it('markQuoteReady flips status + sets ready_at and pricing fields', async () => {
     const { customerId, leadId } = await seedCustomerAndLead();
     const q = await insertQuote(db, {

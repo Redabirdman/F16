@@ -325,10 +325,49 @@ export class ExtensionClient {
   }
 
   /**
+   * Serialize tab-driving commands — ONE Maxance flow at a time. The
+   * extension drives a single tab in a single Proximéo session; live
+   * 2026-07-02 (Achraf's evening test): a quote.confirm racing an in-flight
+   * quote.preview tore down its content script mid-flow ("message channel
+   * closed" → maxance_extension_forward_failed) AND crossed the server-side
+   * tarification state — the next preview extracted ANOTHER session's
+   * prices (83,71 instead of 66,20 for identical inputs). Queued commands
+   * start their own timeout only once they acquire the tab.
+   */
+  private tabQueue: Promise<void> = Promise.resolve();
+  private tabBusy = false;
+
+  private runExclusive<T>(label: string, fn: () => Promise<T>): Promise<T> {
+    if (this.tabBusy) {
+      logger.info({ label }, 'extension-client: tab busy — command queued');
+    }
+    const run = this.tabQueue.then(async () => {
+      this.tabBusy = true;
+      try {
+        return await fn();
+      } finally {
+        this.tabBusy = false;
+      }
+    });
+    this.tabQueue = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
+  /**
    * Send a Command and await the matching Response. Throws
    * ExtensionClientError on timeout or if no extension is connected.
+   * Everything except `ping` (pure health probe) is serialized through
+   * the tab lock — see runExclusive above.
    */
   private send<R extends Response>(cmd: Command, timeoutMs?: number): Promise<R> {
+    if (cmd.kind === 'ping') return this.sendNow(cmd, timeoutMs);
+    return this.runExclusive(cmd.kind, () => this.sendNow<R>(cmd, timeoutMs));
+  }
+
+  private sendNow<R extends Response>(cmd: Command, timeoutMs?: number): Promise<R> {
     const sock = this.socket;
     if (!sock || sock.readyState !== WsClient.OPEN) {
       return Promise.reject(

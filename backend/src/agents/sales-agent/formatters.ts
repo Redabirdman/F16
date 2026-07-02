@@ -16,6 +16,12 @@
  * including the format unit tests) are unaffected.
  */
 
+/** Capitalize the first letter — customer rows often store lowercase names
+ *  ("achraf" → "Achraf" in the greeting; live feedback 2026-07-02). */
+function capFirst(s: string): string {
+  return s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
+}
+
 type Formule = 'tiers_illimite' | 'vol_incendie' | 'dommages_tous_accidents';
 
 const FORMULE_LABEL: Record<Formule, string> = {
@@ -64,7 +70,7 @@ export function formatQuotePreviewMessage(opts: {
   formulePricing?: FormulePricingLine[];
   addOns?: AddOnPricingInfo;
 }): string {
-  const greeting = opts.firstName ? `Bonjour ${opts.firstName},` : 'Bonjour,';
+  const greeting = opts.firstName ? `Bonjour ${capFirst(opts.firstName)},` : 'Bonjour,';
   const refLine = `(réf #${opts.quoteId.slice(0, 8)})`;
 
   // Rich path — Achraf's script. Requires at least one per-formule monthly.
@@ -156,7 +162,7 @@ export function formatQuoteReadyMessage(opts: {
   devisNumber: string;
   quoteId: string;
 }): string {
-  const greeting = opts.firstName ? `Bonjour ${opts.firstName},` : 'Bonjour,';
+  const greeting = opts.firstName ? `Bonjour ${capFirst(opts.firstName)},` : 'Bonjour,';
   return [
     greeting,
     '',
@@ -175,7 +181,7 @@ export function formatQuoteReadyMessage(opts: {
  * The real diagnostics are in the HUMAN_ACTION the handler also creates.
  */
 export function formatQuoteFailedMessage(opts: { firstName?: string; quoteId: string }): string {
-  const greeting = opts.firstName ? `Bonjour ${opts.firstName},` : 'Bonjour,';
+  const greeting = opts.firstName ? `Bonjour ${capFirst(opts.firstName)},` : 'Bonjour,';
   return [
     greeting,
     '',
@@ -202,7 +208,7 @@ export function formatSubscriptionReadyMessage(opts: {
   paymentLinkUrl: string | null;
   quoteId: string;
 }): string {
-  const greeting = opts.firstName ? `Bonjour ${opts.firstName},` : 'Bonjour,';
+  const greeting = opts.firstName ? `Bonjour ${capFirst(opts.firstName)},` : 'Bonjour,';
   const lines: string[] = [greeting, '', 'Votre souscription est presque finalisée. 🎉', ''];
 
   // Compliant frais framing — honoraires d'accompagnement, never "frais de
@@ -241,7 +247,7 @@ export function formatSubscriptionFailedMessage(opts: {
   firstName?: string;
   quoteId: string;
 }): string {
-  const greeting = opts.firstName ? `Bonjour ${opts.firstName},` : 'Bonjour,';
+  const greeting = opts.firstName ? `Bonjour ${capFirst(opts.firstName)},` : 'Bonjour,';
   return [
     greeting,
     '',

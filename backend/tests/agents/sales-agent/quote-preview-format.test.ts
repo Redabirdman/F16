@@ -53,6 +53,16 @@ describe('formatQuotePreviewMessage', () => {
     expect(out).not.toContain('Annuel :');
   });
 
+  it('capitalizes a lowercase firstName in the greeting (live 2026-07-02)', () => {
+    const out = formatQuotePreviewMessage({
+      firstName: 'achraf',
+      monthly: 6.51,
+      formule: 'tiers_illimite',
+      quoteId: 'aaaaaaaa-bbbb-4ccc-dddd-eeeeeeeeeeee',
+    });
+    expect(out.startsWith('Bonjour Achraf,')).toBe(true);
+  });
+
   it('uses generic greeting when firstName is empty', () => {
     const out = formatQuotePreviewMessage({
       firstName: '',

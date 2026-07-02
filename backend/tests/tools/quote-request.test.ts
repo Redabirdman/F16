@@ -10,11 +10,29 @@
  *      is covered by the integration test in tests/tools/builtins.test.ts
  *      when DB+Redis are available.
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi, beforeEach } from 'vitest';
+
+// --- Mocks (must be declared before importing the module under test) -------
+// The handler-correlation tests below run the real handler with the DB insert
+// and dispatcher mocked. Both mocked modules export exactly the one function
+// the builtins consume (verified: every builtin imports only `sendMessage`
+// from the dispatcher; only quote-request imports from the quotes repo).
+
+const insertQuoteMock = vi.fn<(...args: unknown[]) => Promise<unknown>>();
+vi.mock('../../src/db/repositories/quotes.js', () => ({
+  insertQuote: (...args: unknown[]) => insertQuoteMock(...args),
+}));
+
+const sendMessageMock = vi.fn<(...args: unknown[]) => Promise<unknown>>();
+vi.mock('../../src/messaging/dispatcher.js', () => ({
+  sendMessage: (...args: unknown[]) => sendMessageMock(...args),
+}));
+
 import { buildQuoteRequestedPayload } from '../../src/tools/builtins/quote-request.js';
 // Triggers tool registration as a side effect.
 import '../../src/tools/index.js';
 import { getTool } from '../../src/tools/registry.js';
+import type { ToolContext } from '../../src/tools/registry.js';
 
 const CUSTOMER_ID = '11111111-1111-4111-8111-111111111111';
 const LEAD_ID = '22222222-2222-4222-8222-222222222222';
@@ -175,6 +193,62 @@ describe('quote.request — registered tool input schema', () => {
     expect(ok.success).toBe(true);
     const bad = tool!.outputSchema!.safeParse({ quoteId: 'no', queued: true });
     expect(bad.success).toBe(false);
+  });
+});
+
+describe('quote.request — handler quoteId ↔ quotes.id correlation', () => {
+  const tool = getTool('quote.request')!;
+
+  /** ctx.db double: each select() consumes the next result set in `queue`
+   *  (1st = customer sanity check, 2nd = lead sanity check). */
+  function makeDbSelectQueue(queue: unknown[][]): ToolContext['db'] {
+    let i = 0;
+    return {
+      select: () => {
+        const rows = queue[i++] ?? [];
+        const chain = {
+          from: () => chain,
+          where: () => chain,
+          limit: () => Promise.resolve(rows),
+        };
+        return chain;
+      },
+    } as unknown as ToolContext['db'];
+  }
+
+  beforeEach(() => {
+    insertQuoteMock.mockReset().mockResolvedValue({ id: 'ignored-by-handler' });
+    sendMessageMock.mockReset().mockResolvedValue(undefined);
+  });
+
+  it('inserts the quotes row with id === QUOTE.REQUESTED payload.quoteId === returned quoteId', async () => {
+    // Regression (2026-07-02): the handler generated payload.quoteId but let
+    // the DB defaultRandom its own quotes.id, so every downstream
+    // markQuotePreview/markQuoteReady/markQuoteConfirmed + the subscription
+    // lookup missed the row ("no quote with id=…" in backend.log).
+    const db = makeDbSelectQueue([
+      [{ id: CUSTOMER_ID }],
+      [{ id: LEAD_ID, customerId: CUSTOMER_ID }],
+    ]);
+    const res = (await tool.handler(
+      { db, agentRole: 'sales-agent', agentInstance: 'sales-agent#test' },
+      { customerId: CUSTOMER_ID, leadId: LEAD_ID, formData: validFormData },
+    )) as { quoteId: string };
+
+    expect(sendMessageMock).toHaveBeenCalledTimes(1);
+    const sent = sendMessageMock.mock.calls[0]![1] as {
+      intent: string;
+      payload: { quoteId: string };
+    };
+    expect(sent.intent).toBe('QUOTE.REQUESTED');
+
+    expect(insertQuoteMock).toHaveBeenCalledTimes(1);
+    const insertInput = insertQuoteMock.mock.calls[0]![1] as { id?: string };
+
+    // The single UUID must be shared by all three: the inserted row id, the
+    // intent payload, and the quoteId handed back to the LLM.
+    expect(insertInput.id).toBe(sent.payload.quoteId);
+    expect(res.quoteId).toBe(sent.payload.quoteId);
   });
 });
 

@@ -167,6 +167,9 @@ registerTool({
     const payload = buildQuoteRequestedPayload(input);
     const sessionId = randomUUID();
     await insertQuote(ctx.db, {
+      // The row id IS the payload's quoteId — the operator's markQuote* calls
+      // and the subscription flow all correlate by payload.quoteId.
+      id: payload.quoteId,
       customerId: input.customerId,
       leadId: input.leadId,
       product: payload.product,

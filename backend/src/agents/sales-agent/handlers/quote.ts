@@ -107,6 +107,23 @@ export async function handleQuotePreviewReady(
     ...(payload.addOns !== undefined ? { addOns: payload.addOns } : {}),
   });
 
+  // Cross-quote dedup (live 2026-07-02, Achraf's test): a comparison re-run
+  // produces a SECOND preview with identical pricing — re-sending the full
+  // menu reads as a glitch to the customer. If a recent outbound turn
+  // carries the exact same body (ignoring the per-quote réf line), skip.
+  const stripRef = (s: string): string => s.replace(/\n?\(réf #[^)]*\)\s*$/u, '').trim();
+  const draftBody = stripRef(draft);
+  const duplicateMenu = recentTurns.some(
+    (t) => t.direction === 'outbound' && stripRef(t.content ?? '') === draftBody,
+  );
+  if (duplicateMenu) {
+    logger.info(
+      { leadId: lead.id, quoteId: payload.quoteId, instanceId: ctx.instanceId },
+      'sales-agent: identical price menu recently sent — skipping duplicate',
+    );
+    return { ok: true, result: { skipped: 'duplicate-menu', quoteId: payload.quoteId } };
+  }
+
   const send = await sendViaChannel({
     db: ctx.db,
     customerId: customer.id,

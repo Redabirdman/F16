@@ -462,6 +462,7 @@ async function configureGarantiesAndExtract(cmd: QuotePreviewCommand): Promise<{
 
   const commissionPct = clampCommissionPct(params.commissionPct ?? 22);
   const formulePricing: FormulePricing[] = [];
+  let prevRowKey = '';
   for (const f of ordered) {
     const cfgResult = await applyGarantiesConfig({
       commissionPct,
@@ -476,7 +477,21 @@ async function configureGarantiesAndExtract(cmd: QuotePreviewCommand): Promise<{
       label: `await_formule_price:${f}`,
       timeoutMs: 20_000,
     });
-    const row = extractComptantBreakdown();
+    // The fractionnement row re-renders ASYNCHRONOUSLY after the formule
+    // switch — reading too early returns an EMPTY row (live 2026-07-02:
+    // vol_incendie's terme suivant was missing from Achraf's first menu) or
+    // the PREVIOUS formule's numbers. Poll until the row is present AND
+    // differs from the previous formule's row; accept whatever is there
+    // after the timeout (best-effort — an omitted line beats a wrong one).
+    const row = await waitFor<ReturnType<typeof extractComptantBreakdown>>(
+      () => {
+        const r = extractComptantBreakdown();
+        if (r.termeSuivantEur === undefined) return null;
+        return JSON.stringify(r) !== prevRowKey ? r : null;
+      },
+      { label: `await_fractionnement_row:${f}`, timeoutMs: 8_000 },
+    ).catch(() => extractComptantBreakdown());
+    prevRowKey = JSON.stringify(row);
     formulePricing.push({
       formule: f,
       ...(Number.isFinite(annualPremium) ? { annualPremiumEur: annualPremium } : {}),
