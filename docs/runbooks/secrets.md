@@ -84,6 +84,26 @@ Rotation cadence is guidance, not enforced. Group keys travel together.
 > fallback by `loadSmtpConfigFromEnv`, but the live config uses `SMTP_*`.
 > Deliverability DNS on Cloudflare zone `assuryalconseil.fr`: SPF includes
 > `_spf.google.com`; DKIM `google._domainkey` published; DMARC `p=none`.
+>
+> ⚠️ **App-Password gotchas (2026-07-02 incident):** Google silently revokes
+> App Passwords on account security events — SMTP then fails `535` and IMAP
+> says "Invalid credentials" even though the value is unchanged. Regenerate at
+> myaccount.google.com/apppasswords and store via `scripts/update-env.ts`
+> (`SETENV_SMTP_PASS=…`). A first IMAP login from a new machine additionally
+> triggers a Google "new sign-in" block until the user approves the alert.
+
+| Key                     | Consumer                                 | Source                                                        | Holder | Rotation |
+| ----------------------- | ---------------------------------------- | ------------------------------------------------------------- | ------ | -------- |
+| `F16_DEVIS_COURRIER_TO` | maxance-operator (devis courrier target) | static — `contact@assuryalconseil.fr`                         | —      | n/a      |
+| `F16_DEVIS_INBOX`       | devis-inbox IMAP watcher gate (`1`=on)   | static                                                        | —      | n/a      |
+| `F16_DEVIS_IMAP_HOST`   | devis-inbox watcher (optional)           | default `imap.gmail.com`; IMAP auth = `SMTP_USER`/`SMTP_PASS` | —      | n/a      |
+
+> The devis inbox-relay (2026-07-02): Maxance emails the devis PDF to
+> `F16_DEVIS_COURRIER_TO`; the watcher (`src/channels/devis-inbox.ts`) sweeps
+> INBOX + `[Gmail]/Spam` and the sales-agent re-delivers the PDF to the
+> customer via WhatsApp + branded email. The mailbox doubles as the ACPR
+> record copy. Recommended: a Workspace admin approved-sender rule for the
+> Maxance sender domain so devis mail stops landing in spam.
 
 ### Maxance (broker — Chrome extension driver)
 
