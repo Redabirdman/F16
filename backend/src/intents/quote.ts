@@ -20,6 +20,9 @@ export const QuoteReadyPayload = registerIntent(
   z.object({
     quoteId: z.string().uuid(),
     customerId: z.string().uuid(),
+    /** 2026-07-02: explicit lead — the sales-agent SINGLETON has no per-lead
+     *  meta and the envelope correlationId is the quoteId. */
+    leadId: z.string().uuid().optional(),
     monthlyPremium: z.number().nonnegative(),
     comptantDue: z.number().nonnegative(),
     devisNumber: z.string(),
@@ -85,6 +88,9 @@ export const QuotePreviewReadyPayload = registerIntent(
   z.object({
     quoteId: z.string().uuid(),
     customerId: z.string().uuid(),
+    /** 2026-07-02: explicit lead — the sales-agent SINGLETON has no per-lead
+     *  meta and the envelope correlationId is the quoteId. */
+    leadId: z.string().uuid().optional(),
     /** Pricing in EUR. At least one of monthly/annual is set; both may be set. */
     pricePreviewEur: z.object({
       monthly: z.number().nonnegative().optional(),

@@ -127,17 +127,47 @@ export function startDevisInboxWatcher(deps: WatcherDeps): DevisInboxWatcher | n
   };
 }
 
-/** One UNSEEN sweep: process devis emails, leave everything else untouched. */
+/**
+ * Mailboxes swept each poll. Gmail routinely spam-folders Maxance's relay
+ * (live-observed) until a Workspace admin whitelist exists, so the Spam
+ * folder is swept too — the DR-subject match keeps this surgical.
+ */
+const MAILBOXES = ['INBOX', '[Gmail]/Spam'] as const;
+
+/** One UNSEEN sweep across the watched mailboxes. */
 async function scanOnce(client: ImapFlow, db: Database): Promise<void> {
-  const lock = await client.getMailboxLock('INBOX');
+  for (const mailbox of MAILBOXES) {
+    try {
+      await scanMailbox(client, db, mailbox);
+    } catch (err) {
+      // A missing/renamed folder (locale variants of Spam) must not kill the
+      // INBOX sweep — log and continue.
+      logger.warn(
+        { mailbox, err: err instanceof Error ? err.message : String(err) },
+        'devis-inbox: mailbox sweep failed',
+      );
+    }
+  }
+}
+
+/** UNSEEN sweep of one mailbox: process devis emails, leave the rest alone. */
+async function scanMailbox(client: ImapFlow, db: Database, mailbox: string): Promise<void> {
+  logger.debug({ mailbox }, 'devis-inbox: sweep start');
+  const lock = await client.getMailboxLock(mailbox);
   try {
     const unseen = await client.search({ seen: false });
+    const count = Array.isArray(unseen) ? unseen.length : 0;
+    logger.info({ mailbox, unseen: count }, 'devis-inbox: sweep');
     if (!Array.isArray(unseen) || unseen.length === 0) return;
 
     for (const uid of unseen) {
       // Cheap envelope pass first — only download full sources for likely hits.
       const meta = await client.fetchOne(String(uid), { envelope: true });
       const subject = (typeof meta === 'object' && meta?.envelope?.subject) || '';
+      logger.debug(
+        { mailbox, seq: uid, metaType: typeof meta, subject: subject.slice(0, 60) },
+        'devis-inbox: envelope',
+      );
       const drMatch = DR_RE.exec(subject);
       if (!drMatch?.[1]) continue;
       const devisNumber = drMatch[1];
@@ -177,7 +207,10 @@ async function scanOnce(client: ImapFlow, db: Database): Promise<void> {
 
       // Mark processed so the shared inbox doesn't re-trigger; only OUR hits.
       await client.messageFlagsAdd(String(uid), ['\\Seen']);
-      logger.info({ devisNumber, pdfPath, bytes: pdf.content.length }, 'devis-inbox: PDF relayed');
+      logger.info(
+        { devisNumber, pdfPath, mailbox, bytes: pdf.content.length },
+        'devis-inbox: PDF relayed',
+      );
     }
   } finally {
     lock.release();

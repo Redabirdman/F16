@@ -41,6 +41,7 @@ export async function handleQuotePreviewReady(
   const payload = envelope.payload as {
     quoteId: string;
     customerId: string;
+    leadId?: string;
     pricePreviewEur: { monthly?: number; annual?: number };
     formule?: 'tiers_illimite' | 'vol_incendie' | 'dommages_tous_accidents';
     finalUrl: string;
@@ -48,7 +49,10 @@ export async function handleQuotePreviewReady(
     durationMs: number;
   };
 
-  const leadId = ctx.leadIdFromEnvelope(envelope);
+  // Prefer the explicit payload.leadId — the sales-agent is a SINGLETON (no
+  // per-lead meta) and the envelope correlationId is the quoteId, so the
+  // fallback heuristic resolves the wrong id (2026-07-02 pipeline verify).
+  const leadId = payload.leadId ?? ctx.leadIdFromEnvelope(envelope);
   if (!leadId) return { ok: false, error: 'no leadId available' };
 
   // Pick the channel the customer last used (or the most recent outbound
@@ -147,13 +151,15 @@ export async function handleQuoteReady(
   const payload = envelope.payload as {
     quoteId: string;
     customerId: string;
+    leadId?: string;
     monthlyPremium: number;
     comptantDue: number;
     devisNumber: string;
     pdfSentTo: string;
   };
 
-  const leadId = ctx.leadIdFromEnvelope(envelope);
+  // Prefer the explicit payload.leadId (singleton — see handleQuotePreviewReady).
+  const leadId = payload.leadId ?? ctx.leadIdFromEnvelope(envelope);
   if (!leadId) return { ok: false, error: 'no leadId available' };
 
   const recentTurns = await listTurns(ctx.db, {

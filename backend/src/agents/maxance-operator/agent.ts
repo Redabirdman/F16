@@ -423,6 +423,7 @@ export class MaxanceOperatorAgent extends BaseAgent {
         payload: {
           quoteId: payload.quoteId,
           customerId: payload.customerId,
+          leadId: payload.leadId,
           monthlyPremium: 0,
           comptantDue: 0,
           devisNumber: confirm.devisNumber,
@@ -617,6 +618,7 @@ export class MaxanceOperatorAgent extends BaseAgent {
         payload: {
           quoteId: payload.quoteId,
           customerId: payload.customerId,
+          leadId: payload.leadId,
           pricePreviewEur: {
             ...(preview.pricePreviewEur.monthly !== undefined
               ? { monthly: preview.pricePreviewEur.monthly }
