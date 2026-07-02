@@ -1,1 +1,4 @@
 .creatives/
+
+# runtime artifacts (logs, relayed devis PDFs) — never commit
+var/
