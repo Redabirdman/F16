@@ -49,7 +49,12 @@ export interface WahaSendImageInput {
 
 export interface WahaSendDocumentInput {
   chatId: string;
-  url: string;
+  /** Public URL WAHA fetches. Provide this OR `data` (base64). */
+  url?: string;
+  /** Base64-encoded document bytes (for local files cloud WAHA can't fetch). */
+  data?: string;
+  /** MIME type when sending `data`. Default 'application/pdf'. */
+  mimetype?: string;
   filename: string;
   caption?: string;
 }
@@ -170,10 +175,20 @@ export class WahaClient {
   }
 
   async sendDocument(input: WahaSendDocumentInput): Promise<WahaSendResponse> {
+    // Same url-or-base64 duality as sendImage: cloud WAHA can't fetch local
+    // paths, so callers with on-disk files (e.g. the devis-inbox relay) pass
+    // base64 `data` + `mimetype` instead of a URL.
+    const file = input.data
+      ? {
+          mimetype: input.mimetype ?? 'application/pdf',
+          filename: input.filename,
+          data: input.data,
+        }
+      : { url: input.url, filename: input.filename };
     return this.request<WahaSendResponse>('/api/sendFile', {
       session: this.session,
       chatId: input.chatId,
-      file: { url: input.url, filename: input.filename },
+      file,
       ...(input.caption ? { caption: input.caption } : {}),
     });
   }

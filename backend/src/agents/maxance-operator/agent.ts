@@ -383,9 +383,18 @@ export class MaxanceOperatorAgent extends BaseAgent {
     }
 
     const dryRun = process.env.MAXANCE_CONFIRM_FORCE_DRYRUN === '1';
+    // 2026-07-02 inbox-relay delivery: when set (contact@assuryalconseil.fr),
+    // Maxance emails the devis PDF to OUR Workspace inbox instead of the
+    // customer; the devis-inbox watcher then re-delivers it to the customer
+    // via WhatsApp + branded Assuryal email. Maxance's own relay is silently
+    // dropped by gmail.com mailboxes, so direct-to-customer is unreliable.
+    const courrierTo = process.env.F16_DEVIS_COURRIER_TO;
     let confirm;
     try {
-      confirm = await client.confirmQuote(SESSION_NAME, payload.subscriber, { dryRun });
+      confirm = await client.confirmQuote(SESSION_NAME, payload.subscriber, {
+        dryRun,
+        ...(courrierTo ? { courrierTo } : {}),
+      });
     } catch (err) {
       const code = readErrorCode(err) ?? 'confirm_unknown';
       const msg = err instanceof Error ? err.message : String(err);

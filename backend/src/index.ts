@@ -347,6 +347,13 @@ export async function start(port: number = Number(process.env.PORT ?? 3001)): Pr
   const { registerConfiguredChannels } = await import('./channels/bootstrap.js');
   await registerConfiguredChannels();
 
+  // 2026-07-02 inbox-relay delivery: watch the Assuryal Workspace inbox for
+  // Maxance devis PDFs (redirected there via F16_DEVIS_COURRIER_TO) and emit
+  // DEVIS.PDF_RECEIVED so the sales-agent re-delivers to the customer via
+  // WhatsApp + branded email. Env-gated (F16_DEVIS_INBOX=1) — no-op otherwise.
+  const { startDevisInboxWatcher } = await import('./channels/devis-inbox.js');
+  const devisInbox = startDevisInboxWatcher({ db: db() });
+
   // Boot every backend worker / agent (env-gated). Closes the deployment
   // loop for hubspot-sync, reporter-agent, maxance-operator, the sales
   // spawn orchestrator, and lead-scorer. Without this call, the routes
@@ -360,6 +367,7 @@ export async function start(port: number = Number(process.env.PORT ?? 3001)): Pr
 
   const shutdown = (signal: NodeJS.Signals): void => {
     logger.info({ signal }, 'shutting down');
+    if (devisInbox) void devisInbox.stop().catch(() => undefined);
     // Stop workers first (drains in-flight jobs), close the realtime
     // listener (frees its dedicated pg connection), then the HTTP server.
     void workerSet

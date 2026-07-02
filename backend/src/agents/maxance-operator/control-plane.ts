@@ -86,7 +86,13 @@ const SubscriberSchema = z.object({
 });
 
 const ConfirmBodySchema = SubscriberSchema.and(
-  z.object({ _dryRun: z.boolean().optional(), _exerciseCourrier: z.boolean().optional() }),
+  z.object({
+    _dryRun: z.boolean().optional(),
+    _exerciseCourrier: z.boolean().optional(),
+    /** Redirect the Maxance courrier email (devis PDF) to this address —
+     *  2026-07-02 inbox-relay delivery test hook. */
+    _courrierTo: z.string().email().optional(),
+  }),
 );
 
 // M8.T7 B2 — devis.resume body. devisNumber required; the Garanties closing
@@ -264,6 +270,7 @@ export function buildExtensionControlPlane(opts: BuildControlPlaneOptions): Hono
       const res = await opts.client.confirmQuote('maxance-default', toSubscriber(parse.data), {
         dryRun,
         exerciseCourrier,
+        ...(parse.data._courrierTo !== undefined ? { courrierTo: parse.data._courrierTo } : {}),
       });
       return c.json(res, 200);
     } catch (err) {

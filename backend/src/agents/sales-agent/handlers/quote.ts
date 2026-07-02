@@ -9,10 +9,12 @@
  * SalesAgent it needs) + the envelope, so the agent class stays a thin
  * dispatcher.
  */
+import { readFile } from 'node:fs/promises';
 import type { AgentMessageEnvelope, MessageHandlerResult } from '../../../messaging/dispatcher.js';
 import { logger } from '../../../logger.js';
 import { decryptPII } from '../../../db/crypto.js';
 import { listTurns } from '../../../db/repositories/conversation-turns.js';
+import { getQuoteByDevisNumber } from '../../../db/repositories/quotes.js';
 import { sendViaChannel } from '../../../channels/send.js';
 import type { ChannelId } from '../../../channels/types.js';
 import * as humanActions from '../../../db/repositories/human-actions.js';
@@ -331,4 +333,117 @@ export async function handleQuoteFailed(
       quoteId: payload.quoteId,
     },
   };
+}
+
+/**
+ * DEVIS.PDF_RECEIVED — the devis-inbox watcher relayed Maxance's devis PDF
+ * (2026-07-02 inbox-relay delivery). Re-deliver it to the customer on BOTH
+ * channels: WhatsApp (document in the live conversation) + branded Assuryal
+ * email. Maxance's own relay never reaches gmail.com mailboxes, so this is
+ * the only reliable customer-facing delivery path.
+ *
+ * Idempotency: the visible message embeds `Réf. <devisNumber>`; if a recent
+ * outbound turn already carries it, the PDF was delivered (worker restarts /
+ * duplicate emails re-emit the intent).
+ */
+export async function handleDevisPdfReceived(
+  ctx: SalesHandlerCtx,
+  envelope: AgentMessageEnvelope,
+): Promise<MessageHandlerResult> {
+  const payload = envelope.payload as {
+    devisNumber: string;
+    pdfPath: string;
+    filename: string;
+    from?: string;
+  };
+
+  const quote = await getQuoteByDevisNumber(ctx.db, payload.devisNumber);
+  if (!quote || !quote.leadId) {
+    // Harness/manual test devis have no quote row — benign, log and move on.
+    logger.warn(
+      { devisNumber: payload.devisNumber, hasQuote: Boolean(quote) },
+      'sales-agent: devis PDF received but no quote/lead to deliver to',
+    );
+    return { ok: true, result: { skipped: 'quote-not-found', devisNumber: payload.devisNumber } };
+  }
+  const leadId = quote.leadId;
+
+  const marker = `Réf. ${payload.devisNumber}`;
+  const recentTurns = await listTurns(ctx.db, {
+    customerId: quote.customerId,
+    leadId,
+    limit: 10,
+  });
+  if (recentTurns.some((t) => t.direction === 'outbound' && (t.content ?? '').includes(marker))) {
+    return { ok: true, result: { skipped: 'already-delivered', devisNumber: payload.devisNumber } };
+  }
+
+  const pdfBytes = await readFile(payload.pdfPath);
+  const pdfDataUri = `data:application/pdf;base64,${pdfBytes.toString('base64')}`;
+  const documentBlock = {
+    type: 'document' as const,
+    url: pdfDataUri,
+    filename: `Devis-Assuryal-${payload.devisNumber}.pdf`,
+    mimeType: 'application/pdf',
+  };
+  const messageText =
+    `Voici votre devis Assuryal en pièce jointe (${marker}). ` +
+    `N'hésitez pas à revenir vers nous pour toute question — et si le devis vous convient, ` +
+    `nous pouvons finaliser la souscription ensemble.`;
+
+  const deliveries: Record<string, string> = {};
+  // WhatsApp first (the live conversation), then email — send on every
+  // channel the customer has an address for; a failure on one channel must
+  // not block the other.
+  for (const channel of ['whatsapp', 'email'] as const) {
+    try {
+      const { customer, contactRef } = await ctx.resolveCustomerAndContact(leadId, channel);
+      if (!contactRef) continue;
+      const send = await sendViaChannel({
+        db: ctx.db,
+        customerId: customer.id,
+        leadId,
+        to: contactRef,
+        body: [{ type: 'text', text: messageText }, documentBlock],
+        agentRole: ctx.role,
+        agentInstance: ctx.instanceId,
+        correlationId: quote.id,
+      });
+      deliveries[channel] = send.receipt.externalId;
+    } catch (err) {
+      logger.error(
+        {
+          devisNumber: payload.devisNumber,
+          leadId,
+          channel,
+          err: err instanceof Error ? err.message : String(err),
+        },
+        'sales-agent: devis PDF delivery failed on channel',
+      );
+    }
+  }
+
+  if (Object.keys(deliveries).length === 0) {
+    // Neither channel worked — escalate so a human can send it manually.
+    await humanActions.createAction(ctx.db, {
+      createdByAgent: `${ctx.role}#${ctx.instanceId}`,
+      correlationId: quote.id,
+      intent: 'DEVIS_DELIVERY_FAILED',
+      severity: 2,
+      summary:
+        `Devis ${payload.devisNumber} reçu de Maxance mais impossible à livrer au client ` +
+        `(lead ${leadId}). PDF : ${payload.pdfPath}. Envoyer manuellement.`,
+      options: [
+        { id: 'sent_manually', label: 'Envoyé manuellement', kind: 'approve' },
+        { id: 'abandon', label: 'Abandonner', kind: 'reject' },
+      ],
+    });
+    return { ok: false, error: `devis_delivery_failed:${payload.devisNumber}` };
+  }
+
+  logger.info(
+    { devisNumber: payload.devisNumber, leadId, deliveries },
+    'sales-agent: devis PDF delivered to customer',
+  );
+  return { ok: true, result: { devisNumber: payload.devisNumber, deliveries } };
 }

@@ -410,3 +410,21 @@ export async function getLatestQuoteForLead(
     .limit(1);
   return row ?? null;
 }
+
+/**
+ * Newest quote carrying the given Maxance devis number, or null. Used by the
+ * devis-inbox relay (2026-07-02): the inbound PDF email only carries the DR
+ * number in its subject, so this is the join back to customer/lead.
+ */
+export async function getQuoteByDevisNumber(
+  db: Database,
+  devisNumber: string,
+): Promise<typeof quotes.$inferSelect | null> {
+  const [row] = await db
+    .select()
+    .from(quotes)
+    .where(eq(quotes.maxanceDevisNumber, devisNumber))
+    .orderBy(desc(quotes.requestedAt))
+    .limit(1);
+  return row ?? null;
+}

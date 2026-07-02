@@ -50,7 +50,12 @@ import { generateSalesReply, resolveSalesContext } from './reply-core.js';
 import { setLeadStatus } from '../../db/repositories/leads.js';
 // QUOTE.* / SUBSCRIPTION.* intent handlers (extracted to keep this class thin).
 import type { SalesHandlerCtx } from './handlers/context.js';
-import { handleQuotePreviewReady, handleQuoteReady, handleQuoteFailed } from './handlers/quote.js';
+import {
+  handleQuotePreviewReady,
+  handleQuoteReady,
+  handleQuoteFailed,
+  handleDevisPdfReceived,
+} from './handlers/quote.js';
 import { handleSubscriptionReady, handleSubscriptionFailed } from './handlers/subscription.js';
 
 const MAX_HISTORY_TURNS = 10;
@@ -69,6 +74,8 @@ export class SalesAgent extends BaseAgent {
           return await handleQuoteReady(this.handlerCtx(), envelope);
         case 'QUOTE.FAILED':
           return await handleQuoteFailed(this.handlerCtx(), envelope);
+        case 'DEVIS.PDF_RECEIVED':
+          return await handleDevisPdfReceived(this.handlerCtx(), envelope);
         case 'SUBSCRIPTION.READY':
           return await handleSubscriptionReady(this.handlerCtx(), envelope);
         case 'SUBSCRIPTION.FAILED':

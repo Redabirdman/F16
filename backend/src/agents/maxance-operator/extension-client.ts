@@ -459,7 +459,14 @@ export class ExtensionClient {
   async confirmQuote(
     _sessionName: string,
     subscriber: ExtensionSubscriberInfo,
-    opts: { dryRun?: boolean; timeoutMs?: number; exerciseCourrier?: boolean } = {},
+    opts: {
+      dryRun?: boolean;
+      timeoutMs?: number;
+      exerciseCourrier?: boolean;
+      /** Redirect the Maxance courrier email (devis PDF) to this address
+       *  instead of the subscriber — 2026-07-02 inbox-relay delivery. */
+      courrierTo?: string;
+    } = {},
   ): Promise<ConfirmQuoteResult> {
     void _sessionName;
     const dryRun = opts.dryRun ?? true;
@@ -482,6 +489,7 @@ export class ExtensionClient {
       },
       dryRun,
       ...(opts.exerciseCourrier !== undefined ? { exerciseCourrier: opts.exerciseCourrier } : {}),
+      ...(opts.courrierTo !== undefined ? { courrierTo: opts.courrierTo } : {}),
       ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
     };
     const resp = await this.send(cmd, opts.timeoutMs);

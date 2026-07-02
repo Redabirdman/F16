@@ -120,6 +120,12 @@ export const QuoteFailedPayload = registerIntent(
   z.object({
     quoteId: z.string().uuid(),
     customerId: z.string().uuid(),
+    /**
+     * 2026-07-02: carried explicitly because the sales-agent is a SINGLETON
+     * (no per-lead meta) and the envelope correlationId is the quoteId — the
+     * handler needs the real lead to notify the customer of the failure.
+     */
+    leadId: z.string().uuid().optional(),
     /** Tagged failure code from quote.ts (e.g. `maxance_quote_unexpected_entry_page:unknown`). */
     errorCode: z.string(),
     /** Optional human-readable hint for the operator UI. Never echo to customer. */
@@ -141,6 +147,25 @@ export const QuoteDeliveredPayload = registerIntent(
   z.object({
     quoteId: z.string().uuid(),
     channel: ChannelEnum,
+  }),
+);
+
+/**
+ * DEVIS.PDF_RECEIVED — emitted by the devis-inbox watcher (2026-07-02
+ * inbox-relay delivery) when Maxance's devis email lands in the Assuryal
+ * Workspace inbox. The Sales Agent handles it: looks the quote up by
+ * devisNumber and re-delivers the PDF to the customer via WhatsApp + a
+ * branded Assuryal email. pdfPath is a local absolute path under
+ * backend/var/devis/ (this PC is prod — single-process, shared disk).
+ */
+export const DevisPdfReceivedPayload = registerIntent(
+  'DEVIS.PDF_RECEIVED',
+  z.object({
+    devisNumber: z.string().min(3),
+    pdfPath: z.string().min(1),
+    filename: z.string().min(1),
+    /** Sender address of the inbound email — audit only. */
+    from: z.string().optional(),
   }),
 );
 

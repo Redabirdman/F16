@@ -79,6 +79,9 @@ const INTENT_TO_QUEUE: Record<string, string> = {
   'QUOTE.DELIVERED': 'quote',
   'QUOTE.ACCEPTED': 'quote',
   'QUOTE.REJECTED': 'quote',
+  // 2026-07-02 inbox-relay: devis PDF landed in the Assuryal Workspace inbox;
+  // the sales-agent re-delivers it to the customer (WhatsApp + branded email).
+  'DEVIS.PDF_RECEIVED': 'quote',
   'PAYMENT.PENDING_HUMAN': 'quote',
   'CONTRACT.PENDING_HUMAN': 'quote',
   'CONTRACT.ISSUED': 'quote',

@@ -43,6 +43,7 @@ const KNOWN_INTENTS: ReadonlyArray<[string, z.ZodTypeAny]> = [
   ['QUOTE.DELIVERED', intents.QuoteDeliveredPayload],
   ['QUOTE.ACCEPTED', intents.QuoteAcceptedPayload],
   ['QUOTE.REJECTED', intents.QuoteRejectedPayload],
+  ['DEVIS.PDF_RECEIVED', intents.DevisPdfReceivedPayload],
   ['PAYMENT.PENDING_HUMAN', intents.PaymentPendingHumanPayload],
   ['CONTRACT.PENDING_HUMAN', intents.ContractPendingHumanPayload],
   ['CONTRACT.ISSUED', intents.ContractIssuedPayload],

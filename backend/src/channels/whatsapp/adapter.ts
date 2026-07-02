@@ -94,14 +94,27 @@ export class WhatsAppAdapter implements ConversationChannel {
           url: block.url,
           ...(block.caption ? { caption: block.caption } : {}),
         });
-      case 'document':
+      case 'document': {
         // F16's `document` ContentBlock carries no caption (see channels/types.ts);
         // sendDocument's optional caption field stays unset.
+        // data: URIs (local files — e.g. the devis-inbox PDF relay) are
+        // decoded to WAHA's base64 `data` field; cloud WAHA can't fetch
+        // anything that isn't a public URL.
+        const dataUri = /^data:([^;,]+);base64,(.+)$/.exec(block.url);
+        if (dataUri?.[1] && dataUri[2]) {
+          return this.client.sendDocument({
+            chatId,
+            data: dataUri[2],
+            mimetype: dataUri[1],
+            filename: block.filename,
+          });
+        }
         return this.client.sendDocument({
           chatId,
           url: block.url,
           filename: block.filename,
         });
+      }
       case 'audio':
       case 'video':
         // WAHA supports these via sendFile; use a generic filename hint.
