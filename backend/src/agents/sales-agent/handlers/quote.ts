@@ -240,12 +240,17 @@ export async function handleQuoteFailed(
   const payload = envelope.payload as {
     quoteId: string;
     customerId: string;
+    leadId?: string;
     errorCode: string;
     detail?: string;
     screenshots: { step: string; url: string }[];
   };
 
-  const leadId = ctx.leadIdFromEnvelope(envelope);
+  // Prefer the explicit payload.leadId (the operator now carries it — the
+  // sales-agent singleton has no per-lead meta, and the envelope's
+  // correlationId is the quoteId, not a lead). Fall back to the envelope
+  // heuristic only when an older emitter omits it.
+  const leadId = payload.leadId ?? ctx.leadIdFromEnvelope(envelope);
   if (!leadId) return { ok: false, error: 'no leadId available' };
 
   // Pick the customer's most-recent channel, same heuristic as PREVIEW_READY.

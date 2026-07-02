@@ -745,9 +745,12 @@ export class MaxanceOperatorAgent extends BaseAgent {
   private async emitFailed(
     quoteId: string,
     customerId: string,
-    // Retained for call-site symmetry; QUOTE.FAILED now targets the sales-agent
-    // singleton by role (no per-lead instance), so the leadId is unused here.
-    _leadId: string,
+    // The sales-agent is now a SINGLETON (no per-lead instance carrying
+    // meta.leadId), so `leadIdFromEnvelope` falls back to correlationId —
+    // which here is the quoteId, NOT a lead. Carry the leadId in the payload
+    // so handleQuoteFailed resolves the right lead instead of throwing
+    // "Lead not found" (2026-07-02 fix; mirrors QUOTE.REQUESTED's payload).
+    leadId: string,
     errorCode: string,
     detail?: string,
   ): Promise<void> {
@@ -761,6 +764,7 @@ export class MaxanceOperatorAgent extends BaseAgent {
         payload: {
           quoteId,
           customerId,
+          leadId,
           errorCode,
           ...(detail ? { detail } : {}),
           screenshots: [],
