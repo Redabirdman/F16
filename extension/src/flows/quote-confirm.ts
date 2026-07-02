@@ -60,23 +60,76 @@ import {
 } from '../wire.js';
 import { reportProgress } from './progress.js';
 import { CONTACT_DUPLICATE_ERROR } from './contact-duplicate.js';
+import type {
+  CourrierStagedSendRequest,
+  CourrierStagedSendResponse,
+  RepriseSearchRequest,
+  RepriseSearchResponse,
+} from '../content-protocol.js';
 import type { z } from 'zod';
 
 type QuoteConfirmCommand = z.infer<typeof QuoteConfirmCommandSchema>;
 
 const SETTLE_MS = 800;
 
-/** devisNumber pattern from M8.T6 live: DRxxxxxxxxxx (10-digit). */
-const DEVIS_NUMBER_REGEX = /\b(DR\d{8,12})\b/;
-
 /**
- * Extract devisNumber from the Edition à imprimer page. The number sits
- * inside the line "Votre devis est enregistré sous le numéro : DRxxxxxxxx".
+ * Extract the devisNumber from the Edition à imprimer page — ANCHORED to the
+ * registration line "Votre devis est enregistré sous le numero : DRxxxxxxxx"
+ * ("numero" renders without the accent; tolerate both).
+ *
+ * 2026-07-02: this was a bare \bDR\d+\b scan of the whole body, which false-
+ * positived on the "Visité récemment : <NAME> (DR…)" box Maxance renders on
+ * EVERY Proximeo page once a devis dossier has been visited — the confirm
+ * flow then misdetected the Garanties tab as the edition page, skipped the
+ * devis creation entirely, and re-sent the previously visited devis.
  */
 function extractDevisNumber(): string | null {
   const text = document.body.innerText ?? '';
-  const m = DEVIS_NUMBER_REGEX.exec(text);
+  const m = /enregistr\S*\s+sous\s+le\s+num[ée]ro\s*:?\s*(DR\d{8,12})\b/i.exec(text);
   return m?.[1] ?? null;
+}
+
+/**
+ * Extract the devisNumber from the "Visualisation du devis" dossier page —
+ * anchored to the "Devis DRxxxxxxxx" line of the Informations générales
+ * block (never the parenthesized "Visité récemment (DR…)" box).
+ */
+function extractVisualisedDevisNumber(): string | null {
+  const text = document.body.innerText ?? '';
+  const m = /\bDevis\s*:?\s*(DR\d{8,12})\b/.exec(text);
+  return m?.[1] ?? null;
+}
+
+/**
+ * Ask the SW to fill + submit the ACCES PORTEFEUILLE search for the devis
+ * (MAIN world) — navigates to "Visualisation du devis", which makes the devis
+ * the session's CURRENT INSTANCE (the courrier system binds letters to it).
+ * Same message the devis-resume flow uses.
+ */
+async function visitDevisDossier(devisNumber: string): Promise<void> {
+  const msg: RepriseSearchRequest = { kind: 'reprise.search-mw', devisNumber };
+  const resp = (await chrome.runtime.sendMessage(msg)) as RepriseSearchResponse | undefined;
+  if (!resp) throw new Error('maxance_confirm_visit_devis_failed:no_response');
+  if (resp.kind !== 'reprise.search.ok') {
+    throw new Error(`maxance_confirm_visit_devis_failed:${resp.error} [${resp.log.join(',')}]`);
+  }
+}
+
+/**
+ * Ask the SW to run the VERIFIED staged send in the Courrier composer
+ * (fill → checkMail → "Mail :" confirm stage → Valider → mail.do check).
+ * The composer popup must already be open (openDevisMotoCourrierUrl).
+ */
+async function courrierStagedSend(to: string, objet: string): Promise<CourrierStagedSendResponse> {
+  const msg: CourrierStagedSendRequest = {
+    kind: 'courrier.staged-send-mw',
+    payload: { to, objet },
+  };
+  const resp = (await chrome.runtime.sendMessage(msg)) as CourrierStagedSendResponse | undefined;
+  if (!resp) {
+    return { kind: 'courrier.staged.err', log: [], error: 'no_response' };
+  }
+  return resp;
 }
 
 /**
@@ -151,7 +204,19 @@ function detectConfirmScreen():
   | 'devis_tab_pre'
   | 'devis_form_open'
   | 'edition_imprimer'
+  | 'devis_visualisation'
   | 'unknown' {
+  // 2026-07-02: the real-mode send flow navigates edition → "Visualisation du
+  // devis" (via the ACCES PORTEFEUILLE search) to make the fresh devis the
+  // session's CURRENT INSTANCE before opening the Courrier composer — the
+  // composer binds letters to the last-visited dossier, and a stale instance
+  // (e.g. an auto devis Achraf browsed) makes the moto letter fail with
+  // "branche différente" / an empty composer / a silent non-send.
+  // The visualisation page also renders the DR number in its body, so this
+  // check MUST run before the extractDevisNumber()-based edition heuristic.
+  if (document.forms.namedItem('VisualisationContratForm')) {
+    return 'devis_visualisation';
+  }
   // Phase-2d-confirm (2026-05-25 PM): three distinct states the flow
   // crosses, identified live via Chrome MCP.
   //   1. devis_tab_pre — Garanties tab (price preview rendered).
@@ -413,26 +478,62 @@ export async function runQuoteConfirm(cmd: QuoteConfirmCommand): Promise<Respons
           });
         }
 
-        // 6. Open the Devis-moto "Envoyer par…" Courrier popup (devis PDF
-        //    auto-attached + Mail toolbar). 7. Fill To/Objet. 8. Envoyer.
-        await openDevisMotoCourrier(cmd);
-        await shoot('courrier_opened');
-        const sendRes = await courrierFillAndSend({
-          to: cmd.subscriber.email,
-          objet: `Votre devis assurance trottinette Assuryal - ${devisNumber}`,
-          send: true, // real-mode: fill + click Envoyer (checkMail)
-        });
-        await reportProgress(cmd.id, 'courrier_send_result', JSON.stringify(sendRes));
-        if (!sendRes.ok || !sendRes.filledFrame || !sendRes.sent) {
+        // Real-mode send — 2026-07-02 root-cause fix. Do NOT open the
+        // composer from this edition page: the courrier system binds letters
+        // to the session's CURRENT INSTANCE (last-visited dossier), which is
+        // NOT the freshly created devis (e.g. an auto devis Achraf browsed →
+        // "branche différente" ALERTE → empty composer → silent non-send).
+        // Instead, VISIT the devis dossier first (search by DR number → the
+        // "Visualisation du devis" page), which sets the instance; the
+        // devis_visualisation branch below then opens the composer and runs
+        // the verified staged send.
+        await reportProgress(cmd.id, 'courrier_visit_devis', devisNumber);
+        await visitDevisDossier(devisNumber);
+        await shoot('visit_devis_submitted');
+        return navigating('edition_imprimer', 'devis_visualisation');
+      }
+
+      if (screen === 'devis_visualisation') {
+        // The devis dossier page — reached via the ACCES PORTEFEUILLE search.
+        // Being here means the devis IS the session's current instance, so
+        // the Devis-moto letter generates correctly (live-verified: the
+        // "branche différente" failure only occurs with a stale instance).
+        await shoot('devis_visualisation');
+        // The DR number is rendered in the dossier body — re-extract it (the
+        // content script died on the navigation, so no state survived).
+        const devisNumber = extractVisualisedDevisNumber();
+        if (!devisNumber) {
           return ErrorResponseSchema.parse({
             id: cmd.id,
             kind: 'error',
-            errorCode: 'maxance_courrier_send_failed',
-            detail: `courrier fill/send incomplete: ${JSON.stringify(sendRes).slice(0, 200)}`,
+            errorCode: 'maxance_confirm_visualisation_no_devis_number',
+            detail: `Visualisation page reached but no DR number in body. url=${location.href}`,
             screenshots,
           });
         }
-        await sleep(2_500);
+        await reportProgress(cmd.id, 'courrier_open_composer', devisNumber);
+        // Open the Courrier composer for the Devis-moto letter (PDF
+        // auto-generated + Mail toolbar) via the page's own mdiWindNet.
+        const url = `${COURRIER_POPUP_URL_PATH}?PAGE=0000501000&FORWARD=/preparerLettre.do?ligneSelected=DR`;
+        const opts = 'id:impressionDR; title: Courrier; width: 700; height: 750;';
+        await openMdiWindowMainWorld(url, opts);
+        // Staged send: composer-ready gate → fill → checkMail → "Mail :"
+        // confirm stage → Valider → mail.do verification (SW-orchestrated).
+        const sendRes = await courrierStagedSend(
+          cmd.subscriber.email,
+          `Votre devis assurance trottinette Assuryal - ${devisNumber}`,
+        );
+        await reportProgress(cmd.id, 'courrier_staged_result', JSON.stringify(sendRes));
+        if (sendRes.kind !== 'courrier.staged.ok' || !sendRes.sent) {
+          const err = sendRes.kind === 'courrier.staged.err' ? sendRes.error : 'not_sent';
+          return ErrorResponseSchema.parse({
+            id: cmd.id,
+            kind: 'error',
+            errorCode: err.startsWith('maxance_') ? err : 'maxance_courrier_send_failed',
+            detail: `staged send failed: ${err} [${sendRes.log.join(',')}]`.slice(0, 240),
+            screenshots,
+          });
+        }
         await shoot('post_envoyer');
 
         return QuoteConfirmResponseSchema.parse({

@@ -182,6 +182,38 @@ export type CourrierFillSendResponse =
   | { kind: 'courrier.err'; error: string };
 
 /**
+ * Content → SW: "run the VERIFIED staged devis-email send in the Courrier
+ * composer — MAIN world, SW-orchestrated" (2026-07-02 root-cause fix).
+ *
+ * Live-mapped sequence (manual browser walkthrough, devis DR0000983186):
+ *   A. Await the composer frame (window.name==='impressionDR') to render the
+ *      Mail toolbar (`mailAdresse`) AND the generated letter. If a Maxance
+ *      ALERTE popin is up instead (e.g. "ne peut être généré pour un devis
+ *      d'une branche différente" = the session's current instance is NOT this
+ *      devis), fail with a tagged error — never blind-send.
+ *   B. Fill `mailAdresse` / `mailObjet` in that frame.
+ *   C. Call the frame's own `checkMail('mail','MAIL')` (= the Envoyer button).
+ *   D. Await the "Mail : [Valider][Annuler]" CONFIRMATION stage in the SAME
+ *      frame, then click its exact-'Valider' button. (The old flow clicked
+ *      any 'Valider' without awaiting this stage — that hit the letter-editor
+ *      form submit and reported a fake `sent=true`.)
+ *   E. Verify the frame navigated to `mail.do` — the server-side send action.
+ *      Only then is `sent:true` returned.
+ */
+export interface CourrierStagedSendRequest {
+  kind: 'courrier.staged-send-mw';
+  payload: {
+    to: string;
+    objet: string;
+  };
+}
+
+/** SW → content: outcome of the staged Courrier send. */
+export type CourrierStagedSendResponse =
+  | { kind: 'courrier.staged.ok'; log: string[]; sent: boolean }
+  | { kind: 'courrier.staged.err'; log: string[]; error: string };
+
+/**
  * Content → SW: "apply the Garanties closing controls — formule radio,
  * commission %, fractionnement — in the page's MAIN world" (M8.T7 B1).
  *
@@ -340,6 +372,7 @@ export type SwInbound =
   | DevisFillAndSubmitRequest
   | OpenMdiWindowRequest
   | CourrierFillSendRequest
+  | CourrierStagedSendRequest
   | GarantiesConfigureRequest
   | RepriseSearchRequest
   | RepriseSubmitRequest

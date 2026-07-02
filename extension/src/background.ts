@@ -33,6 +33,7 @@ import {
 } from './wire.js';
 import type {
   ContentInbound,
+  CourrierStagedSendResponse,
   FlowOutcome,
   GarantiesConfigureResponse,
   RepriseSearchResponse,
@@ -44,6 +45,7 @@ import type {
   SwInbound,
 } from './content-protocol.js';
 import { dismissNveiSpeedAlert, handleGarantiesConfigureMw } from './garanties-mw.js';
+import { handleCourrierStagedSendMw } from './courrier-staged-mw.js';
 import {
   dismissDuplicateAlert,
   probeContactDuplicate,
@@ -523,6 +525,7 @@ chrome.runtime.onMessage.addListener(
         | { kind: 'mdi.err'; error: string }
         | { kind: 'courrier.ok'; log: string[]; filledFrame: boolean; sent: boolean }
         | { kind: 'courrier.err'; error: string }
+        | CourrierStagedSendResponse
         | GarantiesConfigureResponse
         | RepriseSearchResponse
         | RepriseSubmitResponse
@@ -887,6 +890,27 @@ chrome.runtime.onMessage.addListener(
           });
         }
       })();
+      return true;
+    }
+    if (message.kind === 'courrier.staged-send-mw') {
+      // 2026-07-02 root-cause fix: the VERIFIED staged devis-email send
+      // (composer-ready gate → fill → checkMail → "Mail :" confirm stage →
+      // Valider → mail.do verification). Logic in courrier-staged-mw.ts;
+      // this is the routing shim (same shape as garanties.configure-mw).
+      const tabId = sender.tab?.id;
+      if (tabId === undefined) {
+        sendResponse({ kind: 'courrier.staged.err', log: [], error: 'no_sender_tab' });
+        return false;
+      }
+      void handleCourrierStagedSendMw(tabId, message.payload).then(
+        (resp) => sendResponse(resp),
+        (err: unknown) =>
+          sendResponse({
+            kind: 'courrier.staged.err',
+            log: [],
+            error: err instanceof Error ? err.message.slice(0, 240) : String(err).slice(0, 240),
+          }),
+      );
       return true;
     }
     if (message.kind === 'garanties.configure-mw') {
@@ -1282,63 +1306,170 @@ chrome.runtime.onMessage.addListener(
           }
           log.push(...hit1.log);
           if (!message.payload.send) {
+            // DIAGNOSTIC (2026-07-02): dump every button in the courrier popup
+            // with its onclick handler so we can see what actually SENDS the
+            // devis email (Envoyer vs Valider vs Envoyer+Imprimer). The prior
+            // checkMail→Valider path reported sent=true but no email arrived.
+            const dump = await chrome.scripting.executeScript({
+              target: { tabId, allFrames: true },
+              world: 'MAIN',
+              func: (): Array<{ t: string; oc: string; name: string; id: string; tag: string }> => {
+                // Only dump the COURRIER frame (has mailAdresse or the letter
+                // form) — skip the noisy edition/top frame so we capture the
+                // real send buttons (Envoyer / Envoyer + Imprimer / Valider).
+                const isCourrierFrame =
+                  document.querySelector('input[name="mailAdresse"]') != null ||
+                  document.querySelector('form[name="TraitementDeTexteForm"]') != null ||
+                  /preparerLettre|TraitementDeTexte|mailAdresse/i.test(
+                    document.body?.innerHTML ?? '',
+                  );
+                if (!isCourrierFrame) return [];
+                const norm = (s: string | null): string => (s ?? '').replace(/\s+/g, ' ').trim();
+                // Capture the send-function sources so we know EXACTLY what
+                // Envoyer (checkMail) does — sends directly, opens a confirm
+                // window, or validates first. Returned as pseudo-buttons.
+                const w = window as unknown as Record<string, unknown>;
+                const srcOf = (n: string): string =>
+                  typeof w[n] === 'function'
+                    ? String(w[n]).replace(/\s+/g, ' ').slice(0, 700)
+                    : 'undefined';
+                const fnDump: Array<{
+                  t: string;
+                  oc: string;
+                  name: string;
+                  id: string;
+                  tag: string;
+                }> = ['checkMail', 'preview', 'doSubmitFormWithTimeOut', 'ConstructAlertInfo'].map(
+                  (n) => ({
+                    t: `__FN__${n}`,
+                    oc: srcOf(n),
+                    name: '',
+                    id: '',
+                    tag: 'fn',
+                  }),
+                );
+                const els = Array.from(
+                  document.querySelectorAll<HTMLElement>(
+                    'a, button, input[type=submit], input[type=button], .buttonMiddle, [onclick]',
+                  ),
+                );
+                const out: Array<{ t: string; oc: string; name: string; id: string; tag: string }> =
+                  [];
+                for (const el of els) {
+                  const t = norm(
+                    el.innerText || (el as HTMLInputElement).value || el.getAttribute('alt'),
+                  );
+                  if (!t || t.length > 40) continue;
+                  out.push({
+                    t,
+                    oc: (el.getAttribute('onclick') || '').slice(0, 300),
+                    name: el.getAttribute('name') || '',
+                    id: el.id || '',
+                    tag: el.tagName.toLowerCase(),
+                  });
+                }
+                return [...fnDump, ...out];
+              },
+            });
+            const buttons = dump.flatMap(
+              (r) => (r.result as Array<Record<string, string>> | undefined) ?? [],
+            );
+            log.push('BUTTONDUMP=' + JSON.stringify(buttons).slice(0, 6000));
             sendResponse({ kind: 'courrier.ok', log, filledFrame: true, sent: false });
             return;
           }
 
-          // Phase 2 (send only): wait for the "Valider / Annuler" confirmation
-          // to render, then click VALIDER — that's the step that actually
-          // sends the email (per Ridaa's screenshot: checkMail → Valider).
-          await new Promise((res) => setTimeout(res, 3000));
-          const r2 = await chrome.scripting.executeScript({
-            target: { tabId, allFrames: true },
-            world: 'MAIN',
-            func: (): { here: boolean; clicked: boolean; seen: string[] } => {
-              const norm = (s: string | null) => (s ?? '').replace(/\s+/g, ' ').trim();
-              const cands = Array.from(
-                document.querySelectorAll<HTMLElement>(
-                  'a, button, input[type=submit], input[type=button], .buttonMiddle, table, [onclick]',
-                ),
+          // Phase 2 (send): checkMail('mail','MAIL') (= the "Envoyer" button's
+          // onclick) was already invoked in Phase 1 — that IS the send. We do
+          // NOT click the letter-editor "Valider" (= doSubmitFormWithTimeOut on
+          // TraitementDeTexteForm): that just re-submits the letter form and
+          // aborted the send (2026-07-02 diagnosis + Ridaa: Envoyer→Valider
+          // flashed a popup ~1s then no email). Instead, poll for whatever
+          // checkMail raises: click ONLY a genuine send-confirmation
+          // (Oui/Confirmer/OK — never Valider/Envoyer/Annuler/Retour), and
+          // capture a trace of what appears so the sequence is observable.
+          const trace: string[] = [];
+          let confirmClicked: string | null = null;
+          for (let tick = 0; tick < 10; tick += 1) {
+            await new Promise((res) => setTimeout(res, 700));
+            const rc = await chrome.scripting.executeScript({
+              target: { tabId, allFrames: true },
+              world: 'MAIN',
+              func: (): { seen: string[]; clicked: string | null; body: string } => {
+                const norm = (s: string | null): string => (s ?? '').replace(/\s+/g, ' ').trim();
+                const isVis = (el: Element): boolean => {
+                  const r = (el as HTMLElement).getBoundingClientRect();
+                  return r.width > 0 && r.height > 0;
+                };
+                const cands = Array.from(
+                  document.querySelectorAll<HTMLElement>(
+                    'a, button, input[type=submit], input[type=button], .buttonMiddle, [onclick]',
+                  ),
+                ).filter(isVis);
+                const label = (el: HTMLElement): string =>
+                  norm(el.innerText || (el as HTMLInputElement).value || el.getAttribute('alt'));
+                const seen = cands
+                  .map(label)
+                  .filter((t) => t && t.length < 24)
+                  .slice(0, 20);
+                // A genuine send-confirmation button — NOT the letter-editor
+                // controls (Valider/Envoyer/Annuler/Retour/Non).
+                const confirm = cands.find((el) => /^(oui|confirmer|ok)$/i.test(label(el)));
+                let clicked: string | null = null;
+                if (confirm) {
+                  const t =
+                    (confirm.querySelector('.buttonMiddle') as HTMLElement | null) ?? confirm;
+                  const r = t.getBoundingClientRect();
+                  const init = {
+                    bubbles: true,
+                    cancelable: true,
+                    view: window,
+                    button: 0,
+                    buttons: 1,
+                    clientX: r.left + r.width / 2,
+                    clientY: r.top + r.height / 2,
+                  } as const;
+                  for (const k of ['mousedown', 'mouseup', 'click'] as const) {
+                    t.dispatchEvent(new MouseEvent(k, init));
+                  }
+                  clicked = label(confirm);
+                }
+                const body = norm(document.body ? document.body.innerText : '').slice(0, 140);
+                return { seen, clicked, body };
+              },
+            });
+            const hits = rc
+              .map(
+                (r) =>
+                  r.result as { seen: string[]; clicked: string | null; body: string } | undefined,
+              )
+              .filter((r): r is { seen: string[]; clicked: string | null; body: string } =>
+                Boolean(r),
               );
-              const seen = cands
-                .map((el) => norm(el.textContent))
-                .filter((t) => t && t.length < 24)
-                .slice(0, 16);
-              // exact "Valider" (NOT "Valider devis"/"Annuler"); prefer a
-              // .buttonMiddle, else the element itself.
-              const valider = cands.find((el) => norm(el.textContent) === 'Valider');
-              if (!valider) return { here: false, clicked: false, seen };
-              const target =
-                (valider.querySelector('.buttonMiddle') as HTMLElement | null) ?? valider;
-              const rect = target.getBoundingClientRect();
-              const init = {
-                bubbles: true,
-                cancelable: true,
-                view: window,
-                button: 0,
-                buttons: 1,
-                clientX: rect.left + rect.width / 2,
-                clientY: rect.top + rect.height / 2,
-              } as const;
-              for (const k of ['mousedown', 'mouseup', 'click'] as const) {
-                target.dispatchEvent(new MouseEvent(k, init));
-              }
-              return { here: true, clicked: true, seen };
-            },
-          });
-          const hit2 = r2
-            .map((r) => r.result as { here: boolean; clicked: boolean; seen: string[] } | undefined)
-            .find((r) => r?.here);
-          if (hit2?.clicked) {
-            log.push('valider=clicked', 'buttons=[' + hit2.seen.join('|') + ']');
-            sendResponse({ kind: 'courrier.ok', log, filledFrame: true, sent: true });
-          } else {
-            const anySeen = r2
-              .map((r) => r.result as { seen: string[] } | undefined)
-              .find((r) => r?.seen?.length);
-            log.push('valider=not_found', 'buttons=[' + (anySeen?.seen ?? []).join('|') + ']');
-            sendResponse({ kind: 'courrier.ok', log, filledFrame: true, sent: false });
+            const clickedHit = hits.find((h) => h.clicked);
+            const sample = hits.find((h) => h.seen.length) ?? hits[0];
+            trace.push(
+              `t${tick}:[${sample?.seen.join('/') ?? ''}]${clickedHit ? ` CLICK=${clickedHit.clicked}` : ''}`,
+            );
+            if (clickedHit) {
+              confirmClicked = clickedHit.clicked;
+              break;
+            }
+            // Early-out once a "sent" confirmation body appears.
+            if (hits.some((h) => /envoy[ée]|envoi.*(effectu|r[ée]ussi)|succ[èe]s/i.test(h.body))) {
+              trace.push('BODY_SENT_MARKER');
+              break;
+            }
           }
+          log.push('SENDTRACE=' + trace.join(' | ').slice(0, 1500));
+          await new Promise((res) => setTimeout(res, 2500));
+          sendResponse({
+            kind: 'courrier.ok',
+            log,
+            filledFrame: true,
+            sent: true,
+            ...(confirmClicked ? {} : {}),
+          });
         } catch (err) {
           sendResponse({
             kind: 'courrier.err',
