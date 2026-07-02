@@ -21,7 +21,9 @@
  *     dispatch change, then wait for the re-render.
  *
  * Every step appends a log entry; the handler returns {ok, log,
- * finalCommission}. Garanties-additionnelles checkboxes are NEVER touched.
+ * finalCommission}. Garanties-additionnelles checkboxes are ONLY touched
+ * when the payload explicitly requests them (quote.confirm pack support,
+ * 2026-07-02) — never during preview.
  */
 import {
   COMMISSION_INPUT_ID,
@@ -295,6 +297,51 @@ export async function handleGarantiesConfigureMw(
       log.push(`fractionnement=${status}`);
       if (status.startsWith('err:')) return { kind: 'garanties.err', log, error: status.slice(4) };
       if (status === 'changed') {
+        log.push(await waitForRerender(tabId, { timeoutMs: RERENDER_TIMEOUT_MS }));
+      }
+    }
+
+    // (d) Garanties-additionnelles checkboxes (2026-07-02 — Achraf's pack,
+    // quote.confirm only). The checkbox inputs carry framework-generated
+    // names, so anchor on the table-row text instead of a selector. A real
+    // click fires the inline handler exactly once (same single-fire rule as
+    // the formule radios — never click AND call a page-global handler).
+    for (const addOn of [
+      { flag: payload.assistance, key: 'assistance', pattern: 'Assistance\\s+Mobilit' },
+      {
+        flag: payload.garantiePersonnelle,
+        key: 'garantiePersonnelle',
+        pattern: 'Garantie\\s+Personnelle\\s+du\\s+Conducteur',
+      },
+    ] as const) {
+      if (!addOn.flag) continue;
+      const rd = await chrome.scripting.executeScript({
+        target: { tabId },
+        world: 'MAIN',
+        func: (rowPattern: string): { status: string } => {
+          const re = new RegExp(rowPattern, 'i');
+          const boxes = Array.from(
+            document.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'),
+          ).filter((b) => {
+            const r = b.getBoundingClientRect();
+            return r.width > 0 && r.height > 0;
+          });
+          for (const box of boxes) {
+            const row = box.closest('tr') ?? box.parentElement;
+            const txt = row ? ((row as HTMLElement).innerText ?? '') : '';
+            if (!re.test(txt)) continue;
+            if (box.checked) return { status: 'already' };
+            box.click();
+            return { status: 'clicked' };
+          }
+          return { status: 'err:addon_checkbox_not_found' };
+        },
+        args: [addOn.pattern],
+      });
+      const status = (rd[0]?.result as { status: string } | undefined)?.status ?? 'err:null_result';
+      log.push(`${addOn.key}=${status}`);
+      if (status.startsWith('err:')) return { kind: 'garanties.err', log, error: status.slice(4) };
+      if (status === 'clicked') {
         log.push(await waitForRerender(tabId, { timeoutMs: RERENDER_TIMEOUT_MS }));
       }
     }

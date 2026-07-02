@@ -60,6 +60,8 @@ import {
 } from '../wire.js';
 import { reportProgress } from './progress.js';
 import { CONTACT_DUPLICATE_ERROR } from './contact-duplicate.js';
+import { GarantiesNavigatedError, applyGarantiesConfig } from './garanties-controls.js';
+import { clampCommissionPct } from '../maxance/selectors.js';
 import type {
   CourrierStagedSendRequest,
   CourrierStagedSendResponse,
@@ -294,6 +296,29 @@ export async function runQuoteConfirm(cmd: QuoteConfirmCommand): Promise<Respons
       await reportProgress(cmd.id, 'confirm_advance_iter', `screen=${screen}`);
 
       if (screen === 'devis_tab_pre') {
+        // 0. Garanties additionnelles (2026-07-02, Achraf's pack): tick the
+        //    requested add-on checkboxes BEFORE Valider devis so the devis
+        //    carries them. Idempotent across re-invokes (checked reads
+        //    'already', commission reads 'already' → no extra AJAX). A
+        //    control-triggered top-frame nav hands back to the SW like the
+        //    preview's garanties step does.
+        const addOns = cmd.garantiesAdditionnelles;
+        if (addOns?.assistance || addOns?.garantiePersonnelle) {
+          try {
+            const cfgResult = await applyGarantiesConfig({
+              commissionPct: clampCommissionPct(22),
+              ...(addOns.assistance ? { assistance: true } : {}),
+              ...(addOns.garantiePersonnelle ? { garantiePersonnelle: true } : {}),
+            });
+            await reportProgress(cmd.id, 'confirm_addons_applied', JSON.stringify(cfgResult));
+          } catch (gErr) {
+            if (gErr instanceof GarantiesNavigatedError) {
+              await reportProgress(cmd.id, 'garanties_navigated', `url=${location.href}`);
+              return navigating('devis_tab_pre', 'devis_tab_pre');
+            }
+            throw gErr;
+          }
+        }
         // 1. Click Valider devis via main-world mouse-event dispatch on
         //    `#validerDevis .buttonMiddle` — same proven pattern as phase
         //    2f's validerVehicule/validerConducteur. The previous

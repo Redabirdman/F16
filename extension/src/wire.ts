@@ -35,6 +35,17 @@ export const QuoteParamsSchema = z.object({
   formule: z.enum(['tiers_illimite', 'vol_incendie', 'dommages_tous_accidents']).optional(),
   commissionPct: z.number().min(0).max(100).optional(),
   fractionnement: z.enum(['mensuel', 'annuel']).optional(),
+  /**
+   * Garanties additionnelles to include on the DEVIS (2026-07-02, Achraf's
+   * pack). quote.confirm ticks the checkboxes on the Garanties tab; preview
+   * never ticks them — it only reads their prices off the rendered table.
+   */
+  garantiesAdditionnelles: z
+    .object({
+      assistance: z.boolean().optional(),
+      garantiePersonnelle: z.boolean().optional(),
+    })
+    .optional(),
 });
 export type QuoteParams = z.infer<typeof QuoteParamsSchema>;
 
@@ -75,6 +86,36 @@ export const ComptantBreakdownSchema = z.object({
   fraisComptantEur: z.number().nonnegative().nullable(),
 });
 export type ComptantBreakdown = z.infer<typeof ComptantBreakdownSchema>;
+
+/**
+ * Per-formule pricing (2026-07-02, Achraf's sales method). Extracted by
+ * clicking each formule radio in turn and reading its fractionnement row:
+ *   - `annualPremiumEur` — the formules-table Montant column. This is the
+ *     ANNUAL premium (older builds mislabeled it as the monthly price).
+ *   - `termeSuivantEur` — the customer-facing MONTHLY payment (fractionnement
+ *     mensuel), `comptantEur` — the bigger first payment,
+ *     `coutAnnuelBrutEur` — total annual cost including fees.
+ */
+export const FormulePricingSchema = z.object({
+  formule: z.enum(['tiers_illimite', 'vol_incendie', 'dommages_tous_accidents']),
+  annualPremiumEur: z.number().nonnegative().optional(),
+  comptantEur: z.number().nonnegative().optional(),
+  termeSuivantEur: z.number().nonnegative().optional(),
+  coutAnnuelBrutEur: z.number().nonnegative().optional(),
+});
+export type FormulePricing = z.infer<typeof FormulePricingSchema>;
+
+/**
+ * Garanties additionnelles ANNUAL prices read off the Garanties tab (no
+ * clicks — the two rows render their annual amounts upfront). Monthly
+ * deltas are computed downstream as annual/12 (matches Achraf's pitch:
+ * 13.04 → ~1.09 €/mois, 17.72 → ~1.48 €/mois).
+ */
+export const AddOnPricingSchema = z.object({
+  assistanceAnnualEur: z.number().nonnegative().optional(),
+  garantiePersonnelleAnnualEur: z.number().nonnegative().optional(),
+});
+export type AddOnPricing = z.infer<typeof AddOnPricingSchema>;
 
 /**
  * Subscription "Comptant à régler" breakdown (M8.T7 B3) parsed off the
@@ -131,6 +172,17 @@ export const QuoteConfirmCommandSchema = z.object({
   id: z.string().uuid(),
   kind: z.literal('quote.confirm'),
   subscriber: SubscriberInfoSchema,
+  /**
+   * Garanties additionnelles to tick on the Garanties tab BEFORE the Valider
+   * devis click (2026-07-02, Achraf's pack: Tiers Illimité + Assistance +
+   * Garantie Personnelle). Absent = leave the tab as rendered by the preview.
+   */
+  garantiesAdditionnelles: z
+    .object({
+      assistance: z.boolean().optional(),
+      garantiePersonnelle: z.boolean().optional(),
+    })
+    .optional(),
   /** True = stop before final Envoyer click. False = send the real email. */
   dryRun: z.boolean(),
   /**
@@ -265,6 +317,15 @@ export const QuotePreviewResponseSchema = z.object({
    * Optional for wire-compat with older extension builds.
    */
   comptantBreakdown: ComptantBreakdownSchema.optional(),
+  /**
+   * 2026-07-02 (Achraf's sales script): monthly pricing for ALL formules +
+   * the two garanties-additionnelles annual prices. Optional for wire-compat
+   * with older extension builds. NOTE `pricePreviewEur.monthly` above is now
+   * the requested formule's "Terme suivant" (the true monthly payment), no
+   * longer the formules-table Montant (which is the annual premium).
+   */
+  formulePricing: z.array(FormulePricingSchema).optional(),
+  addOns: AddOnPricingSchema.optional(),
   screenshots: z.array(ScreenshotSchema),
   finalUrl: z.string().url(),
   durationMs: z.number().nonnegative(),

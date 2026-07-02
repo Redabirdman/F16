@@ -54,9 +54,12 @@ import {
   GarantiesNavigatedError,
   applyGarantiesConfig,
   extractComptantBreakdown,
+  parseGarantiesAdditionnelles,
 } from './garanties-controls.js';
 import {
+  type AddOnPricing,
   type ComptantBreakdown,
+  type FormulePricing,
   type QuotePreviewCommandSchema,
   QuotePreviewResponseSchema,
   QuotePreviewNavigatingResponseSchema,
@@ -416,9 +419,13 @@ async function fillConducteurTab(cmd: QuotePreviewCommand): Promise<void> {
   // if a bridge modal appears, the next iteration detects + dismisses it.
 }
 
-async function configureGarantiesAndExtract(
-  cmd: QuotePreviewCommand,
-): Promise<{ monthly?: number; annual?: number; comptantBreakdown: ComptantBreakdown }> {
+async function configureGarantiesAndExtract(cmd: QuotePreviewCommand): Promise<{
+  monthly?: number;
+  annual?: number;
+  comptantBreakdown: ComptantBreakdown;
+  formulePricing: FormulePricing[];
+  addOns: AddOnPricing;
+}> {
   const { params } = cmd;
   // Caller has established we're on garanties_tab via the SW-orchestrated
   // advance.
@@ -435,54 +442,81 @@ async function configureGarantiesAndExtract(
   //   Fractionnement   Comptant  Terme suivant  Coût annuel brut**
   //                     25.99      7.57          90.85
   //
-  // M8.T7 B1 (2026-06-11): those default prices are at the DEFAULT
-  // commission (9%) — wrong per Achraf (commission must ALWAYS be 22%).
-  // So BEFORE extracting we now apply the closing controls via the SW's
-  // garanties.configure-mw main-world handler: commission forced to
-  // clamp(params.commissionPct ?? 22) ALWAYS (even when params omit it),
-  // formule radio + fractionnement only when requested. Each control
-  // fires an AJAX re-render (~5-6s) that the handler awaits — prices in
-  // the body text below are therefore the CONFIGURED ones (verified live:
-  // Tiers illimité 78.85 → 83.71 at 22%).
+  // ⚠️ PRICE SEMANTICS (Achraf, 2026-07-02): the formules-table Montant is
+  // the ANNUAL premium — NOT the monthly price (old builds sent 66,20 € as
+  // "Mensuel"; the real monthly was 6,51 €). The customer-facing monthly is
+  // the fractionnement row's "Terme suivant" (fractionnement mensuel), which
+  // re-renders per SELECTED formule. So we click each formule radio in turn
+  // (requested formule LAST, leaving the tab configured for quote.confirm)
+  // and read its row — exact numbers, ~5-6s AJAX per switch.
+  //
+  // M8.T7 B1 (2026-06-11): the default prices render at the DEFAULT
+  // commission (9%) — wrong per Achraf (commission must ALWAYS be 22%). The
+  // first applyGarantiesConfig call forces clamp(params.commissionPct ?? 22);
+  // subsequent calls read 'already' (no extra AJAX).
   await reportProgress(cmd.id, 'garanties_apply_config');
-  const cfgResult = await applyGarantiesConfig({
-    commissionPct: clampCommissionPct(params.commissionPct ?? 22),
-    ...(params.formule !== undefined ? { formule: params.formule } : {}),
-    ...(params.fractionnement !== undefined ? { fractionnement: params.fractionnement } : {}),
-  });
-  await reportProgress(cmd.id, 'garanties_config_applied', JSON.stringify(cfgResult));
+
+  const requested = params.formule ?? 'tiers_illimite';
+  const allFormules = ['tiers_illimite', 'vol_incendie', 'dommages_tous_accidents'] as const;
+  const ordered = [...allFormules.filter((f) => f !== requested), requested];
+
+  const commissionPct = clampCommissionPct(params.commissionPct ?? 22);
+  const formulePricing: FormulePricing[] = [];
+  for (const f of ordered) {
+    const cfgResult = await applyGarantiesConfig({
+      commissionPct,
+      formule: f,
+      ...(params.fractionnement !== undefined ? { fractionnement: params.fractionnement } : {}),
+    });
+    await reportProgress(cmd.id, 'garanties_config_applied', `${f}:${JSON.stringify(cfgResult)}`);
+
+    // Wait for the formule's label + its sibling number to appear in body.
+    // Maxance's table cells are tab-separated when extracted via innerText.
+    const annualPremium = await waitFor<number>(() => extractFormulePrice(formuleLabel(f)), {
+      label: `await_formule_price:${f}`,
+      timeoutMs: 20_000,
+    });
+    const row = extractComptantBreakdown();
+    formulePricing.push({
+      formule: f,
+      ...(Number.isFinite(annualPremium) ? { annualPremiumEur: annualPremium } : {}),
+      ...(row.comptantEur !== undefined ? { comptantEur: row.comptantEur } : {}),
+      ...(row.termeSuivantEur !== undefined ? { termeSuivantEur: row.termeSuivantEur } : {}),
+      ...(row.coutAnnuelBrutEur !== undefined ? { coutAnnuelBrutEur: row.coutAnnuelBrutEur } : {}),
+    });
+  }
 
   await reportProgress(cmd.id, 'garanties_tab_extract');
 
-  const formule = params.formule ?? 'tiers_illimite';
-  const targetLabel = formuleLabel(formule);
-
-  // Wait for the formule's label + its sibling number to appear in body.
-  // Maxance's table cells are tab-separated when extracted via innerText.
-  const priceMonthly = await waitFor<number>(() => extractFormulePrice(targetLabel), {
-    label: `await_formule_price:${formule}`,
-    timeoutMs: 20_000,
-  });
-
-  // Optional annual price — appears in "Coût annuel brut" column. Pattern:
-  //   "Coût annuel brut**\n  X.YZ  P.QR  90.85"
-  // We grab the last number on the line following the header.
-  const annualMatch = /Co[ûu]t annuel brut[*\s]*\n[^\n]*?(\d+[.,]\d{2})\s*$/im.exec(
-    document.body.innerText,
+  // M8.T7 B1: comptant breakdown off the FINAL (requested-formule) render —
+  // fractionnement row numbers + Frais comptant from the hidden
+  // commptant_<code> popup. Best-effort pure DOM read.
+  const comptantBreakdown = extractComptantBreakdown();
+  // Garanties-additionnelles annual prices — pure text read, no clicks
+  // (preview NEVER ticks the checkboxes; quote.confirm does, on request).
+  const addOns = parseGarantiesAdditionnelles(document.body.innerText);
+  await reportProgress(
+    cmd.id,
+    'garanties_pricing_extracted',
+    JSON.stringify({ formulePricing, addOns }),
   );
-  // Fallback regex: last EUR-like number on the line that mentions Coût annuel.
-  const annualFallback = /co[ûu]t annuel[^\n]*?(\d+[.,]\d{2})/im.exec(document.body.innerText);
-  const annualRaw = annualMatch?.[1] ?? annualFallback?.[1];
-  const annual = annualRaw ? Number.parseFloat(annualRaw.replace(',', '.')) : null;
 
-  const out: { monthly?: number; annual?: number; comptantBreakdown: ComptantBreakdown } = {
-    // M8.T7 B1: read the comptant breakdown off the configured tab —
-    // fractionnement row numbers + Frais comptant from the hidden
-    // commptant_<code> popup. Best-effort pure DOM read.
-    comptantBreakdown: extractComptantBreakdown(),
-  };
-  if (priceMonthly != null && Number.isFinite(priceMonthly)) out.monthly = priceMonthly;
-  if (annual != null && Number.isFinite(annual)) out.annual = annual;
+  const requestedRow = formulePricing[formulePricing.length - 1];
+  const out: {
+    monthly?: number;
+    annual?: number;
+    comptantBreakdown: ComptantBreakdown;
+    formulePricing: FormulePricing[];
+    addOns: AddOnPricing;
+  } = { comptantBreakdown, formulePricing, addOns };
+  // monthly = the requested formule's "Terme suivant" — only meaningful on a
+  // monthly fractionnement (the select defaults to Mensuel on this product).
+  const fractionnement = comptantBreakdown.fractionnement ?? 'mensuel';
+  if (fractionnement === 'mensuel' && requestedRow?.termeSuivantEur !== undefined) {
+    out.monthly = requestedRow.termeSuivantEur;
+  }
+  const annual = comptantBreakdown.coutAnnuelBrutEur ?? requestedRow?.annualPremiumEur;
+  if (annual !== undefined) out.annual = annual;
   return out;
 }
 
@@ -632,13 +666,16 @@ export async function runQuotePreview(cmd: QuotePreviewCommand): Promise<Respons
       if (screen === 'garanties_tab' || screen === 'price_preview') {
         await shoot('garanties_tab_pre');
         try {
-          const { comptantBreakdown, ...price } = await configureGarantiesAndExtract(cmd);
+          const { comptantBreakdown, formulePricing, addOns, ...price } =
+            await configureGarantiesAndExtract(cmd);
           await shoot('price_preview');
           return QuotePreviewResponseSchema.parse({
             id: cmd.id,
             kind: 'quote.preview.ok',
             pricePreviewEur: price,
             comptantBreakdown,
+            formulePricing,
+            addOns,
             screenshots,
             finalUrl: location.href,
             durationMs: Date.now() - t0,

@@ -236,6 +236,15 @@ export interface GarantiesConfigureRequest {
     commissionPct: number;
     /** Fractionnement option value (M/A). Absent = leave as rendered. */
     fractionnementCode?: 'M' | 'A';
+    /**
+     * Garanties-additionnelles checkboxes to ENSURE TICKED (2026-07-02,
+     * Achraf's pack — quote.confirm only). Absent/false = never touched.
+     * The checkbox inputs carry framework-generated names, so the handler
+     * anchors on the row text (Assistance Mobilité / Garantie Personnelle
+     * du Conducteur) instead of a selector.
+     */
+    assistance?: boolean;
+    garantiePersonnelle?: boolean;
   };
 }
 

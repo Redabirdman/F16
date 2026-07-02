@@ -33,6 +33,10 @@ export interface GarantiesConfig {
   /** Target commission % — caller clamps (clampCommissionPct, default 22). */
   commissionPct: number;
   fractionnement?: 'mensuel' | 'annuel';
+  /** Tick the Assistance Mobilité checkbox (quote.confirm pack only). */
+  assistance?: boolean;
+  /** Tick the Garantie Personnelle du Conducteur checkbox (confirm only). */
+  garantiePersonnelle?: boolean;
 }
 
 /**
@@ -74,6 +78,8 @@ export async function applyGarantiesConfig(
       ...(cfg.fractionnement !== undefined
         ? { fractionnementCode: FRACTIONNEMENT_CODE[cfg.fractionnement] }
         : {}),
+      ...(cfg.assistance ? { assistance: true } : {}),
+      ...(cfg.garantiePersonnelle ? { garantiePersonnelle: true } : {}),
     },
   };
   const resp = (await chrome.runtime.sendMessage(msg)) as GarantiesConfigureResponse | undefined;
@@ -125,6 +131,39 @@ export function parseFractionnementRow(bodyText: string | null | undefined): {
     ...(Number.isFinite(comptant) ? { comptantEur: comptant } : {}),
     ...(Number.isFinite(terme) ? { termeSuivantEur: terme } : {}),
     ...(Number.isFinite(brut) ? { coutAnnuelBrutEur: brut } : {}),
+  };
+}
+
+/**
+ * Parse the two Garanties-additionnelles ANNUAL prices out of the Garanties
+ * body text (2026-07-02, Achraf's sales method). innerText renders the rows
+ * as (live screenshot, NVEI product):
+ *
+ *   "Assistance  Assistance Mobilité  13.04
+ *    Garantie Personnelle Conducteur  Garantie Personnelle du Conducteur Niveau 1  17.72"
+ *
+ * Pure text parse — no clicks, safe during preview. The "Niveau 1" digit is
+ * consumed by an explicit optional group so it can't pollute the price
+ * capture. Exported separately so unit tests can pin the parse without a DOM.
+ */
+export function parseGarantiesAdditionnelles(bodyText: string | null | undefined): {
+  assistanceAnnualEur?: number;
+  garantiePersonnelleAnnualEur?: number;
+} {
+  if (!bodyText) return {};
+  const num = (m: RegExpExecArray | null): number | undefined => {
+    const raw = m?.[1];
+    if (!raw) return undefined;
+    const n = Number.parseFloat(raw.replace(',', '.'));
+    return Number.isFinite(n) ? n : undefined;
+  };
+  const assistance = num(/Assistance\s+Mobilit[ée]\s+(\d+[.,]\d{2})/i.exec(bodyText));
+  const gpc = num(
+    /Garantie\s+Personnelle\s+du\s+Conducteur\s*(?:Niveau\s*\d+\s*)?(\d+[.,]\d{2})/i.exec(bodyText),
+  );
+  return {
+    ...(assistance !== undefined ? { assistanceAnnualEur: assistance } : {}),
+    ...(gpc !== undefined ? { garantiePersonnelleAnnualEur: gpc } : {}),
   };
 }
 

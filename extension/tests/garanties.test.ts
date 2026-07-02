@@ -9,7 +9,10 @@
  * Sample strings mirror the 2026-06-11 live survey verbatim.
  */
 import { describe, it, expect } from 'vitest';
-import { parseFractionnementRow } from '../src/flows/garanties-controls.js';
+import {
+  parseFractionnementRow,
+  parseGarantiesAdditionnelles,
+} from '../src/flows/garanties-controls.js';
 import { parseFraisComptant } from '../src/maxance/selectors.js';
 
 describe('parseFractionnementRow', () => {
@@ -51,6 +54,42 @@ describe('parseFractionnementRow', () => {
     expect(parseFractionnementRow('')).toEqual({});
     expect(parseFractionnementRow(null)).toEqual({});
     expect(parseFractionnementRow(undefined)).toEqual({});
+  });
+});
+
+describe('parseGarantiesAdditionnelles', () => {
+  it('parses the live 2026-07-02 NVEI garanties-additionnelles rows', () => {
+    // Verbatim shape from Ridaa's live screenshot (innerText table render).
+    const body =
+      'Garanties additionnelles\tMontant\n' +
+      'Assistance\tAssistance Mobilité\t13.04\n' +
+      'Garantie Personnelle Conducteur\tGarantie Personnelle du Conducteur Niveau 1\t17.72';
+    expect(parseGarantiesAdditionnelles(body)).toEqual({
+      assistanceAnnualEur: 13.04,
+      garantiePersonnelleAnnualEur: 17.72,
+    });
+  });
+
+  it('does not let the "Niveau 1" digit pollute the price capture', () => {
+    const body = 'Garantie Personnelle du Conducteur Niveau 1 17.72';
+    expect(parseGarantiesAdditionnelles(body)).toEqual({
+      garantiePersonnelleAnnualEur: 17.72,
+    });
+  });
+
+  it('accepts comma decimals and accent-less Mobilite', () => {
+    const body = 'Assistance Mobilite 13,04\nGarantie Personnelle du Conducteur 17,72';
+    expect(parseGarantiesAdditionnelles(body)).toEqual({
+      assistanceAnnualEur: 13.04,
+      garantiePersonnelleAnnualEur: 17.72,
+    });
+  });
+
+  it('returns {} when the rows are absent / input empty', () => {
+    expect(parseGarantiesAdditionnelles('Formules de garanties Montant')).toEqual({});
+    expect(parseGarantiesAdditionnelles('')).toEqual({});
+    expect(parseGarantiesAdditionnelles(null)).toEqual({});
+    expect(parseGarantiesAdditionnelles(undefined)).toEqual({});
   });
 });
 
