@@ -259,10 +259,10 @@ async function fillVehiculeTab(cmd: QuotePreviewCommand): Promise<void> {
   // cleanly on Conducteur. We poll for a non-empty value rather than fixed
   // sleep so we cover slow-network cases without padding the happy path.
   let zonierStatus = 'ok';
-  await waitFor<HTMLSelectElement>(
+  const zonier = await waitFor<HTMLSelectElement>(
     () => {
       const z = document.querySelector<HTMLSelectElement>('select[name="circulationZonier.key"]');
-      return z && z.value && z.value.length > 0 ? z : null;
+      return z && (z.value.length > 0 || z.options.length > 1) ? z : null;
     },
     { label: 'await_zonier_populated', timeoutMs: 8_000 },
   ).catch(() => {
@@ -271,7 +271,29 @@ async function fillVehiculeTab(cmd: QuotePreviewCommand): Promise<void> {
     // throw a tagged error here when the real failure mode is a server
     // round-trip — let validerVehicule's outcome drive the diagnosis.
     zonierStatus = 'timeout';
+    return null;
   });
+
+  // Multi-commune postal codes (e.g. 87100 Limoges — Achraf's live test
+  // 2026-07-02): Maxance populates the commune options but does NOT
+  // auto-select, and Suivant raises the modal ALERTE "La valeur du champ
+  // 'Ville' est obligatoire" — the wizard loops on vehicule_tab until the
+  // orchestrator's 240s hard timeout. Pick the commune ourselves: match
+  // the lead's city when provided, else take the first real option.
+  if (zonier && !zonier.value) {
+    const communes = Array.from(zonier.options).filter((o) => o.value && o.value.length > 0);
+    const cityNeedle = (params.city ?? '').trim().toLowerCase();
+    const match =
+      (cityNeedle
+        ? communes.find((o) => (o.textContent ?? '').trim().toLowerCase().includes(cityNeedle))
+        : undefined) ?? communes[0];
+    if (match) {
+      setSelectValue(zonier, match.value);
+      zonierStatus = `selected:${match.value}`;
+    } else {
+      zonierStatus = 'no_options';
+    }
+  }
 
   // Phase-2f-diag: dump every form value right before Suivant so the backend
   // log shows exactly what Maxance sees on the post. If the loop-back
