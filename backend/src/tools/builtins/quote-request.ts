@@ -75,6 +75,18 @@ const trottinetteFormDataSchema = z
     commissionPct: z.number().min(0).max(100).optional(),
     /** Mensuel (default) or annuel. */
     fractionnement: z.enum(['mensuel', 'annuel']).optional(),
+    /**
+     * Garanties additionnelles the customer wants on the devis (2026-07-02,
+     * Achraf's pack — Assistance Mobilité + Garantie Personnelle du
+     * Conducteur). The preview prices them regardless; these flags matter
+     * when the devis is confirmed.
+     */
+    garantiesAdditionnelles: z
+      .object({
+        assistance: z.boolean().optional(),
+        garantiePersonnelle: z.boolean().optional(),
+      })
+      .optional(),
   })
   .strict();
 

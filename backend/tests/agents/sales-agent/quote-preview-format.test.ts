@@ -78,6 +78,72 @@ describe('formatQuotePreviewMessage', () => {
     expect(out).toContain(`• Formule : ${expected}`);
   });
 
+  it('renders the Achraf sales script when formulePricing is present (2026-07-02)', () => {
+    // Numbers verbatim from the live 2026-07-02 NVEI garanties screenshot.
+    const out = formatQuotePreviewMessage({
+      firstName: 'Achraf',
+      monthly: 6.51,
+      annual: 78.2,
+      formule: 'tiers_illimite',
+      quoteId: 'abc12345-6789-4abc-def0-123456789012',
+      formulePricing: [
+        {
+          formule: 'tiers_illimite',
+          annualPremiumEur: 66.2,
+          comptantEur: 22.45,
+          termeSuivantEur: 6.51,
+          coutAnnuelBrutEur: 78.2,
+        },
+        { formule: 'vol_incendie', annualPremiumEur: 141.66, termeSuivantEur: 12.87 },
+        { formule: 'dommages_tous_accidents', annualPremiumEur: 211.45, termeSuivantEur: 18.73 },
+      ],
+      addOns: { assistanceAnnualEur: 13.04, garantiePersonnelleAnnualEur: 17.72 },
+    });
+    expect(out).toContain('Bonjour Achraf,');
+    expect(out).toContain('Voici vos tarifs trottinette (par mois) :');
+    // The 3 formules as MONTHLIES (terme suivant), in the canonical order.
+    expect(out).toContain('• Tiers Illimité : 6,51 €/mois');
+    expect(out).toContain('• Tiers Illimité + Vol & Incendie : 12,87 €/mois');
+    expect(out).toContain('• Tous Risques : 18,73 €/mois');
+    // The ANNUAL premium must NEVER be presented as a monthly price.
+    expect(out).not.toContain('66,20 €/mois');
+    // Add-ons at annual/12 (13.04/12 = 1.09, 17.72/12 = 1.48).
+    expect(out).toContain('• Assistance Mobilité : +1,09 €/mois');
+    expect(out).toContain('• Garantie Personnelle du Conducteur : +1,48 €/mois');
+    // Pack recommendation = tiers monthly + both add-on monthlies.
+    expect(out).toContain('💡 Notre conseil : Tiers Illimité + les 2 options');
+    // 6.51 + 13.04/12 + 17.72/12 = 9.0733… → formatted 9,07 (unrounded sum).
+    expect(out).toContain('9,07 €/mois');
+    // First payment (comptant) of the requested formule.
+    expect(out).toContain('Premier paiement : 22,45 €, puis mensualités.');
+    expect(out).toContain('(réf #abc12345)');
+  });
+
+  it('falls back to the legacy body when formulePricing has no monthlies', () => {
+    const out = formatQuotePreviewMessage({
+      firstName: 'Sami',
+      monthly: 6.51,
+      formule: 'tiers_illimite',
+      quoteId: 'abc12345-6789-4abc-def0-123456789012',
+      formulePricing: [{ formule: 'tiers_illimite', annualPremiumEur: 66.2 }],
+    });
+    expect(out).toContain('Voici votre devis trottinette :');
+    expect(out).toContain('• Mensuel : 6,51 €');
+  });
+
+  it('omits pack + options sections when addOns are absent', () => {
+    const out = formatQuotePreviewMessage({
+      firstName: 'Lina',
+      formule: 'tiers_illimite',
+      quoteId: 'abc12345-6789-4abc-def0-123456789012',
+      formulePricing: [{ formule: 'tiers_illimite', termeSuivantEur: 6.51, comptantEur: 22.45 }],
+    });
+    expect(out).toContain('• Tiers Illimité : 6,51 €/mois');
+    expect(out).not.toContain('Options ajoutables');
+    expect(out).not.toContain('💡');
+    expect(out).toContain('Premier paiement : 22,45 €');
+  });
+
   it('uses French decimal comma + two decimals consistently', () => {
     const out = formatQuotePreviewMessage({
       firstName: 'X',

@@ -43,7 +43,28 @@ export interface QuotePreviewResult {
   durationMs: number;
   screenshots: { step: string; url: string }[];
   dryRun: boolean;
+  /** ⚠️ 2026-07-02 semantics (Achraf): monthly = "Terme suivant" (the true
+   *  monthly payment), annual = coût annuel brut. The formules-table Montant
+   *  (ANNUAL premium) lives in formulePricing.annualPremiumEur. */
   pricePreviewEur: { monthly?: number; annual?: number };
+  /** Per-formule monthlies + add-on prices (extension driver only). The
+   *  `| undefined` unions match the extension wire's zod-inferred optionals
+   *  under exactOptionalPropertyTypes. */
+  formulePricing?:
+    | {
+        formule: 'tiers_illimite' | 'vol_incendie' | 'dommages_tous_accidents';
+        annualPremiumEur?: number | undefined;
+        comptantEur?: number | undefined;
+        termeSuivantEur?: number | undefined;
+        coutAnnuelBrutEur?: number | undefined;
+      }[]
+    | undefined;
+  addOns?:
+    | {
+        assistanceAnnualEur?: number | undefined;
+        garantiePersonnelleAnnualEur?: number | undefined;
+      }
+    | undefined;
   finalUrl: string;
 }
 
@@ -95,6 +116,8 @@ export interface StagehandQuoteParams {
   formule?: 'tiers_illimite' | 'vol_incendie' | 'dommages_tous_accidents';
   commissionPct?: number;
   fractionnement?: 'mensuel' | 'annuel';
+  /** Garanties additionnelles for the devis (2026-07-02, Achraf's pack). */
+  garantiesAdditionnelles?: { assistance?: boolean; garantiePersonnelle?: boolean };
 }
 
 export class StagehandClientError extends Error {

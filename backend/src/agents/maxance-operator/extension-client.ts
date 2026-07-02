@@ -27,8 +27,10 @@ import { randomUUID } from 'node:crypto';
 import { logger } from '../../logger.js';
 import {
   parseFrame,
+  type AddOnPricing,
   type Command,
   type ComptantBreakdown,
+  type FormulePricing,
   type Response,
 } from '@f16/extension/wire';
 
@@ -50,6 +52,12 @@ export interface QuotePreviewResult {
    * Absent when the extension build predates B1.
    */
   comptantBreakdown?: ComptantBreakdown;
+  /**
+   * 2026-07-02 (Achraf's sales script): monthly pricing for ALL formules +
+   * garanties-additionnelles annual prices. Absent on older extension builds.
+   */
+  formulePricing?: FormulePricing[];
+  addOns?: AddOnPricing;
   finalUrl: string;
 }
 export interface LoginResult {
@@ -168,6 +176,8 @@ export interface ExtensionQuoteParams {
   formule?: 'tiers_illimite' | 'vol_incendie' | 'dommages_tous_accidents';
   commissionPct?: number;
   fractionnement?: 'mensuel' | 'annuel';
+  /** Garanties additionnelles for the devis (2026-07-02, Achraf's pack). */
+  garantiesAdditionnelles?: { assistance?: boolean; garantiePersonnelle?: boolean };
 }
 
 export class ExtensionClientError extends Error {
@@ -425,6 +435,9 @@ export class ExtensionClient {
         ...(params.formule !== undefined ? { formule: params.formule } : {}),
         ...(params.commissionPct !== undefined ? { commissionPct: params.commissionPct } : {}),
         ...(params.fractionnement !== undefined ? { fractionnement: params.fractionnement } : {}),
+        ...(params.garantiesAdditionnelles !== undefined
+          ? { garantiesAdditionnelles: params.garantiesAdditionnelles }
+          : {}),
       },
       dryRun: true,
       ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
@@ -452,6 +465,8 @@ export class ExtensionClient {
       ...(resp.comptantBreakdown !== undefined
         ? { comptantBreakdown: resp.comptantBreakdown }
         : {}),
+      ...(resp.formulePricing !== undefined ? { formulePricing: resp.formulePricing } : {}),
+      ...(resp.addOns !== undefined ? { addOns: resp.addOns } : {}),
       finalUrl: resp.finalUrl,
     };
   }
@@ -466,6 +481,8 @@ export class ExtensionClient {
       /** Redirect the Maxance courrier email (devis PDF) to this address
        *  instead of the subscriber — 2026-07-02 inbox-relay delivery. */
       courrierTo?: string;
+      /** Tick these add-on checkboxes before Valider devis (Achraf's pack). */
+      garantiesAdditionnelles?: { assistance?: boolean; garantiePersonnelle?: boolean };
     } = {},
   ): Promise<ConfirmQuoteResult> {
     void _sessionName;
@@ -490,6 +507,9 @@ export class ExtensionClient {
       dryRun,
       ...(opts.exerciseCourrier !== undefined ? { exerciseCourrier: opts.exerciseCourrier } : {}),
       ...(opts.courrierTo !== undefined ? { courrierTo: opts.courrierTo } : {}),
+      ...(opts.garantiesAdditionnelles !== undefined
+        ? { garantiesAdditionnelles: opts.garantiesAdditionnelles }
+        : {}),
       ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
     };
     const resp = await this.send(cmd, opts.timeoutMs);

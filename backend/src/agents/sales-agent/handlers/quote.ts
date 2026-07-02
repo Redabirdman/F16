@@ -22,6 +22,8 @@ import {
   formatQuotePreviewMessage,
   formatQuoteReadyMessage,
   formatQuoteFailedMessage,
+  type AddOnPricingInfo,
+  type FormulePricingLine,
 } from '../formatters.js';
 import type { SalesHandlerCtx } from './context.js';
 
@@ -44,6 +46,9 @@ export async function handleQuotePreviewReady(
     leadId?: string;
     pricePreviewEur: { monthly?: number; annual?: number };
     formule?: 'tiers_illimite' | 'vol_incendie' | 'dommages_tous_accidents';
+    /** 2026-07-02 Achraf's sales script — per-formule monthlies + add-ons. */
+    formulePricing?: FormulePricingLine[];
+    addOns?: AddOnPricingInfo;
     finalUrl: string;
     screenshots: { step: string; url: string }[];
     durationMs: number;
@@ -75,10 +80,12 @@ export async function handleQuotePreviewReady(
   }
 
   // Idempotency: if we already sent a turn correlated with this quoteId, skip.
-  // We piggy-back on conversation-turns' content scan — quoteId appears in
-  // the body as a non-visible marker we add below.
+  // We piggy-back on conversation-turns' content scan — the message body
+  // carries `(réf #<first-8-chars>)`, so match on the SAME 8-char prefix
+  // (the old full-UUID needle could never match → guard was dead code).
   const alreadySent = recentTurns.some(
-    (t) => t.direction === 'outbound' && (t.content ?? '').includes(`#${payload.quoteId}`),
+    (t) =>
+      t.direction === 'outbound' && (t.content ?? '').includes(`#${payload.quoteId.slice(0, 8)}`),
   );
   if (alreadySent) {
     return { ok: true, result: { skipped: 'already-sent', quoteId: payload.quoteId } };
@@ -96,6 +103,8 @@ export async function handleQuotePreviewReady(
       : {}),
     formule: payload.formule ?? 'tiers_illimite',
     quoteId: payload.quoteId,
+    ...(payload.formulePricing !== undefined ? { formulePricing: payload.formulePricing } : {}),
+    ...(payload.addOns !== undefined ? { addOns: payload.addOns } : {}),
   });
 
   const send = await sendViaChannel({

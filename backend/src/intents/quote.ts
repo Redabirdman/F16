@@ -3,6 +3,38 @@ import { registerIntent } from './_registry.js';
 
 const ChannelEnum = z.enum(['whatsapp', 'voice', 'email', 'sms']);
 
+const FormuleEnum = z.enum(['tiers_illimite', 'vol_incendie', 'dommages_tous_accidents']);
+
+/**
+ * Garanties additionnelles the customer wants on the devis (2026-07-02,
+ * Achraf's pack: Tiers Illimité + Assistance Mobilité + Garantie Personnelle
+ * du Conducteur). Ticked on the Maxance Garanties tab by quote.confirm.
+ */
+const GarantiesAdditionnellesSchema = z.object({
+  assistance: z.boolean().optional(),
+  garantiePersonnelle: z.boolean().optional(),
+});
+
+/**
+ * Per-formule pricing extracted by the extension (2026-07-02, Achraf's sales
+ * method): `annualPremiumEur` = the formules-table Montant (ANNUAL premium),
+ * `termeSuivantEur` = the customer-facing MONTHLY payment, `comptantEur` =
+ * the first payment, `coutAnnuelBrutEur` = total annual cost with fees.
+ */
+const FormulePricingSchema = z.object({
+  formule: FormuleEnum,
+  annualPremiumEur: z.number().nonnegative().optional(),
+  comptantEur: z.number().nonnegative().optional(),
+  termeSuivantEur: z.number().nonnegative().optional(),
+  coutAnnuelBrutEur: z.number().nonnegative().optional(),
+});
+
+/** Garanties-additionnelles ANNUAL prices read off the Garanties tab. */
+const AddOnPricingSchema = z.object({
+  assistanceAnnualEur: z.number().nonnegative().optional(),
+  garantiePersonnelleAnnualEur: z.number().nonnegative().optional(),
+});
+
 export const QuoteRequestedPayload = registerIntent(
   'QUOTE.REQUESTED',
   z.object({
@@ -66,6 +98,12 @@ export const QuoteConfirmRequestedPayload = registerIntent(
         .enum(['employe_prive', 'employe_public', 'etudiant', 'retraite', 'sans_profession'])
         .optional(),
     }),
+    /**
+     * 2026-07-02 (Achraf's pack): tick these add-on checkboxes on the
+     * Garanties tab before Valider devis. ⚠️ Registry validator STRIPS
+     * unknown keys — schema + emit + read must change together.
+     */
+    garantiesAdditionnelles: GarantiesAdditionnellesSchema.optional(),
   }),
 );
 
@@ -91,13 +129,27 @@ export const QuotePreviewReadyPayload = registerIntent(
     /** 2026-07-02: explicit lead — the sales-agent SINGLETON has no per-lead
      *  meta and the envelope correlationId is the quoteId. */
     leadId: z.string().uuid().optional(),
-    /** Pricing in EUR. At least one of monthly/annual is set; both may be set. */
+    /**
+     * Pricing in EUR. At least one of monthly/annual is set; both may be set.
+     * ⚠️ 2026-07-02 semantics fix (Achraf): `monthly` = the Garanties tab's
+     * "Terme suivant" (the true monthly payment, e.g. 6.51), NOT the
+     * formules-table Montant (which is the ANNUAL premium, e.g. 66.20 — old
+     * builds sent that as "Mensuel"). `annual` = coût annuel brut.
+     */
     pricePreviewEur: z.object({
       monthly: z.number().nonnegative().optional(),
       annual: z.number().nonnegative().optional(),
     }),
     /** Which formule the price applies to — defaults to Tiers Illimité if unset. */
     formule: z.enum(['tiers_illimite', 'vol_incendie', 'dommages_tous_accidents']).optional(),
+    /**
+     * 2026-07-02 (Achraf's sales script): monthly pricing for ALL formules +
+     * the two garanties-additionnelles annual prices, so the sales-agent can
+     * present the full menu + pack recommendation. ⚠️ Registry validator
+     * STRIPS unknown keys — schema + emit + read must change together.
+     */
+    formulePricing: z.array(FormulePricingSchema).optional(),
+    addOns: AddOnPricingSchema.optional(),
     /** Stagehand session URL at the moment of preview — useful for the operator UI. */
     finalUrl: z.string(),
     /** Captured screenshots, in flow order. Each URL is served by Stagehand's /v1/static. */

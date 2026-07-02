@@ -66,17 +66,21 @@ describe('buildSalesAgentSystemPrompt()', () => {
     expect(a.map((f) => f.cache)).toEqual(b.map((f) => f.cache));
   });
 
-  it('keeps the four cached fragments under ~10 kB for a typical context', () => {
+  it('keeps the four cached fragments under ~12 kB for a typical context', () => {
     // Cap was 6 kB through M6, 8 kB after M8.T8 (five trottinette
     // qualification fields). M8.T7 (closing) bumped to 10 kB: the closing
     // phase now carries the souscription guidance (IBAN/BIC/titulaire/ville
     // de naissance collection, fractionnement mechanics, the ONLY-approved
     // frais formulations, garanties additionnelles, escalation) — ~1.5 kB of
-    // intentional growth so the agent can actually close. Token cost
-    // amortised by prompt caching as before.
+    // intentional growth so the agent can actually close. 2026-07-02 bumped
+    // to 12 kB: Achraf's pricing method (mensualité vs montant-annuel
+    // semantics, the 2 options, the pack pitch) + the quote.confirm phase —
+    // without it the agent quoted the ANNUAL premium as monthly and re-ran
+    // quote.request on every objection. Token cost amortised by prompt
+    // caching as before.
     const frags = buildSalesAgentSystemPrompt(minimalCtx);
     const totalBytes = frags.reduce((sum, f) => sum + Buffer.byteLength(f.text, 'utf8'), 0);
-    expect(totalBytes).toBeLessThan(10000);
+    expect(totalBytes).toBeLessThan(12000);
   });
 
   it('playbook closing phase carries the compliant frais framing and collection list', () => {

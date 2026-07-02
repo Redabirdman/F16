@@ -16,25 +16,121 @@
  * including the format unit tests) are unaffected.
  */
 
+type Formule = 'tiers_illimite' | 'vol_incendie' | 'dommages_tous_accidents';
+
+const FORMULE_LABEL: Record<Formule, string> = {
+  tiers_illimite: 'Tiers Illimité',
+  vol_incendie: 'Tiers Illimité + Vol & Incendie',
+  dommages_tous_accidents: 'Tous Risques',
+};
+
+/** One formule's pricing as extracted live off the Maxance Garanties tab. */
+export interface FormulePricingLine {
+  formule: Formule;
+  /** Formules-table Montant — the ANNUAL premium (NOT a monthly price). */
+  annualPremiumEur?: number;
+  /** First payment for this formule (fractionnement mensuel). */
+  comptantEur?: number;
+  /** The customer-facing MONTHLY payment ("Terme suivant"). */
+  termeSuivantEur?: number;
+  coutAnnuelBrutEur?: number;
+}
+
+/** Garanties-additionnelles ANNUAL prices (monthly pitch = annual/12). */
+export interface AddOnPricingInfo {
+  assistanceAnnualEur?: number;
+  garantiePersonnelleAnnualEur?: number;
+}
+
 /**
  * Format the customer-facing French price-preview message for a trottinette
  * quote.
+ *
+ * 2026-07-02 — Achraf's sales method: when the operator supplies the
+ * per-formule monthlies (`formulePricing`), present ALL formules as
+ * mensualités + the two garanties additionnelles + the recommended pack
+ * (Tiers Illimité + both options). ⚠️ The old single-price body printed the
+ * formules-table Montant as "Mensuel" — that number is the ANNUAL premium
+ * (66,20 € sent as monthly; the real monthly was 6,51 €). The legacy body
+ * remains ONLY as a fallback for old extension builds, fed by the corrected
+ * `monthly` (= Terme suivant).
  */
 export function formatQuotePreviewMessage(opts: {
   firstName?: string;
   monthly?: number;
   annual?: number;
-  formule: 'tiers_illimite' | 'vol_incendie' | 'dommages_tous_accidents';
+  formule: Formule;
   quoteId: string;
+  formulePricing?: FormulePricingLine[];
+  addOns?: AddOnPricingInfo;
 }): string {
   const greeting = opts.firstName ? `Bonjour ${opts.firstName},` : 'Bonjour,';
-  const formuleLabel =
-    opts.formule === 'tiers_illimite'
-      ? 'Tiers Illimité'
-      : opts.formule === 'vol_incendie'
-        ? 'Tiers Illimité + Vol & Incendie'
-        : 'Tous Risques';
+  const refLine = `(réf #${opts.quoteId.slice(0, 8)})`;
 
+  // Rich path — Achraf's script. Requires at least one per-formule monthly.
+  const priced = (opts.formulePricing ?? []).filter((f) => f.termeSuivantEur !== undefined);
+  if (priced.length > 0) {
+    const ORDER: Formule[] = ['tiers_illimite', 'vol_incendie', 'dommages_tous_accidents'];
+    const byFormule = new Map(priced.map((f) => [f.formule, f]));
+    const lines: string[] = [greeting, '', 'Voici vos tarifs trottinette (par mois) :'];
+    for (const f of ORDER) {
+      const row = byFormule.get(f);
+      if (row?.termeSuivantEur === undefined) continue;
+      lines.push(`• ${FORMULE_LABEL[f]} : ${formatEur(row.termeSuivantEur)}/mois`);
+    }
+
+    const assistanceMonthly =
+      opts.addOns?.assistanceAnnualEur !== undefined
+        ? opts.addOns.assistanceAnnualEur / 12
+        : undefined;
+    const gpcMonthly =
+      opts.addOns?.garantiePersonnelleAnnualEur !== undefined
+        ? opts.addOns.garantiePersonnelleAnnualEur / 12
+        : undefined;
+    if (assistanceMonthly !== undefined || gpcMonthly !== undefined) {
+      lines.push('', 'Options ajoutables à toute formule :');
+      if (assistanceMonthly !== undefined) {
+        lines.push(
+          `• Assistance Mobilité : +${formatEur(assistanceMonthly)}/mois — dépannage pris en charge quoi qu'il arrive`,
+        );
+      }
+      if (gpcMonthly !== undefined) {
+        lines.push(
+          `• Garantie Personnelle du Conducteur : +${formatEur(gpcMonthly)}/mois — vous couvre (soins, hôpital) même si vous êtes responsable`,
+        );
+      }
+    }
+
+    // Recommended pack: Tiers Illimité + both options (Achraf's pitch).
+    const tiers = byFormule.get('tiers_illimite');
+    if (
+      tiers?.termeSuivantEur !== undefined &&
+      assistanceMonthly !== undefined &&
+      gpcMonthly !== undefined
+    ) {
+      const packMonthly = tiers.termeSuivantEur + assistanceMonthly + gpcMonthly;
+      lines.push(
+        '',
+        `💡 Notre conseil : Tiers Illimité + les 2 options, soit environ ${formatEur(packMonthly)}/mois — c'est la protection que choisissent la plupart de nos clients.`,
+      );
+    }
+
+    // First payment for the requested formule (bigger than the mensualité).
+    const requested = byFormule.get(opts.formule) ?? tiers;
+    if (requested?.comptantEur !== undefined) {
+      lines.push('', `Premier paiement : ${formatEur(requested.comptantEur)}, puis mensualités.`);
+    }
+
+    lines.push(
+      '',
+      'Quelle formule vous convient ? Je vous envoie le devis officiel par mail — avec ou sans options, ou les deux pour comparer.',
+      '',
+      refLine,
+    );
+    return lines.join('\n');
+  }
+
+  // Legacy fallback (old extension builds without formulePricing).
   const lines: string[] = [greeting, '', 'Voici votre devis trottinette :'];
   if (opts.monthly !== undefined) {
     lines.push(`• Mensuel : ${formatEur(opts.monthly)}`);
@@ -42,11 +138,11 @@ export function formatQuotePreviewMessage(opts: {
   if (opts.annual !== undefined) {
     lines.push(`• Annuel : ${formatEur(opts.annual)}`);
   }
-  lines.push(`• Formule : ${formuleLabel}`);
+  lines.push(`• Formule : ${FORMULE_LABEL[opts.formule]}`);
   lines.push('');
   lines.push('Souhaitez-vous que je vous envoie le devis officiel par mail ?');
   lines.push('');
-  lines.push(`(réf #${opts.quoteId.slice(0, 8)})`);
+  lines.push(refLine);
   return lines.join('\n');
 }
 

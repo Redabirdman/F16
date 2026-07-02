@@ -327,6 +327,8 @@ export class MaxanceOperatorAgent extends BaseAgent {
       customerId: string;
       leadId: string;
       subscriber: StagehandSubscriberInfo;
+      /** 2026-07-02 (Achraf's pack): add-ons to tick before Valider devis. */
+      garantiesAdditionnelles?: { assistance?: boolean; garantiePersonnelle?: boolean };
     };
 
     // M8.T8 phase 1 driver gate. See file header for the full rationale.
@@ -394,6 +396,9 @@ export class MaxanceOperatorAgent extends BaseAgent {
       confirm = await client.confirmQuote(SESSION_NAME, payload.subscriber, {
         dryRun,
         ...(courrierTo ? { courrierTo } : {}),
+        ...(payload.garantiesAdditionnelles !== undefined
+          ? { garantiesAdditionnelles: payload.garantiesAdditionnelles }
+          : {}),
       });
     } catch (err) {
       const code = readErrorCode(err) ?? 'confirm_unknown';
@@ -630,6 +635,13 @@ export class MaxanceOperatorAgent extends BaseAgent {
           // Maxance's default formule per Achraf — Stagehand uses this when
           // params.formule isn't set. M8.T6 will let callers toggle.
           formule: params.formule ?? 'tiers_illimite',
+          // 2026-07-02 (Achraf's sales script): per-formule monthlies + the
+          // garanties-additionnelles prices. ⚠️ The intent registry STRIPS
+          // unknown keys — these fields exist in intents/quote.ts too.
+          ...(preview.formulePricing !== undefined
+            ? { formulePricing: preview.formulePricing }
+            : {}),
+          ...(preview.addOns !== undefined ? { addOns: preview.addOns } : {}),
           finalUrl: preview.finalUrl,
           screenshots: preview.screenshots,
           durationMs: preview.durationMs,
@@ -748,6 +760,18 @@ export class MaxanceOperatorAgent extends BaseAgent {
     const fractionnement = formData.fractionnement;
     if (typeof fractionnement === 'string' && ['mensuel', 'annuel'].includes(fractionnement)) {
       params.fractionnement = fractionnement as NonNullable<StagehandQuoteParams['fractionnement']>;
+    }
+    // 2026-07-02 (Achraf's pack): optional add-on flags for the devis.
+    const ga = formData.garantiesAdditionnelles;
+    if (ga && typeof ga === 'object') {
+      const rec = ga as Record<string, unknown>;
+      const parsed: NonNullable<StagehandQuoteParams['garantiesAdditionnelles']> = {
+        ...(typeof rec.assistance === 'boolean' ? { assistance: rec.assistance } : {}),
+        ...(typeof rec.garantiePersonnelle === 'boolean'
+          ? { garantiePersonnelle: rec.garantiePersonnelle }
+          : {}),
+      };
+      if (Object.keys(parsed).length > 0) params.garantiesAdditionnelles = parsed;
     }
     return params;
   }

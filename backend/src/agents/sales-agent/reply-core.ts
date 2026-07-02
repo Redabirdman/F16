@@ -57,6 +57,7 @@ const SALES_AGENT_TOOL_NAMES = [
   'knowledge.search',
   'human.escalate',
   'quote.request',
+  'quote.confirm',
   'subscription.request',
   'voice.schedule_call',
 ] as const;
