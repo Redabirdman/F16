@@ -511,6 +511,9 @@ export async function runQuoteConfirm(cmd: QuoteConfirmCommand): Promise<Respons
             screenshots,
           });
         }
+        // Courrier recipient: the redirected inbox (Assuryal Workspace) when
+        // the backend set courrierTo, else the customer directly (legacy).
+        const courrierTo = cmd.courrierTo ?? cmd.subscriber.email;
         await reportProgress(cmd.id, 'courrier_open_composer', devisNumber);
         // Open the Courrier composer for the Devis-moto letter (PDF
         // auto-generated + Mail toolbar) via the page's own mdiWindNet.
@@ -520,7 +523,7 @@ export async function runQuoteConfirm(cmd: QuoteConfirmCommand): Promise<Respons
         // Staged send: composer-ready gate → fill → checkMail → "Mail :"
         // confirm stage → Valider → mail.do verification (SW-orchestrated).
         const sendRes = await courrierStagedSend(
-          cmd.subscriber.email,
+          courrierTo,
           `Votre devis assurance trottinette Assuryal - ${devisNumber}`,
         );
         await reportProgress(cmd.id, 'courrier_staged_result', JSON.stringify(sendRes));

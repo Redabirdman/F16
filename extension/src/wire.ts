@@ -142,6 +142,16 @@ export const QuoteConfirmCommandSchema = z.object({
    * reverse-engineered, so it's off by default to keep normal dryRun fast.
    */
   exerciseCourrier: z.boolean().optional(),
+  /**
+   * Where Maxance emails the devis PDF (the Courrier composer's mailAdresse).
+   * Absent = subscriber.email (legacy direct-to-customer). 2026-07-02: the
+   * backend sets this to the Assuryal Workspace inbox so F16 receives the
+   * PDF and re-delivers it to the customer via WhatsApp + branded email
+   * (Maxance's own relay is silently dropped by gmail.com mailboxes).
+   * NOTE: subscriber.email still goes on the DEVIS RECORD (emailListBean) —
+   * this only redirects the courrier send.
+   */
+  courrierTo: z.string().email().optional(),
   timeoutMs: z.number().int().positive().optional(),
 });
 
