@@ -26,6 +26,7 @@ import type {
 } from '../types.js';
 import type { Attachment } from 'nodemailer/lib/mailer/index.js';
 import { renderMarkdownToHtml, stripMarkdownToText } from './markdown.js';
+import { renderBrandedEmail } from './branding.js';
 import { sendEmail, type EmailTransportLike, type SendEmailInput } from './smtp-client.js';
 
 const SUBJECT_MAX_LEN = 80;
@@ -70,7 +71,13 @@ export class EmailAdapter implements ConversationChannel {
 
     const subject = deriveSubject(opts.body);
     const text = buildPlainText(opts.body);
-    const html = buildHtml(opts.body);
+    // 2026-07-03: every customer email ships inside the Assuryal branded
+    // shell (header/accent/footer) — the raw block fragments become the
+    // card body, the plain-text first line becomes the inbox preheader.
+    const html = renderBrandedEmail({
+      bodyHtml: buildHtml(opts.body),
+      preheader: text.split('\n')[0]?.slice(0, 140) ?? '',
+    });
     const attachments = buildAttachments(opts.body);
 
     const input: SendEmailInput = {
@@ -157,7 +164,14 @@ function buildPlainText(body: readonly ContentBlock[]): string {
         parts.push(`[video] ${b.caption ?? ''} ${b.url}`.trim());
         break;
       case 'document':
-        parts.push(`[document: ${b.filename}] ${b.url}`);
+        // data: URIs are the raw base64 payload — dumping them into the body
+        // produced the "wall of base64" email (live 2026-07-03). The file is
+        // attached by buildAttachments; the body just names it.
+        parts.push(
+          b.url.startsWith('data:')
+            ? `[pièce jointe : ${b.filename}]`
+            : `[document: ${b.filename}] ${b.url}`,
+        );
         break;
       case 'location':
         parts.push(
@@ -206,7 +220,15 @@ function buildHtml(body: readonly ContentBlock[]): string {
         );
         break;
       case 'document':
-        parts.push(`<p><a href="${escapeAttr(b.url)}">${escapeHtml(b.filename)}</a></p>`);
+        // Never render a data: URI as a link — Gmail refuses data: hrefs and
+        // shows the ENTIRE base64 string as body text (live 2026-07-03).
+        // The document is attached by buildAttachments; show a clean
+        // attachment note instead.
+        parts.push(
+          b.url.startsWith('data:')
+            ? `<p style="margin:14px 0 0;padding:10px 14px;background:#EEEEFF;border-radius:8px;font-size:14px;">📎&nbsp;<strong>${escapeHtml(b.filename)}</strong> — en pièce jointe</p>`
+            : `<p><a href="${escapeAttr(b.url)}">${escapeHtml(b.filename)}</a></p>`,
+        );
         break;
       case 'location':
         parts.push(
