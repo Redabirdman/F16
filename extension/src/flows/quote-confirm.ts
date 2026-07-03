@@ -257,6 +257,29 @@ function detectConfirmScreen():
 }
 
 /**
+ * Read the text of any VISIBLE Maxance ALERTE popin (ConstructAlertInfo
+ * renders them all at the same fixed-position container). Diagnostic only —
+ * never clicks anything. Added 2026-07-03 after the "Format du téléphone
+ * incorrect." popin blocked a devis silently: the flows only *detected*
+ * popins they were taught (NVEI, duplicate) and generic ALERTE content never
+ * reached the backend logs, so failures read as mystery bounces.
+ */
+function visibleAlerteText(): string {
+  const containers = Array.from(
+    document.querySelectorAll<HTMLElement>(
+      '#alertDiv, .alertInfo, .alerte, .popin, .popup, [id*="alert" i], [class*="alert" i], [role="dialog"]',
+    ),
+  );
+  for (const c of containers) {
+    const r = c.getBoundingClientRect();
+    if (r.width === 0 || r.height === 0) continue;
+    const txt = (c.innerText || '').replace(/\s+/g, ' ').trim();
+    if (txt) return txt.slice(0, 200);
+  }
+  return '';
+}
+
+/**
  * Ensure the Devis form's Ville (commune) select carries a selection.
  * Maxance re-populates it via AJAX after ANY Code postal change and — on
  * this form — leaves it unselected, which passes the client-side
@@ -486,12 +509,13 @@ export async function runQuoteConfirm(cmd: QuoteConfirmCommand): Promise<Respons
           timeoutMs: 20_000,
         }).catch(() => null);
         if (!devisNumber) {
-          const finalBody = (document.body.innerText ?? '').replace(/\s+/g, ' ').slice(0, 240);
+          const alerte = visibleAlerteText();
+          const finalBody = (document.body.innerText ?? '').replace(/\s+/g, ' ').slice(0, 200);
           return ErrorResponseSchema.parse({
             id: cmd.id,
             kind: 'error',
             errorCode: 'maxance_confirm_no_devis_number',
-            detail: `editionImprimer rendered but DR number never appeared after 20s. Body: "${finalBody}"`,
+            detail: `no DR after 20s.${alerte ? ` ALERTE: "${alerte}".` : ''} Body: "${finalBody}"`,
             screenshots,
           });
         }

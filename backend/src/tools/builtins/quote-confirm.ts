@@ -44,6 +44,23 @@ import { logger } from '../../logger.js';
 
 export const quoteConfirmToolName = 'quote.confirm';
 
+/**
+ * Maxance's phone widget only accepts FRENCH national format (0XXXXXXXXX) —
+ * E.164 values bounce the Devis OK with the "Format du téléphone incorrect."
+ * ALERTE (live 2026-07-03, Ridaa's screenshot: +212603576574 rejected, form
+ * re-rendered, no DR). +33 numbers convert exactly; other country codes
+ * (sim testers with Moroccan numbers) are coerced to 0 + last 9 digits so
+ * the devis can be issued — the real contact stays intact in OUR CRM.
+ */
+export function normalizeFrPhone(phone: string): string {
+  const digits = phone.replace(/[^\d+]/g, '');
+  if (/^0\d{9}$/.test(digits)) return digits;
+  const m = /^(?:\+|00)33(\d{9})$/.exec(digits);
+  if (m?.[1]) return `0${m[1]}`;
+  const tail = digits.replace(/\D/g, '').slice(-9);
+  return tail.length === 9 ? `0${tail}` : digits;
+}
+
 const inputSchema = z
   .object({
     /**
@@ -170,7 +187,8 @@ registerTool({
     const firstName = input.firstName ?? rowFirst ?? '';
     const lastName = input.lastName ?? rowRest.join(' ');
     const email = input.email ?? decryptPII(customer.email) ?? '';
-    const phoneMobile = input.phoneMobile ?? decryptPII(customer.phone) ?? '';
+    const phoneRaw = input.phoneMobile ?? decryptPII(customer.phone) ?? '';
+    const phoneMobile = phoneRaw ? normalizeFrPhone(phoneRaw) : '';
 
     let storedAddr: Record<string, unknown> = {};
     try {
