@@ -819,6 +819,38 @@ chrome.runtime.onMessage.addListener(
                     setInp('souscripteur.adresseCorrespondance.ligne2', p.addressComplement),
                 );
               }
+              // 2026-07-03: the contact-widget zone refreshes can reset the
+              // Ville commune select exactly like they wipe Nom/Prénom — an
+              // unselected Ville passes ErrorMessage() but bounces the OK
+              // submit server-side (form re-renders at the edition URL, no
+              // DR). Re-select the first real commune when it lost its value.
+              const villeSel = (() => {
+                const bearers = Array.from(document.querySelectorAll('td, th, span, div'));
+                for (const el of bearers) {
+                  if (el.querySelector('select')) continue;
+                  if (!/^\s*ville\s*\*?\s*$/i.test(el.textContent || '')) continue;
+                  let n = el.nextElementSibling;
+                  while (n) {
+                    const s = n.tagName === 'SELECT' ? n : n.querySelector('select');
+                    if (s) return s as HTMLSelectElement;
+                    n = n.nextElementSibling;
+                  }
+                }
+                return null;
+              })();
+              if (villeSel && !villeSel.value) {
+                const opt = Array.from(villeSel.options).find((o) => o.value);
+                if (opt) {
+                  villeSel.value = opt.value;
+                  fire(villeSel, 'input');
+                  fire(villeSel, 'change');
+                  out.push('refill_ville=selected');
+                } else {
+                  out.push('refill_ville=no_options');
+                }
+              } else {
+                out.push('refill_ville=' + (villeSel ? 'already' : 'not_found'));
+              }
               // @ts-expect-error — page-global
               const em = typeof ErrorMessage === 'function' ? ErrorMessage() : '';
               const emClean = em

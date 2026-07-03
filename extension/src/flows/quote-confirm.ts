@@ -45,7 +45,9 @@ import {
   courrierFillAndSend,
   devisFillAndSubmitMainWorld,
   fillByLabel,
+  findControlByLabel,
   setSelectByLabel,
+  setSelectValue,
   sleep,
   waitFor,
 } from '../dom.js';
@@ -255,6 +257,37 @@ function detectConfirmScreen():
 }
 
 /**
+ * Ensure the Devis form's Ville (commune) select carries a selection.
+ * Maxance re-populates it via AJAX after ANY Code postal change and — on
+ * this form — leaves it unselected, which passes the client-side
+ * ErrorMessage() but bounces the OK submit server-side (live 2026-07-03).
+ * Waits for the options to render, then picks the commune matching the
+ * subscriber's city (else the first real option). No-op when a value is
+ * already selected. Returns a short status string for the progress log.
+ */
+async function ensureDevisVilleSelected(city: string): Promise<string> {
+  const ville = await waitFor<HTMLSelectElement>(
+    () => {
+      const el = findControlByLabel<HTMLSelectElement>('Ville', ['SELECT']);
+      if (!el) return null;
+      return el.value || el.options.length > 1 ? el : null;
+    },
+    { label: 'await_devis_ville', timeoutMs: 8_000 },
+  ).catch(() => null);
+  if (!ville) return 'not_found';
+  if (ville.value) return `already:${ville.value}`;
+  const communes = Array.from(ville.options).filter((o) => o.value && o.value.length > 0);
+  const needle = city.trim().toLowerCase();
+  const match =
+    (needle
+      ? communes.find((o) => (o.textContent ?? '').trim().toLowerCase().includes(needle))
+      : undefined) ?? communes[0];
+  if (!match) return 'no_options';
+  setSelectValue(ville, match.value);
+  return `selected:${match.value}`;
+}
+
+/**
  * Single-screen advance of the quote.confirm flow (M8.T8 phase 2e).
  *
  * Mirrors `runQuotePreview` — the SW orchestrator may call this multiple
@@ -354,7 +387,21 @@ export async function runQuoteConfirm(cmd: QuoteConfirmCommand): Promise<Respons
           PROFESSION_VALUE[subscriber.profession ?? 'employe_prive'],
           { label: 'profession' },
         );
-        await fillByLabel('Code postal', subscriber.postalCode, { label: 'cp' });
+        // 2026-07-03 (live devis-form bounce): re-filling Code postal — even
+        // with the SAME value — fires the commune-lookup AJAX and the Ville
+        // select comes back UNSELECTED; the OK submit then bounces
+        // server-side and re-renders the form at the edition URL with no DR
+        // (maxance_confirm_no_devis_number). Fill CP only when it differs,
+        // give the commune AJAX time, then ensure a commune is actually
+        // selected — same pick-it-yourself logic as the vehicle tab's
+        // zonier fix (c1ab383).
+        const cpInput = findControlByLabel<HTMLInputElement>('Code postal', ['INPUT']);
+        if (!cpInput || cpInput.value.trim() !== subscriber.postalCode) {
+          await fillByLabel('Code postal', subscriber.postalCode, { label: 'cp' });
+          await sleep(1200);
+        }
+        const villeStatus = await ensureDevisVilleSelected(subscriber.city);
+        await reportProgress(cmd.id, 'devis_ville', villeStatus);
         await sleep(400);
 
         await reportProgress(cmd.id, 'devis_tab_filling');
