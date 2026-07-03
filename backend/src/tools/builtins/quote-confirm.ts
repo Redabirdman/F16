@@ -35,9 +35,9 @@
  * (intents/quote.ts documents the shape). Nothing is logged beyond IDs.
  */
 import { z } from 'zod';
-import { eq } from 'drizzle-orm';
+import { desc, eq } from 'drizzle-orm';
 import { registerTool } from '../registry.js';
-import { customers, leads } from '../../db/schema/index.js';
+import { customers, leads, quotes } from '../../db/schema/index.js';
 import { decryptPII } from '../../db/crypto.js';
 import { sendMessage } from '../../messaging/dispatcher.js';
 import { logger } from '../../logger.js';
@@ -46,8 +46,16 @@ export const quoteConfirmToolName = 'quote.confirm';
 
 const inputSchema = z
   .object({
-    /** The previewed quote to confirm — the quoteId returned by quote.request. */
-    quoteId: z.string().uuid(),
+    /**
+     * The previewed quote to confirm. Accepts the full UUID, the 8-char
+     * `(réf #xxxxxxxx)` prefix from the price message, or NOTHING — omitted
+     * resolves to the lead's most recent quote, which is exactly the one
+     * parked on the Maxance Garanties tab. Live 2026-07-03: the LLM only
+     * sees the 8-char ref in rebuilt history (tool results aren't
+     * persisted), so a strict-UUID schema made every confirm fail and the
+     * model "recovered" by re-running quote.request in a loop.
+     */
+    quoteId: z.string().min(4).optional(),
     customerId: z.string().uuid(),
     leadId: z.string().uuid(),
     /** Civilité — ask the customer ("Monsieur ou Madame ?") if unknown. */
@@ -88,7 +96,8 @@ registerTool({
   description:
     'Génère le devis Maxance OFFICIEL (PDF envoyé au client par WhatsApp + email) pour un ' +
     'devis déjà prévisualisé. À utiliser quand le client a choisi sa formule et veut recevoir ' +
-    'le devis. Paramètres : quoteId (celui retourné par quote.request), customerId, leadId, ' +
+    'le devis. Paramètres : quoteId FACULTATIF (omets-le pour utiliser le dernier devis du ' +
+    'lead ; sinon la réf du message de tarifs, ex. "6f305dc4", suffit), customerId, leadId, ' +
     'civilite (monsieur/madame), addressLine + postalCode + city (adresse du client — la ' +
     'demander si inconnue), et en option garantiesAdditionnelles {assistance, garantiePersonnelle} ' +
     'pour inclure les options du pack sur le devis. Nom/email/téléphone sont repris ' +
@@ -115,6 +124,33 @@ registerTool({
     if (lead.customerId && lead.customerId !== input.customerId) {
       throw new Error(`Lead ${input.leadId} belongs to a different customer than the one passed`);
     }
+
+    // 1b. Resolve the quote. The LLM usually only has the 8-char `(réf #…)`
+    //     prefix (or nothing) — match it against the lead's recent quotes,
+    //     newest first. The newest quote is also what the Maxance tab is
+    //     parked on, so the no-input default is the correct one.
+    const recentQuotes = await ctx.db
+      .select({ id: quotes.id, customerId: quotes.customerId })
+      .from(quotes)
+      .where(eq(quotes.leadId, input.leadId))
+      .orderBy(desc(quotes.requestedAt))
+      .limit(10);
+    const needle = (input.quoteId ?? '').replace(/^#/, '').toLowerCase();
+    const resolved = needle
+      ? recentQuotes.find((q) => q.id.toLowerCase().startsWith(needle))
+      : recentQuotes[0];
+    if (!resolved) {
+      throw new Error(
+        needle
+          ? `Aucun devis récent de ce lead ne correspond à la référence "${needle}". ` +
+              'Omets quoteId pour utiliser le dernier devis prévisualisé.'
+          : `Aucun devis prévisualisé trouvé pour ce lead — appelle d'abord quote.request.`,
+      );
+    }
+    if (resolved.customerId !== input.customerId) {
+      throw new Error('Le devis résolu appartient à un autre client — vérifie leadId/customerId.');
+    }
+    const quoteId = resolved.id;
 
     // 2. Assemble the subscriber block — explicit input wins, customer-row
     //    PII (decrypted) is the default. Throw with the LIST of missing
@@ -164,7 +200,7 @@ registerTool({
         toInstance: 'singleton',
         intent: 'QUOTE.CONFIRM_REQUESTED',
         payload: {
-          quoteId: input.quoteId,
+          quoteId,
           customerId: input.customerId,
           leadId: input.leadId,
           subscriber,
@@ -172,19 +208,19 @@ registerTool({
             ? { garantiesAdditionnelles: input.garantiesAdditionnelles }
             : {}),
         },
-        correlationId: input.quoteId,
+        correlationId: quoteId,
       },
     );
 
     logger.info(
       {
-        quoteId: input.quoteId,
+        quoteId,
         leadId: input.leadId,
         addOns: input.garantiesAdditionnelles ?? null,
       },
       'quote.confirm: QUOTE.CONFIRM_REQUESTED emitted',
     );
 
-    return { quoteId: input.quoteId, queued: true as const };
+    return { quoteId, queued: true as const };
   },
 });
