@@ -58,13 +58,21 @@ const inputSchema = z
     quoteId: z.string().min(4).optional(),
     customerId: z.string().uuid(),
     leadId: z.string().uuid(),
-    /** Civilité — ask the customer ("Monsieur ou Madame ?") if unknown. */
-    civilite: z.enum(['monsieur', 'madame']),
-    /** Postal address of the subscriber — required on the Maxance Devis tab. */
-    addressLine: z.string().min(1),
+    /**
+     * Civilité + postal address — required on the Maxance Devis tab, but
+     * OPTIONAL here: omitted fields default from the customer profile's
+     * stored address (2026-07-03 — conversation history scrolls past the
+     * turn where the customer gave them; the profile is the durable copy).
+     * Provide them when the customer just said them; otherwise omit.
+     */
+    civilite: z.enum(['monsieur', 'madame']).optional(),
+    addressLine: z.string().min(1).optional(),
     addressComplement: z.string().optional(),
-    postalCode: z.string().regex(/^\d{5}$/),
-    city: z.string().min(1),
+    postalCode: z
+      .string()
+      .regex(/^\d{5}$/)
+      .optional(),
+    city: z.string().min(1).optional(),
     /** Default from the customer row (decrypted) when omitted. */
     firstName: z.string().min(1).optional(),
     lastName: z.string().min(1).optional(),
@@ -153,8 +161,10 @@ registerTool({
     const quoteId = resolved.id;
 
     // 2. Assemble the subscriber block — explicit input wins, customer-row
-    //    PII (decrypted) is the default. Throw with the LIST of missing
-    //    fields so the LLM can ask the customer in one turn.
+    //    PII (decrypted) is the default. The stored address is a free-shape
+    //    encrypted JSON (customer.update_profile lets the LLM choose keys),
+    //    so parse it tolerantly. Throw with the LIST of missing fields so
+    //    the LLM can ask the customer in one turn.
     const fullName = decryptPII(customer.fullName) ?? '';
     const [rowFirst, ...rowRest] = fullName.split(' ').filter(Boolean);
     const firstName = input.firstName ?? rowFirst ?? '';
@@ -162,11 +172,42 @@ registerTool({
     const email = input.email ?? decryptPII(customer.email) ?? '';
     const phoneMobile = input.phoneMobile ?? decryptPII(customer.phone) ?? '';
 
+    let storedAddr: Record<string, unknown> = {};
+    try {
+      const plain = decryptPII(customer.address);
+      if (plain && plain !== 'null') storedAddr = JSON.parse(plain) as Record<string, unknown>;
+    } catch {
+      /* tolerate malformed stored address — fields fall through to missing */
+    }
+    const addrStr = (...keys: string[]): string | undefined => {
+      for (const k of keys) {
+        const v = storedAddr[k];
+        if (typeof v === 'string' && v.trim().length > 0) return v.trim();
+      }
+      return undefined;
+    };
+    const civiliteStored = addrStr('civilite', 'civilité');
+    const civilite =
+      input.civilite ??
+      (civiliteStored && /^m(r|onsieur)?\.?$/i.test(civiliteStored)
+        ? 'monsieur'
+        : civiliteStored && /^m(me|adame)\.?$/i.test(civiliteStored)
+          ? 'madame'
+          : undefined);
+    const addressLine =
+      input.addressLine ?? addrStr('line1', 'addressLine', 'street', 'rue', 'adresse');
+    const postalCode = input.postalCode ?? addrStr('postalCode', 'codePostal', 'zip', 'cp');
+    const city = input.city ?? addrStr('city', 'ville');
+
     const missing: string[] = [];
     if (!firstName) missing.push('firstName (prénom)');
     if (!lastName) missing.push('lastName (nom)');
     if (!email) missing.push('email');
     if (!phoneMobile) missing.push('phoneMobile (téléphone portable)');
+    if (!civilite) missing.push('civilite (monsieur/madame)');
+    if (!addressLine) missing.push('addressLine (adresse)');
+    if (!postalCode || !/^\d{5}$/.test(postalCode)) missing.push('postalCode (5 chiffres)');
+    if (!city) missing.push('city (ville)');
     if (missing.length > 0) {
       throw new Error(
         `Informations souscripteur manquantes pour le devis : ${missing.join(', ')}. ` +
@@ -175,15 +216,15 @@ registerTool({
     }
 
     const subscriber = {
-      civilite: input.civilite,
+      civilite: civilite as 'monsieur' | 'madame',
       lastName,
       firstName,
-      addressLine: input.addressLine,
+      addressLine: addressLine as string,
       ...(input.addressComplement !== undefined
         ? { addressComplement: input.addressComplement }
         : {}),
-      postalCode: input.postalCode,
-      city: input.city,
+      postalCode: postalCode as string,
+      city: city as string,
       phoneMobile,
       email,
       ...(input.profession !== undefined ? { profession: input.profession } : {}),

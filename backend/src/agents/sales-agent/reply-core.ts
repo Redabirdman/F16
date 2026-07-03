@@ -39,7 +39,9 @@ import {
   type QualificationState,
 } from './qualification.js';
 
-const MAX_HISTORY_TURNS = 10;
+// 2026-07-03: 10 turns scrolled past the customer's address/civilité mid-sale
+// (the agent re-asked → loop). 24 covers a full qualify→confirm conversation.
+const MAX_HISTORY_TURNS = 24;
 const MAX_REPLY_CHARS = 1500;
 const REPLY_TOKEN_BUDGET = 400;
 /** Tighter cap for the voice channel — one short spoken sentence. */
