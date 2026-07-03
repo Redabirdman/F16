@@ -153,6 +153,28 @@ export function formatQuotePreviewMessage(opts: {
 }
 
 /**
+ * Customer-facing note when the devis was generated and the PDF is in
+ * transit through the inbox relay (Maxance → contact@ → WhatsApp/email).
+ * The actual document message follows from handleDevisPdfReceived — this
+ * one just closes the loop instantly so the customer never wonders.
+ */
+export function formatQuoteRelayPendingMessage(opts: {
+  firstName?: string;
+  devisNumber: string;
+  quoteId: string;
+}): string {
+  const greeting = opts.firstName ? `Bonjour ${capFirst(opts.firstName)},` : 'Bonjour,';
+  return [
+    greeting,
+    '',
+    `Votre devis est prêt ! 📄 Référence : ${opts.devisNumber}.`,
+    "Je vous l'envoie ici même et par email dans un instant.",
+    '',
+    `(réf #${opts.quoteId.slice(0, 8)} envoyé)`,
+  ].join('\n');
+}
+
+/**
  * Customer-facing confirmation after Maxance has emailed the quote PDF.
  * Achraf's wording — locked once, templated forever.
  */

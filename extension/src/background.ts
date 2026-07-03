@@ -241,6 +241,8 @@ async function orchestrateNavigatingFlow(tabId: number, command: Command): Promi
   const hardDeadline = 'timeoutMs' in command ? (command.timeoutMs ?? 240_000) : 240_000;
   /** Count garanties→garanties hand-backs to detect a non-converging control. */
   let garantiesReinvokeCount = 0;
+  /** Count mid-command content-script deaths recovered as implicit navs. */
+  let channelDeathRecoveries = 0;
 
   for (let iter = 0; iter < ORCHESTRATE_MAX_ITERATIONS; iter += 1) {
     if (Date.now() - start > hardDeadline) {
@@ -258,6 +260,30 @@ async function orchestrateNavigatingFlow(tabId: number, command: Command): Promi
       outcome = await sendWithReinjection(tabId, envelope, ADVANCE_TIMEOUT_MS);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      // "message channel closed before a response was received" = the page
+      // NAVIGATED while the content script was mid-command and Chrome tore it
+      // down before it could return its `*.navigating` response (live
+      // 2026-07-03: the Devis OK click's nav outran runQuoteConfirm's return
+      // → the whole confirm died as maxance_extension_forward_failed with the
+      // devis already created). Treat it as an IMPLICIT navigating: await the
+      // nav, settle, re-invoke — the flows are idempotent + screen-dispatched
+      // so the fresh page picks up exactly where the wizard actually is.
+      const channelDied =
+        msg !== 'sw_forward_timeout' &&
+        /message channel closed|message port closed|receiving end does not exist/i.test(msg);
+      if (channelDied && channelDeathRecoveries < 3) {
+        channelDeathRecoveries += 1;
+        console.warn(
+          `[f16-ext] orchestrator: content script died mid-command (${msg.slice(0, 80)}) — treating as navigation, re-invoking (${channelDeathRecoveries}/3)`,
+        );
+        try {
+          await waitForNavigationComplete(tabId, NAV_COMPLETE_TIMEOUT_MS);
+        } catch {
+          // Nav may have already completed before we started waiting.
+        }
+        await sleep(POST_NAV_SETTLE_MS);
+        continue;
+      }
       return ErrorResponseSchema.parse({
         id: command.id,
         kind: 'error',

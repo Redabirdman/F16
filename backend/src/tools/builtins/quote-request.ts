@@ -39,10 +39,10 @@
  *     stale 'requested' row in the operator UI and a human can retry.
  */
 import { z } from 'zod';
-import { eq } from 'drizzle-orm';
+import { and, desc, eq, gt, isNull } from 'drizzle-orm';
 import { randomUUID } from 'node:crypto';
 import { registerTool } from '../registry.js';
-import { customers, leads } from '../../db/schema/index.js';
+import { customers, leads, quotes } from '../../db/schema/index.js';
 import { insertQuote } from '../../db/repositories/quotes.js';
 import { sendMessage } from '../../messaging/dispatcher.js';
 
@@ -159,6 +159,35 @@ registerTool({
     if (!lead) throw new Error(`Lead ${input.leadId} not found`);
     if (lead.customerId && lead.customerId !== input.customerId) {
       throw new Error(`Lead ${input.leadId} belongs to a different customer than the one passed`);
+    }
+
+    // 1b. In-flight guard (2026-07-03): a quote younger than 3 min still in
+    //     'requested' means Maxance is mid-flow for this lead. The LLM
+    //     re-calling quote.request in that window was the preview-loop bug
+    //     (3 Maxance runs in 4 min) — refuse with actionable guidance
+    //     instead of burning another 45s flow on the single tab.
+    const threeMinAgo = new Date(Date.now() - 3 * 60_000);
+    const [inFlight] = await ctx.db
+      .select({ id: quotes.id })
+      .from(quotes)
+      .where(
+        and(
+          eq(quotes.leadId, input.leadId),
+          eq(quotes.status, 'requested'),
+          // markQuotePreview stamps the price but not the status — "no price
+          // yet" is what actually means the Maxance flow is still running.
+          isNull(quotes.monthlyPremium),
+          gt(quotes.requestedAt, threeMinAgo),
+        ),
+      )
+      .orderBy(desc(quotes.requestedAt))
+      .limit(1);
+    if (inFlight) {
+      throw new Error(
+        'Un devis est DÉJÀ en cours de calcul pour ce lead — le résultat arrive dans moins ' +
+          "d'une minute. Ne relance PAS quote.request : réponds simplement au client que son " +
+          'devis arrive, ou appelle quote.confirm si les tarifs sont déjà affichés.',
+      );
     }
 
     // 2. Generate the payload + insert the canonical quotes row first.

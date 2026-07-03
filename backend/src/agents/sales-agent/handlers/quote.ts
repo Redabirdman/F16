@@ -21,6 +21,7 @@ import * as humanActions from '../../../db/repositories/human-actions.js';
 import {
   formatQuotePreviewMessage,
   formatQuoteReadyMessage,
+  formatQuoteRelayPendingMessage,
   formatQuoteFailedMessage,
   type AddOnPricingInfo,
   type FormulePricingLine,
@@ -216,12 +217,25 @@ export async function handleQuoteReady(
 
   const fullName = decryptPII(customer.fullName) ?? '';
   const firstName = (fullName.split(' ')[0] ?? '').trim();
-  const draft = formatQuoteReadyMessage({
-    firstName,
-    pdfSentTo: payload.pdfSentTo,
-    devisNumber: payload.devisNumber,
-    quoteId: payload.quoteId,
-  });
+  // Inbox-relay delivery (2026-07-02): Maxance emails the PDF to OUR
+  // Workspace inbox, not the customer — telling the customer "arrivé par
+  // mail à contact@assuryalconseil.fr" would leak the relay and confuse
+  // them. In relay mode announce the imminent delivery instead; the actual
+  // PDF message follows from handleDevisPdfReceived within ~1 min.
+  const relayTo = process.env.F16_DEVIS_COURRIER_TO;
+  const relayed = relayTo !== undefined && payload.pdfSentTo === relayTo;
+  const draft = relayed
+    ? formatQuoteRelayPendingMessage({
+        firstName,
+        devisNumber: payload.devisNumber,
+        quoteId: payload.quoteId,
+      })
+    : formatQuoteReadyMessage({
+        firstName,
+        pdfSentTo: payload.pdfSentTo,
+        devisNumber: payload.devisNumber,
+        quoteId: payload.quoteId,
+      });
 
   const send = await sendViaChannel({
     db: ctx.db,

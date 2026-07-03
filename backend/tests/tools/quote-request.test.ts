@@ -200,7 +200,8 @@ describe('quote.request — handler quoteId ↔ quotes.id correlation', () => {
   const tool = getTool('quote.request')!;
 
   /** ctx.db double: each select() consumes the next result set in `queue`
-   *  (1st = customer sanity check, 2nd = lead sanity check). */
+   *  (1st = customer sanity check, 2nd = lead sanity check, 3rd = in-flight
+   *  quote guard — defaults to empty = nothing in flight). */
   function makeDbSelectQueue(queue: unknown[][]): ToolContext['db'] {
     let i = 0;
     return {
@@ -209,6 +210,7 @@ describe('quote.request — handler quoteId ↔ quotes.id correlation', () => {
         const chain = {
           from: () => chain,
           where: () => chain,
+          orderBy: () => chain,
           limit: () => Promise.resolve(rows),
         };
         return chain;
