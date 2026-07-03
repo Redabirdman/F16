@@ -270,7 +270,13 @@ async function orchestrateNavigatingFlow(tabId: number, command: Command): Promi
       // so the fresh page picks up exactly where the wizard actually is.
       const channelDied =
         msg !== 'sw_forward_timeout' &&
-        /message channel closed|message port closed|receiving end does not exist/i.test(msg);
+        // Covers every Chrome phrasing seen live: "the message channel
+        // closed before a response", "the message channel is closed"
+        // (back/forward-cache variant, 2026-07-03), "message port closed",
+        // "Receiving end does not exist".
+        /message (?:channel|port) (?:is )?closed|back\/forward cache|receiving end does not exist/i.test(
+          msg,
+        );
       if (channelDied && channelDeathRecoveries < 3) {
         channelDeathRecoveries += 1;
         console.warn(
