@@ -37,6 +37,8 @@ import { customers, leads } from '../../db/schema/index.js';
 import { decryptPII } from '../../db/crypto.js';
 import { listTurns } from '../../db/repositories/conversation-turns.js';
 import { sendViaChannel } from '../../channels/send.js';
+import { coerceSendableChannel } from '../../channels/registry.js';
+import { followUpTemplate } from '../../channels/email/templates.js';
 import type { ChannelId, ContactRef } from '../../channels/types.js';
 import { sendMessage } from '../../messaging/dispatcher.js';
 import * as humanActions from '../../db/repositories/human-actions.js';
@@ -205,8 +207,13 @@ export class EngagementAgent extends BaseAgent {
   }): Promise<MessageHandlerResult> {
     const { lead, step, recentTurnsDesc } = args;
     // Channel selection: mirror the Sales Agent's heuristic — most recent
-    // turn's channel wins, WhatsApp as the default for fresh leads.
-    const channel: ChannelId = (recentTurnsDesc[0]?.channel as ChannelId | undefined) ?? 'whatsapp';
+    // turn's channel wins, WhatsApp as the default for fresh leads. Coerced
+    // through the registry: a lead whose last turn is a 'voice' call has no
+    // send adapter, and the raw channel made every tick fail forever
+    // (stranded nudge, 2026-07-04 audit).
+    const channel: ChannelId = coerceSendableChannel(
+      recentTurnsDesc[0]?.channel as ChannelId | undefined,
+    );
     const resolved = await this.resolveCustomerAndContact(lead, channel);
     if (!resolved.contactRef) {
       logger.warn(
@@ -219,7 +226,12 @@ export class EngagementAgent extends BaseAgent {
       };
     }
 
+    // Inbound-only: the nudge prompt must never see our own outbound turns —
+    // pre-2026-07-02 price messages carried annuals mislabeled as monthlies,
+    // and any future prompt change that surfaces outbound snippets would
+    // leak those stale figures into a nudge.
     const recentSnippets = recentTurnsDesc
+      .filter((t) => t.direction === 'inbound')
       .slice(0, SNIPPET_TURN_LIMIT)
       .reverse()
       .map((t) => ({ direction: t.direction, content: t.content }));
@@ -234,6 +246,24 @@ export class EngagementAgent extends BaseAgent {
     };
     const nudge = await generateNudgeText(nudgeInput);
 
+    // Email nudges ride the curated follow-up template's envelope (subject /
+    // preheader / WhatsApp CTA) instead of the adapter's derive-subject-from-
+    // body fallback, which turned the nudge text into its own subject line.
+    // The body stays the LLM/template nudge text on every channel.
+    const emailHints =
+      channel === 'email'
+        ? (() => {
+            const t = followUpTemplate({ ...(firstName ? { firstName } : {}) });
+            return {
+              email: {
+                subject: t.subject,
+                ...(t.preheader ? { preheader: t.preheader } : {}),
+                ...(t.cta ? { cta: t.cta } : {}),
+              },
+            };
+          })()
+        : {};
+
     const send = await sendViaChannel({
       db: this.db,
       customerId: resolved.customer.id,
@@ -243,6 +273,7 @@ export class EngagementAgent extends BaseAgent {
       agentRole: this.role,
       agentInstance: this.instanceId,
       correlationId: lead.id,
+      ...emailHints,
     });
 
     logger.info(

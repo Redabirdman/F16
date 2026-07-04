@@ -298,9 +298,11 @@ d('EngagementAgent.onMessage', () => {
   });
 
   it('sends nudge 1 at step 0 when >= 24h have elapsed (weekday daytime)', async () => {
-    // Pick a deterministic Tuesday 14:00 Paris by fixing Date.now so the
-    // quiet-hours gate evaluates against a known weekday-daytime moment.
-    const originalNow = Date.now;
+    // Pick a deterministic Tuesday 14:00 Paris. The agent reads the clock via
+    // `new Date()`, so pin the WHOLE Date constructor (withFixedClock) — the
+    // old Date.now-only override leaked the real wall-clock into the
+    // quiet-hours gate and failed this test on weekends (first bit 2026-07-04,
+    // a Saturday).
     // 2026-05-19 14:00 Paris = 12:00 UTC (CEST UTC+2). Tuesday.
     const fixed = new Date('2026-05-19T12:00:00Z');
     const cust = await insertCustomer(db, { fullName: 'Marie Test', phone: '+33611111111' });
@@ -324,8 +326,7 @@ d('EngagementAgent.onMessage', () => {
       content: 'welcome',
       occurredAt: new Date(fixed.getTime() - 30 * 3600_000),
     });
-    Date.now = () => fixed.getTime();
-    try {
+    await withFixedClock(fixed, async () => {
       const result = await newAgent().handle(envelope(lead!.id));
       expect(result).toMatchObject({
         ok: true,
@@ -341,9 +342,7 @@ d('EngagementAgent.onMessage', () => {
       const nudgeTurn = turns.find((t) => t.agentRole === 'engagement-agent');
       expect(nudgeTurn).toBeDefined();
       expect(nudgeTurn?.direction).toBe('outbound');
-    } finally {
-      Date.now = originalNow;
-    }
+    });
   });
 
   it('skips on quiet hours (Saturday) even when threshold is reached', async () => {

@@ -69,14 +69,17 @@ export class EmailAdapter implements ConversationChannel {
       throw new Error('Email send: body must contain at least one block');
     }
 
-    const subject = deriveSubject(opts.body);
+    const subject = opts.email?.subject ?? deriveSubject(opts.body);
     const text = buildPlainText(opts.body);
     // 2026-07-03: every customer email ships inside the Assuryal branded
     // shell (header/accent/footer) — the raw block fragments become the
     // card body, the plain-text first line becomes the inbox preheader.
+    // Callers may override subject/preheader/CTA via opts.email (curated
+    // templates); the body always stays the caller's blocks.
     const html = renderBrandedEmail({
       bodyHtml: buildHtml(opts.body),
-      preheader: text.split('\n')[0]?.slice(0, 140) ?? '',
+      preheader: opts.email?.preheader ?? text.split('\n')[0]?.slice(0, 140) ?? '',
+      ...(opts.email?.cta ? { cta: opts.email.cta } : {}),
     });
     const attachments = buildAttachments(opts.body);
 

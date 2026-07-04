@@ -98,6 +98,18 @@ export interface SendOptions {
   /** Optional: agent identity for outbound attribution (written to conversation_turns). */
   agentRole?: string;
   agentInstance?: string;
+  /**
+   * Email-only presentation hints — ignored by every non-email adapter.
+   * Without them the email adapter derives the subject from the first text
+   * block, which turns a nudge body into its own subject line. Callers with
+   * a curated template (channels/email/templates.ts) pass its subject /
+   * preheader / CTA here while keeping the message text as the body.
+   */
+  email?: {
+    subject?: string;
+    preheader?: string;
+    cta?: { label: string; url: string };
+  };
 }
 
 /** The contract every channel adapter implements. */

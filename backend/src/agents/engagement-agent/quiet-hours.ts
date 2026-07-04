@@ -2,9 +2,10 @@
  * Quiet-hours helper for the Customer Engagement Agent (M11).
  *
  * Locked design: no outbound between 21:00 and 08:00 Europe/Paris, and no
- * outbound on Saturdays or Sundays Europe/Paris. The engagement scheduler
- * + agent both consult this — the scheduler so we don't churn enqueuing
- * ticks that the agent will immediately skip, the agent as the actual gate.
+ * outbound on Saturdays or Sundays Europe/Paris. The AGENT is the sole,
+ * authoritative gate — the scheduler deliberately enqueues through quiet
+ * hours and lets the agent skip (a few no-op ticks are cheaper than
+ * duplicating timezone logic in two places).
  *
  * We use `Intl.DateTimeFormat('fr-FR', {timeZone: 'Europe/Paris'})` to read
  * the local hour + weekday — sidesteps DST math (CET/CEST) and avoids

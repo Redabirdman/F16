@@ -45,6 +45,8 @@ export interface SendViaChannelInput {
   agentInstance?: string;
   /** Optional correlation id propagated to the channel adapter for tracing. */
   correlationId?: string;
+  /** Email-only presentation hints (subject/preheader/CTA) — see SendOptions.email. */
+  email?: { subject?: string; preheader?: string; cta?: { label: string; url: string } };
 }
 
 export interface SendViaChannelResult {
@@ -72,6 +74,7 @@ export async function sendViaChannel(input: SendViaChannelInput): Promise<SendVi
     ...(input.correlationId ? { correlationId: input.correlationId } : {}),
     ...(input.agentRole ? { agentRole: input.agentRole } : {}),
     ...(input.agentInstance ? { agentInstance: input.agentInstance } : {}),
+    ...(input.email ? { email: input.email } : {}),
   });
 
   // Channel send succeeded — derive the audit shape from the body. We map
@@ -151,17 +154,36 @@ function deriveAttachments(
 ): Array<{ url: string; type: string; size?: number; sha256?: string }> {
   return body.flatMap((b) => {
     if (b.type === 'image') {
-      return [{ url: b.url, type: 'image', ...(b.sha256 ? { sha256: b.sha256 } : {}) }];
+      return [{ url: auditUrl(b.url), type: 'image', ...(b.sha256 ? { sha256: b.sha256 } : {}) }];
     }
     if (b.type === 'audio') {
-      return [{ url: b.url, type: 'audio' }];
+      return [{ url: auditUrl(b.url), type: 'audio' }];
     }
     if (b.type === 'video') {
-      return [{ url: b.url, type: 'video' }];
+      return [{ url: auditUrl(b.url), type: 'video' }];
     }
     if (b.type === 'document') {
-      return [{ url: b.url, type: 'document', ...(b.sha256 ? { sha256: b.sha256 } : {}) }];
+      return [
+        {
+          url: auditUrl(b.url, b.filename),
+          type: 'document',
+          ...(b.sha256 ? { sha256: b.sha256 } : {}),
+        },
+      ];
     }
     return [];
   });
+}
+
+/**
+ * Audit-safe URL for the attachments JSONB. A devis PDF rides the send as a
+ * multi-MB base64 `data:` URI — persisting that verbatim bloats every
+ * conversation_turns row (~1.35× the PDF, twice per devis) and drags the
+ * admin timeline payloads. Store a compact reference instead; the real file
+ * lives on disk (var/devis/<DR>.pdf) and in the recipient's mailbox/chat.
+ */
+function auditUrl(url: string, filename?: string): string {
+  if (!url.startsWith('data:')) return url;
+  const mime = url.slice(5, url.indexOf(';') > 0 ? url.indexOf(';') : 5 + 30).split(',')[0];
+  return `inline:${filename ?? mime ?? 'attachment'}`;
 }
