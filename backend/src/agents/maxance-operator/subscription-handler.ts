@@ -227,6 +227,9 @@ export async function handleSubscriptionRequested(
       payload: {
         quoteId,
         customerId,
+        // Singleton sales-agent needs the explicit leadId — correlationId is
+        // the quoteId and the fallback heuristic resolves the wrong id.
+        ...(payload.leadId ? { leadId: payload.leadId } : {}),
         ...(result.souscripteurRef != null ? { souscripteurRef: result.souscripteurRef } : {}),
         ...(montantComptantEur != null ? { montantComptantEur } : {}),
         fraisComptantEur,
@@ -411,6 +414,7 @@ async function failSubscription(
       payload: {
         quoteId: payload.quoteId,
         customerId: payload.customerId,
+        ...(payload.leadId ? { leadId: payload.leadId } : {}),
         errorCode,
         ...(detail ? { detail } : {}),
         screenshots: [],

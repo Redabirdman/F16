@@ -59,6 +59,26 @@ export function listChannels(): ConversationChannel[] {
 }
 
 /**
+ * Pick a channel we can actually SEND on. Conversation turns record every
+ * channel a lead touched — including 'voice', which has no send adapter
+ * (calls are placed by the voice-operator, not sent like messages). Blindly
+ * reusing the last turn's channel made QUOTE.* handlers and engagement
+ * nudges hit getChannel('voice') → throw → BullMQ retries → DLQ, and the
+ * customer never received the message (2026-07-04 audit).
+ *
+ * Rule: the candidate wins when a send adapter is registered for it;
+ * otherwise fall back to WhatsApp (the Assuryal funnel is WhatsApp-first).
+ * When the registry is empty (unit tests that stub sendViaChannel), the
+ * candidate passes through unchanged so channel-selection tests keep their
+ * inputs.
+ */
+export function coerceSendableChannel(candidate: ChannelId | undefined): ChannelId {
+  if (_channels.size === 0) return candidate ?? 'whatsapp';
+  if (candidate && _channels.has(candidate)) return candidate;
+  return 'whatsapp';
+}
+
+/**
  * Test-only escape hatch — clears the registry so a test starts from a known
  * empty state. Not part of the public API; production code never calls this.
  */

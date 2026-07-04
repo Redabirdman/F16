@@ -66,6 +66,13 @@ export const SubscriptionReadyPayload = registerIntent(
   z.object({
     quoteId: z.string().uuid(),
     customerId: z.string().uuid(),
+    /**
+     * Lead the souscription belongs to. The sales-agent is a singleton and
+     * the envelope correlationId is the quoteId — without this the handler's
+     * fallback resolves the WRONG id and dies with "Lead not found" (same
+     * class as the 2026-07-02 QUOTE.PREVIEW_READY incident).
+     */
+    leadId: z.string().uuid().optional(),
     /** Maxance souscripteur/instance ref from the Paiement page. Absent on dryRun. */
     souscripteurRef: z.string().optional(),
     /** "Comptant dû" read from the portal, €. Absent when extraction failed. */
@@ -92,6 +99,8 @@ export const SubscriptionFailedPayload = registerIntent(
   z.object({
     quoteId: z.string().uuid(),
     customerId: z.string().uuid(),
+    /** Lead the souscription belongs to — see SUBSCRIPTION.READY.leadId. */
+    leadId: z.string().uuid().optional(),
     /** Tagged failure code (e.g. `maxance_subscription_wrong_state`). */
     errorCode: z.string().min(1),
     /** Optional human-readable hint for the operator UI. Never echo to customer. */

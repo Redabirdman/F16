@@ -41,6 +41,7 @@ import { sendViaChannel } from '../../channels/send.js';
 import type { ChannelId, ContactRef } from '../../channels/types.js';
 import { checkComplianceFor } from '../../compliance/index.js';
 import * as humanActions from '../../db/repositories/human-actions.js';
+import { notifyHumanAction } from '../human-notify.js';
 import { sendMessage } from '../../messaging/dispatcher.js';
 import { appendAudit } from '../../db/repositories/audit-log.js';
 import { recordCustomerFact } from '../../memory/index.js';
@@ -202,6 +203,14 @@ export class SalesAgent extends BaseAgent {
           requiresHuman: true,
           priority: 2,
         },
+      );
+      // COMPLIANCE.BLOCKED only reaches the supervisor's audit trail; the WA
+      // group needs the HUMAN_ACTION emit (2026-07-04 audit, H1). Without it
+      // a blocked welcome sits in the admin while the lead goes cold.
+      await notifyHumanAction(
+        this.db,
+        { id: action.id, severity: 2, summary: action.summary },
+        { role: this.role, instanceId: this.instanceId, correlationId: lead.id },
       );
 
       // Lead status stays 'scored' — human resolves before we re-attempt.

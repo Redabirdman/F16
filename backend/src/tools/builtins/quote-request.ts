@@ -44,7 +44,9 @@ import { randomUUID } from 'node:crypto';
 import { registerTool } from '../registry.js';
 import { customers, leads, quotes } from '../../db/schema/index.js';
 import { insertQuote } from '../../db/repositories/quotes.js';
+import { setLeadStatus } from '../../db/repositories/leads.js';
 import { sendMessage } from '../../messaging/dispatcher.js';
+import { logger } from '../../logger.js';
 
 export const quoteRequestToolName = 'quote.request';
 
@@ -222,6 +224,20 @@ registerTool({
         payload,
       },
     );
+
+    // 4. Lifecycle: the lead is now 'quoting'. Best-effort — the quote flow
+    //    must not die on a status write, but without this the HubSpot deal
+    //    stage sat at "Qualifié" forever (2026-07-04 audit: quoting /
+    //    negotiating were never written anywhere after the singleton
+    //    refactor). setLeadStatus is the chokepoint that mirrors to HubSpot.
+    try {
+      await setLeadStatus(ctx.db, input.leadId, 'quoting');
+    } catch (err) {
+      logger.warn(
+        { leadId: input.leadId, err: err instanceof Error ? err.message : String(err) },
+        'quote.request: setLeadStatus(quoting) failed (non-fatal)',
+      );
+    }
 
     return { quoteId: payload.quoteId, queued: true as const };
   },

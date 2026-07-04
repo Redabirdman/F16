@@ -11,8 +11,10 @@ import { logger } from '../../../logger.js';
 import { decryptPII } from '../../../db/crypto.js';
 import { listTurns } from '../../../db/repositories/conversation-turns.js';
 import { sendViaChannel } from '../../../channels/send.js';
+import { coerceSendableChannel } from '../../../channels/registry.js';
 import type { ChannelId } from '../../../channels/types.js';
 import * as humanActions from '../../../db/repositories/human-actions.js';
+import { notifyHumanAction } from '../../human-notify.js';
 import { formatSubscriptionReadyMessage, formatSubscriptionFailedMessage } from '../formatters.js';
 import type { SalesHandlerCtx } from './context.js';
 
@@ -37,6 +39,7 @@ export async function handleSubscriptionReady(
   const payload = envelope.payload as {
     quoteId: string;
     customerId: string;
+    leadId?: string;
     souscripteurRef?: string;
     montantComptantEur?: number;
     fraisComptantEur?: number;
@@ -46,7 +49,10 @@ export async function handleSubscriptionReady(
     dryRun: boolean;
   };
 
-  const leadId = ctx.leadIdFromEnvelope(envelope);
+  // Prefer the explicit payload.leadId — the sales-agent is a SINGLETON and
+  // the envelope correlationId is the quoteId, so the fallback heuristic
+  // resolves the wrong id (same guard as the QUOTE.* handlers, 2026-07-04).
+  const leadId = payload.leadId ?? ctx.leadIdFromEnvelope(envelope);
   if (!leadId) return { ok: false, error: 'no leadId available' };
 
   const recentTurns = await listTurns(ctx.db, {
@@ -54,7 +60,9 @@ export async function handleSubscriptionReady(
     leadId,
     limit: 5,
   });
-  const channel: ChannelId = (recentTurns[0]?.channel as ChannelId | undefined) ?? 'whatsapp';
+  const channel: ChannelId = coerceSendableChannel(
+    recentTurns[0]?.channel as ChannelId | undefined,
+  );
 
   const { customer, lead, contactRef } = await ctx.resolveCustomerAndContact(leadId, channel);
   if (!contactRef) {
@@ -139,12 +147,14 @@ export async function handleSubscriptionFailed(
   const payload = envelope.payload as {
     quoteId: string;
     customerId: string;
+    leadId?: string;
     errorCode: string;
     detail?: string;
     screenshots?: { step: string; url: string }[];
   };
 
-  const leadId = ctx.leadIdFromEnvelope(envelope);
+  // Prefer the explicit payload.leadId (singleton — see handleSubscriptionReady).
+  const leadId = payload.leadId ?? ctx.leadIdFromEnvelope(envelope);
   if (!leadId) return { ok: false, error: 'no leadId available' };
 
   const recentTurns = await listTurns(ctx.db, {
@@ -152,7 +162,9 @@ export async function handleSubscriptionFailed(
     leadId,
     limit: 5,
   });
-  const channel: ChannelId = (recentTurns[0]?.channel as ChannelId | undefined) ?? 'whatsapp';
+  const channel: ChannelId = coerceSendableChannel(
+    recentTurns[0]?.channel as ChannelId | undefined,
+  );
 
   const { customer, lead, contactRef } = await ctx.resolveCustomerAndContact(leadId, channel);
   const fullName = decryptPII(customer.fullName) ?? '';
@@ -176,6 +188,12 @@ export async function handleSubscriptionFailed(
       { id: 'abandon', label: 'Abandonner ce lead', kind: 'reject' },
     ],
   });
+  // Row alone only reaches the admin — the WA group needs the emit (H1).
+  await notifyHumanAction(
+    ctx.db,
+    { id: action.id, severity: 2, summary: action.summary },
+    { role: ctx.role, instanceId: ctx.instanceId, correlationId: payload.quoteId },
+  );
 
   if (!contactRef) {
     logger.warn(

@@ -32,6 +32,7 @@ import type { Database } from '../../db/index.js';
 import { agentMessages } from '../../db/schema/index.js';
 import { appendAudit, listAuditEntries } from '../../db/repositories/audit-log.js';
 import { createAction } from '../../db/repositories/human-actions.js';
+import { notifyHumanAction } from '../human-notify.js';
 import { logger } from '../../logger.js';
 
 const DEFAULT_INTERVAL_MS = 5 * 60_000; // 5 minutes
@@ -200,6 +201,12 @@ async function flagLoop(
       { id: 'kill_second', label: `Arrêter ${ctx.distinctAgents[1] ?? 'B'}`, kind: 'reject' },
     ],
   });
+  // A live agent loop is urgent — reach the WA group, not just the admin (H1).
+  await notifyHumanAction(
+    db,
+    { id: action.id, severity: 2, summary: action.summary },
+    { role: 'supervisor-agent', instanceId: 'singleton', correlationId: ctx.correlationId },
+  );
   try {
     await appendAudit(db, {
       actorType: 'agent',

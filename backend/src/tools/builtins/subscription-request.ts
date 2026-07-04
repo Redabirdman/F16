@@ -85,12 +85,18 @@ const outputSchema = z.object({
  * leaks into the payload. The operator reads those from the encrypted row;
  * the `bankRef: 'customer'` literal documents that indirection.
  *
- * `leadId` is intentionally omitted (nullish in the schema) — the operator
- * correlates by quoteId/customerId, and the tool isn't handed a leadId.
+ * `leadId` comes from the quotes row (not the LLM) — the operator must echo
+ * it back on SUBSCRIPTION.READY/FAILED so the singleton sales-agent can
+ * resolve the lead (the envelope correlationId is the quoteId; the fallback
+ * heuristic resolves the wrong id — 2026-07-02 QUOTE.* incident class).
  */
-export function buildSubscriptionRequestedPayload(input: z.infer<typeof inputSchema>): {
+export function buildSubscriptionRequestedPayload(
+  input: z.infer<typeof inputSchema>,
+  leadId?: string | null,
+): {
   quoteId: string;
   customerId: string;
+  leadId?: string;
   devisNumber: string;
   formule: z.infer<typeof FormuleEnum>;
   fractionnement: z.infer<typeof FractionnementEnum>;
@@ -100,6 +106,7 @@ export function buildSubscriptionRequestedPayload(input: z.infer<typeof inputSch
   return {
     quoteId: input.quoteId,
     customerId: input.customerId,
+    ...(leadId ? { leadId } : {}),
     devisNumber: input.devisNumber,
     formule: input.formule,
     fractionnement: input.fractionnement,
@@ -134,7 +141,7 @@ registerTool({
     if (!customer) throw new Error(`Customer ${input.customerId} not found`);
 
     const [quote] = await ctx.db
-      .select({ id: quotes.id, customerId: quotes.customerId })
+      .select({ id: quotes.id, customerId: quotes.customerId, leadId: quotes.leadId })
       .from(quotes)
       .where(eq(quotes.id, input.quoteId))
       .limit(1);
@@ -181,7 +188,7 @@ registerTool({
     // 5. Emit SUBSCRIPTION.REQUESTED → 'quote' queue → Maxance Operator. The
     //    payload carries bankRef:'customer' and NO bank detail; the operator
     //    decrypts the IBAN/BIC from the DB at drive time.
-    const payload = buildSubscriptionRequestedPayload(input);
+    const payload = buildSubscriptionRequestedPayload(input, quote.leadId);
     await sendMessage(
       { db: ctx.db },
       {

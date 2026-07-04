@@ -16,8 +16,10 @@ import { decryptPII } from '../../../db/crypto.js';
 import { listTurns } from '../../../db/repositories/conversation-turns.js';
 import { getQuoteByDevisNumber } from '../../../db/repositories/quotes.js';
 import { sendViaChannel } from '../../../channels/send.js';
+import { coerceSendableChannel } from '../../../channels/registry.js';
 import type { ChannelId } from '../../../channels/types.js';
 import * as humanActions from '../../../db/repositories/human-actions.js';
+import { notifyHumanAction } from '../../human-notify.js';
 import {
   formatQuotePreviewMessage,
   formatQuoteReadyMessage,
@@ -69,7 +71,9 @@ export async function handleQuotePreviewReady(
     leadId,
     limit: 5,
   });
-  const channel: ChannelId = (recentTurns[0]?.channel as ChannelId | undefined) ?? 'whatsapp';
+  const channel: ChannelId = coerceSendableChannel(
+    recentTurns[0]?.channel as ChannelId | undefined,
+  );
 
   const { customer, lead, contactRef } = await ctx.resolveCustomerAndContact(leadId, channel);
   if (!contactRef) {
@@ -194,7 +198,9 @@ export async function handleQuoteReady(
     leadId,
     limit: 5,
   });
-  const channel: ChannelId = (recentTurns[0]?.channel as ChannelId | undefined) ?? 'whatsapp';
+  const channel: ChannelId = coerceSendableChannel(
+    recentTurns[0]?.channel as ChannelId | undefined,
+  );
 
   const { customer, lead, contactRef } = await ctx.resolveCustomerAndContact(leadId, channel);
   if (!contactRef) {
@@ -307,7 +313,9 @@ export async function handleQuoteFailed(
     leadId,
     limit: 5,
   });
-  const channel: ChannelId = (recentTurns[0]?.channel as ChannelId | undefined) ?? 'whatsapp';
+  const channel: ChannelId = coerceSendableChannel(
+    recentTurns[0]?.channel as ChannelId | undefined,
+  );
 
   const { customer, lead, contactRef } = await ctx.resolveCustomerAndContact(leadId, channel);
   const fullName = decryptPII(customer.fullName) ?? '';
@@ -331,6 +339,12 @@ export async function handleQuoteFailed(
       { id: 'abandon', label: 'Abandonner ce lead', kind: 'reject' },
     ],
   });
+  // Row alone only reaches the admin — the WA group needs the emit (H1).
+  await notifyHumanAction(
+    ctx.db,
+    { id: action.id, severity: 2, summary: action.summary },
+    { role: ctx.role, instanceId: ctx.instanceId, correlationId: payload.quoteId },
+  );
 
   if (!contactRef) {
     logger.warn(
@@ -415,10 +429,13 @@ export async function handleDevisPdfReceived(
   const leadId = quote.leadId;
 
   const marker = `Réf. ${payload.devisNumber}`;
+  // 50-turn window: a chatty conversation could push the delivery marker
+  // past a 10-turn scan and let a duplicate DEVIS.PDF_RECEIVED (IMAP \Seen
+  // write lost after dispatch) re-deliver the PDF.
   const recentTurns = await listTurns(ctx.db, {
     customerId: quote.customerId,
     leadId,
-    limit: 10,
+    limit: 50,
   });
   if (recentTurns.some((t) => t.direction === 'outbound' && (t.content ?? '').includes(marker))) {
     return { ok: true, result: { skipped: 'already-delivered', devisNumber: payload.devisNumber } };
@@ -438,6 +455,7 @@ export async function handleDevisPdfReceived(
     `nous pouvons finaliser la souscription ensemble.`;
 
   const deliveries: Record<string, string> = {};
+  const failures: Record<string, string> = {};
   // WhatsApp first (the live conversation), then email — send on every
   // channel the customer has an address for; a failure on one channel must
   // not block the other.
@@ -457,12 +475,13 @@ export async function handleDevisPdfReceived(
       });
       deliveries[channel] = send.receipt.externalId;
     } catch (err) {
+      failures[channel] = err instanceof Error ? err.message : String(err);
       logger.error(
         {
           devisNumber: payload.devisNumber,
           leadId,
           channel,
-          err: err instanceof Error ? err.message : String(err),
+          err: failures[channel],
         },
         'sales-agent: devis PDF delivery failed on channel',
       );
@@ -471,7 +490,7 @@ export async function handleDevisPdfReceived(
 
   if (Object.keys(deliveries).length === 0) {
     // Neither channel worked — escalate so a human can send it manually.
-    await humanActions.createAction(ctx.db, {
+    const action = await humanActions.createAction(ctx.db, {
       createdByAgent: `${ctx.role}#${ctx.instanceId}`,
       correlationId: quote.id,
       intent: 'DEVIS_DELIVERY_FAILED',
@@ -484,7 +503,40 @@ export async function handleDevisPdfReceived(
         { id: 'abandon', label: 'Abandonner', kind: 'reject' },
       ],
     });
+    await notifyHumanAction(
+      ctx.db,
+      { id: action.id, severity: 2, summary: action.summary },
+      { role: ctx.role, instanceId: ctx.instanceId, correlationId: quote.id },
+    );
     return { ok: false, error: `devis_delivery_failed:${payload.devisNumber}` };
+  }
+
+  if (Object.keys(failures).length > 0) {
+    // Partial delivery: the customer HAS the PDF on one channel, but the
+    // other channel had an address and failed (e.g. revoked App Password).
+    // The `Réf.` idempotency marker is now set, so no retry will ever fill
+    // the gap — a human must (ACPR: the email copy matters).
+    const failedList = Object.entries(failures)
+      .map(([ch, msg]) => `${ch} (${msg})`)
+      .join(', ');
+    const action = await humanActions.createAction(ctx.db, {
+      createdByAgent: `${ctx.role}#${ctx.instanceId}`,
+      correlationId: quote.id,
+      intent: 'DEVIS_DELIVERY_PARTIAL',
+      severity: 3,
+      summary:
+        `Devis ${payload.devisNumber} livré sur ${Object.keys(deliveries).join(', ')} mais PAS ` +
+        `sur : ${failedList}. Lead ${leadId}. PDF : ${payload.pdfPath}. Compléter manuellement.`,
+      options: [
+        { id: 'sent_manually', label: 'Complété manuellement', kind: 'approve' },
+        { id: 'ignore', label: 'Ignorer (canal livré suffit)', kind: 'reject' },
+      ],
+    });
+    await notifyHumanAction(
+      ctx.db,
+      { id: action.id, severity: 3, summary: action.summary },
+      { role: ctx.role, instanceId: ctx.instanceId, correlationId: quote.id },
+    );
   }
 
   logger.info(

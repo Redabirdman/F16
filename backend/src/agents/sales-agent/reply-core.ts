@@ -29,6 +29,7 @@ import { buildSalesAgentSystemFragments, type SalesAgentTurnContext } from './pr
 import type { ChannelId, ContactRef } from '../../channels/types.js';
 import { checkComplianceFor } from '../../compliance/index.js';
 import * as humanActions from '../../db/repositories/human-actions.js';
+import { notifyHumanAction } from '../human-notify.js';
 import { sendMessage } from '../../messaging/dispatcher.js';
 import { listTools } from '../../tools/index.js';
 import { recallCustomerFacts } from '../../memory/index.js';
@@ -390,6 +391,15 @@ export async function generateSalesReply(
         requiresHuman: true,
         priority: 2,
       },
+    );
+
+    // The supervisor emit is audit-only; the WA group needs the HUMAN_ACTION
+    // emit (2026-07-04 audit, H1) — a blocked reply means the customer is
+    // waiting on a human decision right now.
+    await notifyHumanAction(
+      db,
+      { id: action.id, severity: 2, summary: action.summary },
+      { role: agentRole, instanceId: agentInstance, correlationId: lead.id },
     );
 
     return { outcome: 'blocked', humanActionId: action.id, reasons: compliance.reasons };
