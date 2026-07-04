@@ -40,6 +40,10 @@ import {
   type EngagementSchedulerHandle,
 } from '../agents/engagement-agent/index.js';
 import {
+  startFollowthroughWatchdog,
+  type FollowthroughWatchdogHandle,
+} from '../agents/followthrough/watchdog.js';
+import {
   registerSupervisorAgentClass,
   startArbitration,
   startStrategyReview,
@@ -73,6 +77,8 @@ export interface WorkerSet {
   knowledgeCurator: KnowledgeCuratorHandle | null;
   /** Engagement scheduler handle, if started (M11). */
   engagementScheduler: EngagementSchedulerHandle | null;
+  /** Pending-action follow-through watchdog handle, if started. */
+  followthroughWatchdog: FollowthroughWatchdogHandle | null;
   /** Paid-lead callback scheduler handle, if started (M12). */
   callbackScheduler: CallbackSchedulerHandle | null;
   /** Ads Manager poller handle (Meta sync + fatigue), if started (M12 P2). */
@@ -107,6 +113,7 @@ export interface StartWorkersOptions {
     voiceOperator?: boolean;
     knowledgeCurator?: boolean;
     engagementAgent?: boolean;
+    followthrough?: boolean;
     callbackScheduler?: boolean;
     adsPoller?: boolean;
     adsLearning?: boolean;
@@ -116,6 +123,14 @@ export interface StartWorkersOptions {
     supervisorStrategy?: boolean;
     voiceWatchdog?: boolean;
   };
+}
+
+/** Positive-integer env override; undefined when unset/garbage (use the default). */
+function envPositiveInt(name: string): number | undefined {
+  const raw = process.env[name];
+  if (!raw) return undefined;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined;
 }
 
 export async function startWorkers(opts: StartWorkersOptions): Promise<WorkerSet> {
@@ -136,6 +151,8 @@ export async function startWorkers(opts: StartWorkersOptions): Promise<WorkerSet
     voiceOperator: opts.flags?.voiceOperator ?? Boolean(process.env.ASTERISK_ARI_URL),
     knowledgeCurator: opts.flags?.knowledgeCurator ?? true,
     engagementAgent: opts.flags?.engagementAgent ?? true,
+    // Follow-through watchdog — on by default, opt out with F16_FOLLOWTHROUGH=0.
+    followthrough: opts.flags?.followthrough ?? process.env.F16_FOLLOWTHROUGH !== '0',
     callbackScheduler: opts.flags?.callbackScheduler ?? true,
     // Poller env-gated on the Meta token + ad account; learning is cheap and
     // safe to run always (no-ops on a fresh account with no ads).
@@ -166,6 +183,7 @@ export async function startWorkers(opts: StartWorkersOptions): Promise<WorkerSet
 
   let knowledgeCurator: KnowledgeCuratorHandle | null = null;
   let engagementScheduler: EngagementSchedulerHandle | null = null;
+  let followthroughWatchdog: FollowthroughWatchdogHandle | null = null;
   let callbackScheduler: CallbackSchedulerHandle | null = null;
   let adsPoller: AdsPollerHandle | null = null;
   let adsLearning: AdsLearningHandle | null = null;
@@ -375,6 +393,33 @@ export async function startWorkers(opts: StartWorkersOptions): Promise<WorkerSet
     logger.info('supervisor: engagement-agent SKIPPED by flag');
   }
 
+  // 7a. follow-through watchdog. Deterministic tick that catches the two
+  //     stuck quote states nothing else wakes up for: preview never arrived
+  //     (status='requested', no price → QUOTE_STUCK escalation + one customer
+  //     apology) and devis confirmed but never delivered (status='ready', no
+  //     Réf-marker turn → re-emit DEVIS.PDF_RECEIVED or DEVIS_RELAY_STUCK).
+  if (flags.followthrough) {
+    try {
+      const intervalMs = envPositiveInt('F16_FOLLOWTHROUGH_INTERVAL_MS');
+      const previewStuckMin = envPositiveInt('F16_PREVIEW_STUCK_MIN');
+      const deliveryStuckMin = envPositiveInt('F16_DELIVERY_STUCK_MIN');
+      followthroughWatchdog = startFollowthroughWatchdog({
+        db: opts.db,
+        ...(intervalMs !== undefined ? { intervalMs } : {}),
+        ...(previewStuckMin !== undefined ? { previewStuckMin } : {}),
+        ...(deliveryStuckMin !== undefined ? { deliveryStuckMin } : {}),
+      });
+      logger.info('supervisor: followthrough watchdog started');
+    } catch (err) {
+      logger.error(
+        { err: err instanceof Error ? err.message : String(err) },
+        'supervisor: followthrough watchdog failed to start',
+      );
+    }
+  } else {
+    logger.info('supervisor: followthrough watchdog SKIPPED (F16_FOLLOWTHROUGH=0)');
+  }
+
   // 7b. callback scheduler (M12). Scans paid 'call'-preference leads whose
   //     callback_due_at has arrived and emits VOICE.CALL_SCHEDULED → the
   //     voice-operator dials. Single, idempotent emitter (claim-by-UPDATE).
@@ -542,6 +587,7 @@ export async function startWorkers(opts: StartWorkersOptions): Promise<WorkerSet
     agents,
     knowledgeCurator,
     engagementScheduler,
+    followthroughWatchdog,
     callbackScheduler,
     adsPoller,
     adsLearning,
@@ -561,6 +607,9 @@ export async function startWorkers(opts: StartWorkersOptions): Promise<WorkerSet
       }
       if (engagementScheduler) {
         engagementScheduler.stop();
+      }
+      if (followthroughWatchdog) {
+        followthroughWatchdog.stop();
       }
       if (callbackScheduler) {
         callbackScheduler.stop();
@@ -589,6 +638,7 @@ export async function startWorkers(opts: StartWorkersOptions): Promise<WorkerSet
           agents: agents.length,
           knowledgeCurator: knowledgeCurator !== null,
           engagementScheduler: engagementScheduler !== null,
+          followthroughWatchdog: followthroughWatchdog !== null,
           callbackScheduler: callbackScheduler !== null,
           adsPoller: adsPoller !== null,
           adsLearning: adsLearning !== null,

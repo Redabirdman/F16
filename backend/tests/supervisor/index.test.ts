@@ -61,6 +61,12 @@ vi.mock('../../src/agents/engagement-agent/index.js', () => ({
     tickOnce: vi.fn().mockResolvedValue(undefined),
   })),
 }));
+vi.mock('../../src/agents/followthrough/watchdog.js', () => ({
+  startFollowthroughWatchdog: vi.fn(() => ({
+    stop: vi.fn(),
+    tickOnce: vi.fn().mockResolvedValue(undefined),
+  })),
+}));
 vi.mock('../../src/agents/supervisor-agent/index.js', () => ({
   registerSupervisorAgentClass: vi.fn(),
   startArbitration: vi.fn(() => ({
@@ -85,6 +91,7 @@ const reporterMod = await import('../../src/agents/reporter-agent/index.js');
 const voiceOperatorMod = await import('../../src/agents/voice-operator/index.js');
 const knowledgeMod = await import('../../src/knowledge/index.js');
 const engagementMod = await import('../../src/agents/engagement-agent/index.js');
+const followthroughMod = await import('../../src/agents/followthrough/watchdog.js');
 const supervisorAgentMod = await import('../../src/agents/supervisor-agent/index.js');
 
 // fakeDb only needs `execute` (the supervisor reaps stale sales-agent rows
@@ -107,6 +114,8 @@ const ENV_KEYS = [
   // deterministic regardless of the ambient .env loaded by tests/setup.ts on
   // this prod PC. Tests that want voice-operator set it explicitly.
   'ASTERISK_ARI_URL',
+  // Cleared so the followthrough gate (default on unless '0') is deterministic.
+  'F16_FOLLOWTHROUGH',
 ] as const;
 const savedEnv: Record<string, string | undefined> = {};
 
@@ -133,6 +142,7 @@ beforeEach(() => {
   vi.mocked(knowledgeMod.startKnowledgeCurator).mockClear();
   vi.mocked(engagementMod.registerEngagementAgentClass).mockClear();
   vi.mocked(engagementMod.startEngagementScheduler).mockClear();
+  vi.mocked(followthroughMod.startFollowthroughWatchdog).mockClear();
   vi.mocked(supervisorAgentMod.registerSupervisorAgentClass).mockClear();
   vi.mocked(supervisorAgentMod.startArbitration).mockClear();
   vi.mocked(supervisorAgentMod.startStrategyReview).mockClear();
@@ -170,6 +180,8 @@ describe('startWorkers — env-gated startup', () => {
     expect(set.workers).toHaveLength(1);
     expect(set.knowledgeCurator).not.toBeNull();
     expect(set.engagementScheduler).not.toBeNull();
+    expect(followthroughMod.startFollowthroughWatchdog).toHaveBeenCalledTimes(1);
+    expect(set.followthroughWatchdog).not.toBeNull();
     expect(set.supervisorArbitration).not.toBeNull();
     expect(set.supervisorStrategy).toBeNull();
     expect(registryMod.spawn).toHaveBeenCalledWith(
@@ -198,6 +210,19 @@ describe('startWorkers — env-gated startup', () => {
     expect(engagementMod.registerEngagementAgentClass).not.toHaveBeenCalled();
     expect(engagementMod.startEngagementScheduler).not.toHaveBeenCalled();
     expect(set.engagementScheduler).toBeNull();
+  });
+
+  it('skips followthrough watchdog when flag is false', async () => {
+    const set = await startWorkers({ db: fakeDb, flags: { followthrough: false } });
+    expect(followthroughMod.startFollowthroughWatchdog).not.toHaveBeenCalled();
+    expect(set.followthroughWatchdog).toBeNull();
+  });
+
+  it('skips followthrough watchdog when F16_FOLLOWTHROUGH=0', async () => {
+    process.env.F16_FOLLOWTHROUGH = '0';
+    const set = await startWorkers({ db: fakeDb });
+    expect(followthroughMod.startFollowthroughWatchdog).not.toHaveBeenCalled();
+    expect(set.followthroughWatchdog).toBeNull();
   });
 
   it('skips supervisor-agent when flag is false', async () => {
