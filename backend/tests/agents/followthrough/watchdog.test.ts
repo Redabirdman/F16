@@ -185,7 +185,10 @@ d('followthrough watchdog', () => {
       (m) => m.intent === 'HUMAN_ACTION.REQUESTED' && m.toRole === 'human-router',
     );
     expect(requested).toBeDefined();
-    expect(requested?.correlationId).toBe(quoteId);
+    // notifyHumanAction correlates on the ACTION id (never the quote/lead id
+    // — polluting a lead's correlation stream masked supervisor loop
+    // detection, 2026-07-04).
+    expect(requested?.correlationId).toBe(actions[0]?.id);
 
     // One apologetic customer message, on the stub WhatsApp channel.
     expect(wa.sends).toHaveLength(1);
