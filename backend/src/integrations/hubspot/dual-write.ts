@@ -163,6 +163,7 @@ export async function reconcileLead(
           status: latestQuote.status,
           monthlyPremium: latestQuote.monthlyPremium ?? null,
           comptantDue: latestQuote.comptantDue ?? null,
+          annualPremium: latestQuote.annualPremium ?? null,
           maxanceDevisNumber: latestQuote.maxanceDevisNumber ?? null,
           productVariant: latestQuote.productVariant,
         }

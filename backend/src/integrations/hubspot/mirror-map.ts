@@ -45,8 +45,14 @@ export interface MirrorInput {
   };
   latestQuote: {
     status: string;
+    /** The REAL monthly ("Terme suivant") → f16_monthly_premium. */
     monthlyPremium: string | null;
+    /** NAMING DRIFT: holds the coût annuel brut (fees incl.), not the
+     *  first-payment comptant → f16_comptant_due, and the `amount` fallback
+     *  for pre-migration rows that have no annualPremium. */
     comptantDue: string | null;
+    /** The requested formule's ANNUAL premium (commissionable base) → `amount`. */
+    annualPremium: string | null;
     maxanceDevisNumber: string | null;
     productVariant: string;
   } | null;
@@ -142,7 +148,15 @@ export function buildDealProps(input: MirrorInput): Record<string, string | numb
   if (latestQuote) {
     const monthly = latestQuote.monthlyPremium != null ? Number(latestQuote.monthlyPremium) : NaN;
     const comptant = latestQuote.comptantDue != null ? Number(latestQuote.comptantDue) : NaN;
-    if (Number.isFinite(monthly)) p.amount = monthly;
+    const annual = latestQuote.annualPremium != null ? Number(latestQuote.annualPremium) : NaN;
+    // 2026-07-04 (Ridaa's decision): `amount` = the ANNUAL premium (the
+    // commissionable base, e.g. 66.20). Fallback for pre-migration rows with
+    // no annual_premium: comptantDue (coût annuel brut) — still an annual
+    // figure, NEVER the monthly (~7 €, the old wrong semantics).
+    if (Number.isFinite(annual)) p.amount = annual;
+    else if (Number.isFinite(comptant)) p.amount = comptant;
+    // The real monthly ("Terme suivant", e.g. 6.51) goes to its own prop.
+    if (Number.isFinite(monthly)) p.f16_monthly_premium = monthly;
     if (Number.isFinite(comptant)) p.f16_comptant_due = comptant;
     if (latestQuote.maxanceDevisNumber) p.f16_devis_number = latestQuote.maxanceDevisNumber;
   }

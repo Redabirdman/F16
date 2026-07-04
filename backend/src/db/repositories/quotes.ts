@@ -25,6 +25,7 @@ import type { Database } from '../index.js';
 import { quotes, maxanceActions } from '../schema/index.js';
 import type { Quote, MaxanceAction } from '../schema/quotes.js';
 import { emitHubSpotSync } from './leads.js';
+import { logger } from '../../logger.js';
 
 /** Input for `insertQuote` — only the fields a freshly-requested quote needs. */
 export interface InsertQuoteInput {
@@ -158,24 +159,30 @@ export async function markQuoteConfirmed(
   return row;
 }
 
-/** Prices surfaced by the Maxance dry-run preview. Both are `number | undefined`
+/** Prices surfaced by the Maxance dry-run preview. All are `number | undefined`
  *  because the price-scrape can legitimately come back unparsed. */
 export interface MarkQuotePreviewInput {
-  /** preview.pricePreviewEur.monthly */
+  /** preview.pricePreviewEur.monthly — the REAL monthly ("Terme suivant"). */
   monthlyPremium: number | undefined;
-  /** preview.pricePreviewEur.annual */
+  /** preview.pricePreviewEur.annual — coût annuel brut (fees included).
+   *  NAMING DRIFT: lands in the legacy `comptant_due` column; NOT the
+   *  first-payment comptant. See the semantics block in schema/quotes.ts. */
   comptantDue: number | undefined;
+  /** The requested formule's ANNUAL premium ("Montant", the commissionable
+   *  base) from preview.formulePricing. Mirrors to the HubSpot deal `amount`. */
+  annualPremium?: number | undefined;
 }
 
 /**
- * Persist the preview price onto the quote row so the HubSpot mirror can fill
- * the deal amount/comptant before the devis is even confirmed. Emits the sync
- * after persisting (idempotent). Premium/comptant are stored as numeric(10,2)
- * decimal strings.
+ * Persist the preview prices onto the quote row so the HubSpot mirror can fill
+ * the deal amount (← annualPremium, the commissionable annual base) +
+ * f16_monthly_premium (← monthlyPremium) + f16_comptant_due (← comptantDue)
+ * before the devis is even confirmed. Emits the sync after persisting
+ * (idempotent). All prices are stored as numeric(10,2) decimal strings.
  *
  * Does NOT touch `status` — a preview is not 'ready', so the lifecycle stage
  * logic stays intact. Only finite numbers are written: if a price came back
- * undefined/NaN it is skipped, and if BOTH are missing the row is returned
+ * undefined/NaN it is skipped, and if ALL are missing the row is returned
  * untouched with no UPDATE and no HubSpot emit.
  */
 export async function markQuotePreview(
@@ -183,17 +190,26 @@ export async function markQuotePreview(
   quoteId: string,
   input: MarkQuotePreviewInput,
 ): Promise<Quote> {
-  const set: Partial<{ monthlyPremium: string; comptantDue: string }> = {
+  const set: Partial<{ monthlyPremium: string; comptantDue: string; annualPremium: string }> = {
     ...(Number.isFinite(input.monthlyPremium)
       ? { monthlyPremium: (input.monthlyPremium as number).toFixed(2) }
       : {}),
     ...(Number.isFinite(input.comptantDue)
       ? { comptantDue: (input.comptantDue as number).toFixed(2) }
       : {}),
+    ...(Number.isFinite(input.annualPremium)
+      ? { annualPremium: (input.annualPremium as number).toFixed(2) }
+      : {}),
   };
 
   // Nothing parseable to persist — leave the row (and HubSpot) untouched.
+  // Warn loudly: all prices unparseable means the scrape regressed, and
+  // without this line the only symptom is a silently price-less deal.
   if (Object.keys(set).length === 0) {
+    logger.warn(
+      { quoteId },
+      'markQuotePreview: all preview prices unparseable — row and HubSpot left untouched',
+    );
     const [current] = await db.select().from(quotes).where(eq(quotes.id, quoteId)).limit(1);
     if (!current) throw new Error(`markQuotePreview: no quote with id=${quoteId}`);
     return current;

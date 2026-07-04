@@ -69,8 +69,19 @@ export const quotes = pgTable(
     status: quoteStatusEnum('status').notNull().default('requested'),
 
     // Prices in €. Numeric for exactness (never use float for money).
+    //
+    // ⚠️ 2026-07-04 semantics (post the 2026-07-02 pricing-semantics fix):
+    //   - monthlyPremium — the REAL monthly ("Terme suivant", e.g. 6.51),
+    //     only meaningful when fractionnement is mensuel.
+    //   - comptantDue    — NAMING DRIFT, kept for compat: it actually holds
+    //     the coût annuel brut (fees included) scraped from the preview, NOT
+    //     the first-payment comptant. Do not rename; document at call sites.
+    //   - annualPremium  — the requested formule's ANNUAL premium ("Montant"
+    //     column of the formules table, e.g. 66.20). This is the
+    //     commissionable base and what the HubSpot deal `amount` mirrors.
     monthlyPremium: numeric('monthly_premium', { precision: 10, scale: 2 }),
     comptantDue: numeric('comptant_due', { precision: 10, scale: 2 }),
+    annualPremium: numeric('annual_premium', { precision: 10, scale: 2 }),
 
     // Maxance's own ref shown in their UI, e.g. "DR0000971882". Kept as
     // text — opaque to us, used for cross-referencing in their portal.

@@ -58,6 +58,7 @@ import {
   markQuotePreview,
   markSubscriptionFailed,
 } from '../../db/repositories/quotes.js';
+import { setLeadStatus } from '../../db/repositories/leads.js';
 import {
   handleSubscriptionRequested,
   type InspectorScreenshotSender,
@@ -257,6 +258,7 @@ export class MaxanceOperatorAgent extends BaseAgent {
         payload: {
           quoteId: payload.quoteId,
           customerId: payload.customerId,
+          ...(payload.leadId ? { leadId: payload.leadId } : {}),
           errorCode,
           ...(detail ? { detail } : {}),
           screenshots: [],
@@ -457,6 +459,20 @@ export class MaxanceOperatorAgent extends BaseAgent {
       );
     }
 
+    // Lifecycle: a confirmed devis moves the lead to 'negotiating' (deal
+    // stage "Devis envoyé" in HubSpot). Best-effort, same posture as above —
+    // without it every deal sat at "Qualifié" forever (2026-07-04 audit).
+    if (payload.leadId) {
+      try {
+        await setLeadStatus(this.db, payload.leadId, 'negotiating');
+      } catch (err) {
+        logger.warn(
+          { leadId: payload.leadId, err: err instanceof Error ? err.message : String(err) },
+          'maxance-operator: setLeadStatus(negotiating) failed (non-fatal)',
+        );
+      }
+    }
+
     logger.info(
       {
         quoteId: payload.quoteId,
@@ -655,12 +671,29 @@ export class MaxanceOperatorAgent extends BaseAgent {
     // the helper guards finiteness and emits the sync internally; a failure
     // here must not break the customer-facing preview flow.
     try {
+      // 2026-07-04 (Ridaa's decision): the requested formule's ANNUAL premium
+      // ("Montant" of the formules table — the commissionable base, e.g.
+      // 66.20) is what the HubSpot deal `amount` must carry. Resolve it from
+      // preview.formulePricing by the requested formule key; fall back to the
+      // first formulePricing entry, then to undefined (guarded downstream).
+      const requestedFormule = params.formule ?? 'tiers_illimite';
+      const requestedPricing =
+        preview.formulePricing?.find((f) => f.formule === requestedFormule) ??
+        preview.formulePricing?.[0];
+
       await markQuotePreview(this.db, payload.quoteId, {
-        // Maxance surfaces two figures: `monthly` = the monthly premium, and
-        // `annual` = the comptant (pay-the-year-upfront) amount. They map to
-        // the quote's monthlyPremium / comptantDue, matching markQuoteReady.
+        // Post-2026-07-02 semantics: `monthly` = the requested formule's
+        // "Terme suivant" (the REAL monthly, only set when fractionnement is
+        // mensuel); `annual` = coût annuel brut (fees included) — NOT the
+        // comptant, despite landing in the legacy `comptantDue` column. The
+        // real first-payment comptant lives in preview.comptantBreakdown.
+        // 2026-07-04: `annualPremium` = the requested formule's annual
+        // premium (formulePricing.annualPremiumEur) — the commissionable
+        // base, mirrored to the HubSpot deal `amount` (the real monthly goes
+        // to f16_monthly_premium instead).
         monthlyPremium: preview.pricePreviewEur.monthly,
         comptantDue: preview.pricePreviewEur.annual,
+        annualPremium: requestedPricing?.annualPremiumEur,
       });
     } catch (err) {
       logger.warn(

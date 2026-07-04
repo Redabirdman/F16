@@ -1,0 +1,1 @@
+ALTER TABLE "quotes" ADD COLUMN "annual_premium" numeric(10, 2);

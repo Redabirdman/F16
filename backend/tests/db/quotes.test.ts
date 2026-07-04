@@ -329,26 +329,29 @@ pp('markQuotePreview (live)', () => {
     return { quoteId: q.id, leadId: l!.id };
   }
 
-  it('persists both prices as decimal strings, leaves status unchanged, emits one sync', async () => {
+  it('persists all prices as decimal strings, leaves status unchanged, emits one sync', async () => {
     const { quoteId, leadId } = await seedQuote();
 
-    // M8 preview { monthly: 78.85, annual: 90.85 } → P1 fixture strings.
+    // M8 preview { monthly: 6.51, annual (brut): 90.85, annualPremium: 66.20 }.
     const updated = await markQuotePreview(db, quoteId, {
-      monthlyPremium: 78.85,
+      monthlyPremium: 6.51,
       comptantDue: 90.85,
+      annualPremium: 66.2,
     });
 
     // numeric(10,2) round-trips as a string in postgres-js — that's expected.
-    expect(updated.monthlyPremium).toBe('78.85');
+    expect(updated.monthlyPremium).toBe('6.51');
     expect(updated.comptantDue).toBe('90.85');
+    expect(updated.annualPremium).toBe('66.20');
     // A preview is NOT 'ready' — status must stay as inserted.
     expect(updated.status).toBe('requested');
     expect(updated.readyAt).toBeNull();
 
     // The DB row really changed (not just the returned object).
     const [fresh] = await db.select().from(quotes).where(eq(quotes.id, quoteId));
-    expect(fresh!.monthlyPremium).toBe('78.85');
+    expect(fresh!.monthlyPremium).toBe('6.51');
     expect(fresh!.comptantDue).toBe('90.85');
+    expect(fresh!.annualPremium).toBe('66.20');
     expect(fresh!.status).toBe('requested');
 
     // Exactly one LEAD.SYNC_HUBSPOT for hubspot-sync, correlated to the lead.
@@ -362,18 +365,20 @@ pp('markQuotePreview (live)', () => {
     expect((msgs[0]!.payload as Record<string, unknown>)['leadId']).toBe(leadId);
   });
 
-  it('does nothing (no update, no emit, no throw) when both prices are undefined', async () => {
+  it('does nothing (no update, no emit, no throw) when all prices are undefined', async () => {
     const { quoteId, leadId } = await seedQuote();
 
     const updated = await markQuotePreview(db, quoteId, {
       monthlyPremium: undefined,
       comptantDue: undefined,
+      annualPremium: undefined,
     });
 
     // Returned the current (untouched) row.
     expect(updated.id).toBe(quoteId);
     expect(updated.monthlyPremium).toBeNull();
     expect(updated.comptantDue).toBeNull();
+    expect(updated.annualPremium).toBeNull();
     expect(updated.status).toBe('requested');
 
     const msgs = await db
@@ -383,7 +388,7 @@ pp('markQuotePreview (live)', () => {
     expect(msgs).toHaveLength(0);
   });
 
-  it('persists only the defined price, leaving the other column untouched', async () => {
+  it('persists only the defined price, leaving the other columns untouched', async () => {
     const { quoteId } = await seedQuote();
 
     const updated = await markQuotePreview(db, quoteId, {
@@ -393,6 +398,30 @@ pp('markQuotePreview (live)', () => {
 
     expect(updated.monthlyPremium).toBe('78.85');
     expect(updated.comptantDue).toBeNull();
+    // annualPremium omitted entirely (optional) — column stays untouched.
+    expect(updated.annualPremium).toBeNull();
     expect(updated.status).toBe('requested');
+  });
+
+  it('persists annualPremium alone (monthly/comptant unparsed) and still emits the sync', async () => {
+    const { quoteId, leadId } = await seedQuote();
+
+    const updated = await markQuotePreview(db, quoteId, {
+      monthlyPremium: undefined,
+      comptantDue: undefined,
+      annualPremium: 66.2,
+    });
+
+    expect(updated.annualPremium).toBe('66.20');
+    expect(updated.monthlyPremium).toBeNull();
+    expect(updated.comptantDue).toBeNull();
+    expect(updated.status).toBe('requested');
+
+    const msgs = await db
+      .select()
+      .from(agentMessages)
+      .where(eq(agentMessages.correlationId, leadId));
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0]!.intent).toBe('LEAD.SYNC_HUBSPOT');
   });
 });

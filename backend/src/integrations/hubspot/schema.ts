@@ -68,6 +68,9 @@ const DEAL_PROPS: Array<{
   { name: 'f16_vehicle', label: 'F16 Véhicule', type: 'string' },
   { name: 'f16_devis_number', label: 'F16 N° devis Maxance', type: 'string' },
   { name: 'f16_comptant_due', label: 'F16 Comptant (€)', type: 'number' },
+  // 2026-07-04: the deal `amount` now carries the ANNUAL premium (the
+  // commissionable base); the real monthly ("Terme suivant") lives here.
+  { name: 'f16_monthly_premium', label: 'F16 Mensualité (€)', type: 'number' },
   {
     name: 'f16_dormant',
     label: 'F16 Dormant',

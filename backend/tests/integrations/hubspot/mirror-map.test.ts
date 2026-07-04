@@ -85,18 +85,54 @@ describe('buildDealProps', () => {
     expect(p.f16_dormant).toBe('false');
     expect('amount' in p).toBe(false);
   });
-  it('fills amount + comptant + devis number from the latest quote', () => {
+  it('fills amount (annual premium) + monthly + comptant + devis number from the latest quote', () => {
     const input = base();
     input.latestQuote = {
       status: 'ready',
-      monthlyPremium: '78.85',
+      monthlyPremium: '6.51',
       comptantDue: '90.85',
+      annualPremium: '66.20',
       maxanceDevisNumber: 'DR0000973638',
       productVariant: 'tiers',
     };
     const p = buildDealProps(input);
-    expect(p.amount).toBe(78.85);
+    // 2026-07-04 decision: amount = ANNUAL premium (commissionable base),
+    // the real monthly goes to f16_monthly_premium.
+    expect(p.amount).toBe(66.2);
+    expect(p.f16_monthly_premium).toBe(6.51);
     expect(p.f16_comptant_due).toBe(90.85);
+    expect(p.f16_devis_number).toBe('DR0000973638');
+  });
+  it('falls back amount → comptantDue (coût annuel brut) for pre-migration rows without annualPremium', () => {
+    const input = base();
+    input.latestQuote = {
+      status: 'ready',
+      monthlyPremium: '6.51',
+      comptantDue: '90.85',
+      annualPremium: null,
+      maxanceDevisNumber: null,
+      productVariant: 'tiers',
+    };
+    const p = buildDealProps(input);
+    // NEVER the monthly — an annual-ish figure or nothing.
+    expect(p.amount).toBe(90.85);
+    expect(p.f16_monthly_premium).toBe(6.51);
+    expect(p.f16_comptant_due).toBe(90.85);
+  });
+  it('omits amount + f16_monthly_premium entirely when no price parsed', () => {
+    const input = base();
+    input.latestQuote = {
+      status: 'ready',
+      monthlyPremium: null,
+      comptantDue: null,
+      annualPremium: null,
+      maxanceDevisNumber: 'DR0000973638',
+      productVariant: 'tiers',
+    };
+    const p = buildDealProps(input);
+    expect('amount' in p).toBe(false);
+    expect('f16_monthly_premium' in p).toBe(false);
+    expect('f16_comptant_due' in p).toBe(false);
     expect(p.f16_devis_number).toBe('DR0000973638');
   });
   it('sets f16_dormant true when status is dormant', () => {
