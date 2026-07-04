@@ -34,7 +34,12 @@ export async function notifyHumanAction(
           severity: action.severity,
           summary: action.summary,
         },
-        ...(from.correlationId ? { correlationId: from.correlationId } : {}),
+        // Correlate on the ACTION id, never the caller's lead/quote id: the
+        // supervisor's loop detector scans agent_messages per correlation,
+        // and injecting a third fromRole→toRole pair into a lead's stream
+        // masked a real A↔B loop (arbitration dedup test caught it). The
+        // action row itself carries the caller's correlation for tracing.
+        correlationId: action.id,
         requiresHuman: true,
         priority: 3,
       },

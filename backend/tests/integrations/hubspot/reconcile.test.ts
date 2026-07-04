@@ -8,8 +8,9 @@
  * Uses a fake HubSpotClient — the point is to test DB idempotency
  * (hubspot_deal_id write-back gates create vs update), not live HTTP.
  *
- * Gate: DATABASE_URL must be set (should be postgres://f16:f16@127.0.0.1:5435/f16_test).
- * Never use the prod f16 database.
+ * Gate: TEST_DATABASE_URL must be set (postgres://f16:f16@127.0.0.1:5435/f16_test).
+ * Never use the prod f16 database — this file's TRUNCATEs against a raw
+ * DATABASE_URL are what seeded the 'd1' fixture into prod (2026-07-04 audit).
  */
 import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
 import { randomBytes } from 'node:crypto';
@@ -20,7 +21,7 @@ import { insertCustomer } from '../../../src/db/repositories/customers.js';
 import { reconcileLead } from '../../../src/integrations/hubspot/dual-write.js';
 import { __resetSchemaCacheForTests } from '../../../src/integrations/hubspot/schema.js';
 
-const pgUrl = process.env.DATABASE_URL;
+const pgUrl = process.env.TEST_DATABASE_URL;
 const RUN = Boolean(pgUrl);
 
 let savedPiiKey: string | undefined;
