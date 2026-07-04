@@ -27,6 +27,8 @@ import {
   consume,
   requeue,
   INTENT_TO_QUEUE,
+  physicalQueueName,
+  drainLegacySharedQueues,
   type AgentMessageEnvelope,
   type MessageHandlerResult,
 } from '../../src/messaging/dispatcher.js';
@@ -339,9 +341,10 @@ d('dispatcher (live)', () => {
       resolveAll = res;
     });
 
-    // Pause the queue first so all three are enqueued before any processing.
+    // Pause the (role-scoped) queue first so all three are enqueued before
+    // any processing.
     const { getQueue } = await import('../../src/queue/index.js');
-    const q = getQueue('lead');
+    const q = getQueue(physicalQueueName('lead', 'priority-worker'));
     await q.pause();
 
     const w = consume({
@@ -457,54 +460,233 @@ d('dispatcher (live)', () => {
   });
 
   // -------------------------------------------------------------------------
-  // bounded re-route (regression: VOICE.CALL_STARTED infinite requeue loop)
+  // role-scoped queues (regression: 2026-07-03 wrong-role drop of a live
+  // QUOTE.REQUESTED — messageId a9e94c62 — when the same wrong worker kept
+  // winning the shared-queue re-pickup race until MAX_REROUTES dropped it)
   // -------------------------------------------------------------------------
 
-  it('test 8b (bounded reroute): a message with no consumer for its role is dropped, not looped', async () => {
-    // A worker consumes the `lead` queue as 'present-consumer', but the message
-    // is addressed to 'absent-consumer' (which has NO worker on this queue).
-    // Before the fix this re-enqueued a fresh job every 25ms forever; now it is
-    // capped at MAX_REROUTES (3) and then terminated with an 'unroutable' error.
-    const w = consume({
+  it('test 8b (role isolation): two role-workers on one logical queue — the wrong role can never grab the job', async () => {
+    // Old topology: sales-agent + maxance-operator both consumed the physical
+    // 'quote' queue; a QUOTE.REQUESTED addressed to maxance-operator could be
+    // picked by the sales-agent worker repeatedly and dropped. New topology:
+    // physical queues are role-scoped, so the wrong-role worker never even
+    // sees the job. We start the wrong worker FIRST with higher concurrency
+    // (the aggressive racer that used to win) and attach the right worker
+    // only after proving the message stayed untouched.
+    const wrongSeen: string[] = [];
+    let wrongCompleted = 0;
+    const wWrong = consume({
       db,
-      queue: 'lead',
-      role: 'present-consumer',
-      handler: async () => ({ ok: true }),
+      queue: 'quote',
+      role: 'sales-agent',
+      concurrency: 4,
+      handler: async (env) => {
+        wrongSeen.push(env.id);
+        return { ok: true };
+      },
     });
-    workers.push(w);
-    // Count how many times the worker actually processes the job — proves the
-    // loop is bounded (a handful of hops), not unbounded.
-    let processed = 0;
-    w.on('completed', () => {
-      processed += 1;
+    workers.push(wWrong);
+    wWrong.on('completed', () => {
+      wrongCompleted += 1;
     });
-    await w.waitUntilReady();
+    await wWrong.waitUntilReady();
 
     const id = await sendMessage(
       { db },
       {
-        fromRole: 'src',
-        toRole: 'absent-consumer',
-        intent: 'LEAD.NEW',
-        payload: leadNewPayload(),
+        fromRole: 'sales-agent',
+        toRole: 'maxance-operator',
+        intent: 'QUOTE.REQUESTED',
+        payload: quoteRequestedPayload(),
       },
     );
 
-    // The row should be annotated 'unroutable' once the reroute budget is spent.
-    await waitFor(async () => {
-      const [row] = await db.select().from(agentMessages).where(eq(agentMessages.id, id));
-      return Boolean(row && row.error && /unroutable/.test(row.error));
-    }, 5000);
-
-    const [row] = await db.select().from(agentMessages).where(eq(agentMessages.id, id));
-    expect(row!.error).toMatch(/unroutable/);
-    // Never claimed by the wrong consumer.
-    expect(row!.consumedAt).toBeNull();
-
-    // Give it a moment to prove it does NOT keep spinning after termination.
+    // Give the aggressive wrong-role worker time to (not) grab it: the row
+    // must remain unclaimed and unerrored — parked, NOT dropped.
     await new Promise((r) => setTimeout(r, 400));
-    // MAX_REROUTES=3 → at most ~4 job pickups total; assert it's small + stable.
-    expect(processed).toBeLessThanOrEqual(5);
+    let [row] = await db.select().from(agentMessages).where(eq(agentMessages.id, id));
+    expect(row!.consumedAt).toBeNull();
+    expect(row!.error).toBeNull();
+    expect(wrongSeen).toEqual([]);
+    expect(wrongCompleted).toBe(0);
+
+    // Late-attaching correct consumer gets the parked message (self-healing —
+    // this is also the KNOWLEDGE.REINDEX_REQUESTED-at-boot shape).
+    const rightSeen: AgentMessageEnvelope[] = [];
+    let resolveRight!: () => void;
+    const rightDone = new Promise<void>((res) => {
+      resolveRight = res;
+    });
+    const wRight = consume({
+      db,
+      queue: 'quote',
+      role: 'maxance-operator',
+      handler: async (env) => {
+        rightSeen.push(env);
+        resolveRight();
+        return { ok: true };
+      },
+    });
+    workers.push(wRight);
+    await wRight.waitUntilReady();
+
+    await rightDone;
+    expect(rightSeen).toHaveLength(1);
+    expect(rightSeen[0]!.id).toBe(id);
+    expect(rightSeen[0]!.intent).toBe('QUOTE.REQUESTED');
+
+    await waitFor(async () => {
+      const [r] = await db.select().from(agentMessages).where(eq(agentMessages.id, id));
+      return Boolean(r && r.consumedAt);
+    });
+    [row] = await db.select().from(agentMessages).where(eq(agentMessages.id, id));
+    expect(row!.consumedBy).toBe('maxance-operator');
+    expect(row!.error).toBeNull();
+    // The wrong worker never processed anything, even after delivery.
+    expect(wrongSeen).toEqual([]);
+    expect(wrongCompleted).toBe(0);
+  });
+
+  it('test 8c (role isolation, both live): interleaved messages to two roles on one logical queue each land exactly once on their own role', async () => {
+    // Direct regression shape for the 2026-07-03 incident: both consumers
+    // live, traffic addressed to both roles interleaved — every message must
+    // reach its own role exactly once, zero drops.
+    const N = 5;
+    const salesSeen: string[] = [];
+    const maxanceSeen: string[] = [];
+    let resolveAll!: () => void;
+    const allDone = new Promise<void>((res) => {
+      resolveAll = res;
+    });
+    const checkDone = (): void => {
+      if (salesSeen.length === N && maxanceSeen.length === N) resolveAll();
+    };
+
+    const wSales = consume({
+      db,
+      queue: 'quote',
+      role: 'sales-agent',
+      concurrency: 2,
+      handler: async (env) => {
+        salesSeen.push(env.id);
+        checkDone();
+        return { ok: true };
+      },
+    });
+    const wMaxance = consume({
+      db,
+      queue: 'quote',
+      role: 'maxance-operator',
+      concurrency: 2,
+      handler: async (env) => {
+        maxanceSeen.push(env.id);
+        checkDone();
+        return { ok: true };
+      },
+    });
+    workers.push(wSales, wMaxance);
+    await Promise.all([wSales.waitUntilReady(), wMaxance.waitUntilReady()]);
+
+    const toMaxance: string[] = [];
+    const toSales: string[] = [];
+    for (let i = 0; i < N; i += 1) {
+      toMaxance.push(
+        await sendMessage(
+          { db },
+          {
+            fromRole: 'sales-agent',
+            toRole: 'maxance-operator',
+            intent: 'QUOTE.REQUESTED',
+            payload: quoteRequestedPayload(),
+          },
+        ),
+      );
+      toSales.push(
+        await sendMessage(
+          { db },
+          {
+            fromRole: 'maxance-operator',
+            toRole: 'sales-agent',
+            intent: 'QUOTE.READY',
+            payload: {
+              quoteId: randomUUID(),
+              customerId: randomUUID(),
+              monthlyPremium: 6.51,
+              comptantDue: 90.85,
+              devisNumber: `DR${String(i).padStart(8, '0')}`,
+              pdfSentTo: 'client@example.com',
+            },
+          },
+        ),
+      );
+    }
+
+    await allDone;
+    expect([...salesSeen].sort()).toEqual([...toSales].sort());
+    expect([...maxanceSeen].sort()).toEqual([...toMaxance].sort());
+
+    // Every row consumed by ITS role, none errored/dropped.
+    await waitFor(async () => {
+      const rows = await db.select().from(agentMessages);
+      return rows.every((r) => r.consumedAt !== null);
+    });
+    const rows = await db.select().from(agentMessages);
+    expect(rows).toHaveLength(2 * N);
+    for (const r of rows) {
+      expect(r.consumedBy).toBe(r.toRole);
+      expect(r.error).toBeNull();
+    }
+  });
+
+  it('test 8d (legacy drain): jobs parked on a pre-role-scoping shared queue are moved to role-scoped queues at boot', async () => {
+    // Simulate a deploy: a job sits on the LEGACY shared 'quote' queue (old
+    // physical name), addressed to maxance-operator.
+    const { getQueue } = await import('../../src/queue/index.js');
+    const parsedId = await sendMessage(
+      { db },
+      {
+        fromRole: 'sales-agent',
+        toRole: 'maxance-operator',
+        intent: 'QUOTE.REQUESTED',
+        payload: quoteRequestedPayload(),
+      },
+    );
+    // sendMessage put the job on the role-scoped queue; strip it and plant a
+    // legacy-shaped job on the bare category queue instead.
+    await getQueue(physicalQueueName('quote', 'maxance-operator')).drain(true);
+    await getQueue('quote').add('QUOTE.REQUESTED', { messageId: parsedId, rerouteCount: 1 });
+
+    const moved = await drainLegacySharedQueues({ db }, ['quote']);
+    expect(moved).toBe(1);
+    const legacyCounts = await getQueue('quote').getJobCounts('wait', 'prioritized', 'delayed');
+    expect(
+      (legacyCounts.wait ?? 0) + (legacyCounts.prioritized ?? 0) + (legacyCounts.delayed ?? 0),
+    ).toBe(0);
+
+    // The drained job is now consumable by the correct role.
+    let resolveDone!: () => void;
+    const done = new Promise<void>((res) => {
+      resolveDone = res;
+    });
+    const w = consume({
+      db,
+      queue: 'quote',
+      role: 'maxance-operator',
+      handler: async () => {
+        resolveDone();
+        return { ok: true };
+      },
+    });
+    workers.push(w);
+    await w.waitUntilReady();
+    await done;
+
+    await waitFor(async () => {
+      const [r] = await db.select().from(agentMessages).where(eq(agentMessages.id, parsedId));
+      return Boolean(r && r.consumedAt);
+    });
+    const [row] = await db.select().from(agentMessages).where(eq(agentMessages.id, parsedId));
+    expect(row!.consumedBy).toBe('maxance-operator');
   });
 
   // -------------------------------------------------------------------------

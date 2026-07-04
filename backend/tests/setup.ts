@@ -38,3 +38,25 @@ if (existsSync(envPath)) {
     }
   }
 }
+
+// ---------------------------------------------------------------------------
+// PROD-DB GUARD (2026-07-03). THIS PC runs the F16 backend as PROD against the
+// `f16` database on :5435, and the DB-gated tests TRUNCATE shared tables in
+// beforeEach — pointing TEST_DATABASE_URL at prod WIPES REAL DATA (it has now
+// bitten the M12, goal-1, ads-admin AND 2026-07-03 dispatcher sessions).
+// Only allow database names that are explicitly test-scoped (…_test).
+// Create/migrate the throwaway once:
+//   docker exec f16-postgres-dev psql -U f16 -d f16 -c "CREATE DATABASE f16_test;"
+//   docker exec f16-postgres-dev psql -U f16 -d f16_test -c "CREATE EXTENSION IF NOT EXISTS vector; CREATE EXTENSION IF NOT EXISTS pgcrypto;"
+//   DATABASE_URL=postgres://f16:f16@127.0.0.1:5435/f16_test pnpm db:migrate
+// then run tests with TEST_DATABASE_URL=postgres://f16:f16@127.0.0.1:5435/f16_test
+if (process.env.TEST_DATABASE_URL) {
+  const dbName = new URL(process.env.TEST_DATABASE_URL).pathname.replace(/^\//, '');
+  if (!/_test$/.test(dbName)) {
+    throw new Error(
+      `TEST_DATABASE_URL points at database '${dbName}', which is not a *_test database. ` +
+        `On this machine 'f16' is PRODUCTION and the suite TRUNCATEs tables — refusing to run. ` +
+        `Use postgres://f16:f16@127.0.0.1:5435/f16_test (see tests/setup.ts for one-time creation).`,
+    );
+  }
+}

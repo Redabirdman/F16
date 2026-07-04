@@ -33,7 +33,11 @@ import { requireAdminAuth } from './admin/auth.js';
 import type { RealtimeListener } from './realtime/notify.js';
 import { metrics, registerDefaultMetrics } from './metrics/index.js';
 import { registerQueueDepthCollector } from './queue/index.js';
-import { INTENT_TO_QUEUE } from './messaging/dispatcher.js';
+import {
+  INTENT_TO_QUEUE,
+  drainLegacySharedQueues,
+  listActivePhysicalQueues,
+} from './messaging/dispatcher.js';
 
 // Register the default process gauges once at module load (idempotent).
 registerDefaultMetrics();
@@ -361,9 +365,21 @@ export async function start(port: number = Number(process.env.PORT ?? 3001)): Pr
   const { startWorkers } = await import('./supervisor/index.js');
   const workerSet = await startWorkers({ db: db() });
 
+  // 2026-07-03 role-scoped queues: move any job still parked on a legacy
+  // shared category queue (pre-role-scoping deploys) onto its role-scoped
+  // queue. One-shot + idempotent; best-effort so a Redis blip can't block boot.
+  await drainLegacySharedQueues({ db: db() }, [...new Set(Object.values(INTENT_TO_QUEUE))]).catch(
+    (err: unknown) =>
+      logger.warn(
+        { err: err instanceof Error ? err.message : String(err) },
+        'legacy queue drain failed — unconsumed rows can be re-driven via requeue()',
+      ),
+  );
+
   // M16 — snapshot live BullMQ depth per queue on every /metrics scrape.
-  // Distinct queue names come from the intent→queue routing table.
-  registerQueueDepthCollector([...new Set(Object.values(INTENT_TO_QUEUE))]);
+  // Physical queue names are role-scoped and appear dynamically, so pass the
+  // live provider instead of a static list.
+  registerQueueDepthCollector(listActivePhysicalQueues);
 
   const shutdown = (signal: NodeJS.Signals): void => {
     logger.info({ signal }, 'shutting down');

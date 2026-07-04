@@ -3,7 +3,13 @@
  * the BULLMQ_PREFIX. Names are stable strings — do NOT change without a
  * migration plan: jobs already in Redis are keyed by the queue name.
  *
- * One queue per intent domain. Handlers are wired in M3.T3.
+ * One LOGICAL queue per intent domain. Handlers are wired in M3.T3.
+ *
+ * 2026-07-03: the dispatcher scopes the PHYSICAL BullMQ queue by consumer
+ * role — `${category}.${toRole}` (see messaging/dispatcher.ts
+ * physicalQueueName) — so roles sharing a category never race for each
+ * other's jobs. These names remain the logical categories agents subscribe
+ * with; the role suffix is derived inside sendMessage()/consume().
  */
 export const QUEUE_NAMES = {
   LEAD: 'lead',

@@ -10,12 +10,12 @@
  *   sendMessage()
  *     -> validateIntentPayload (throws on schema mismatch / unknown intent)
  *     -> agentMessages.enqueue (writes durable row; LISTEN/NOTIFY fires)
- *     -> getQueue(intent->queue).add({ messageId }) (lightweight job carrying row id)
+ *     -> getQueue(`${intent->queue}.${toRole}`).add({ messageId }) (lightweight job carrying row id)
  *     -> returns row id
  *
  * Consume path:
  *   consume({ queue, role, handler })
- *     -> createWorker(queue) — one BullMQ worker for the queue
+ *     -> createWorker(`${queue}.${role}`) — one BullMQ worker per (queue, role)
  *        -> on job: agentMessages.claimSpecific(messageId, role)
  *             - returns null on misrouted/already-consumed row (defensive)
  *        -> hands typed envelope to handler
@@ -30,9 +30,21 @@
  *   we get once-and-only-once delivery with retry policy + priority for free.
  *
  * Routing:
- *   INTENT_TO_QUEUE is the single source of truth mapping intent -> queue
- *   name. Every registered intent MUST have an entry; the assertEveryIntentRouted
- *   helper at module load makes that a hard error.
+ *   INTENT_TO_QUEUE is the single source of truth mapping intent -> LOGICAL
+ *   queue name (intent category). Every registered intent MUST have an entry;
+ *   the assertEveryIntentRouted helper at module load makes that a hard error.
+ *
+ *   The PHYSICAL BullMQ queue is role-scoped: `${category}.${toRole}` (see
+ *   physicalQueueName). 2026-07-03 regression fix: when N roles shared one
+ *   physical queue (e.g. sales-agent + maxance-operator on 'quote'), a job was
+ *   delivered to an arbitrary role's worker and bounced via requeue when the
+ *   role didn't match; the same wrong worker could win the re-pickup race
+ *   MAX_REROUTES times in a row and the message was DROPPED (live
+ *   QUOTE.REQUESTED a9e94c62). Role-scoping the physical queue makes the
+ *   wrong-role pickup impossible by construction: a worker only ever sees jobs
+ *   addressed to its own role. A message to a role with no consumer now parks
+ *   (durable row stays unconsumed + job waits) instead of being dropped, and
+ *   is delivered as soon as that role's worker attaches.
  */
 import type { Worker } from 'bullmq';
 import type { Database } from '../db/index.js';
@@ -42,13 +54,27 @@ import * as agentMessages from '../db/repositories/agent-messages.js';
 import { getQueue, createWorker } from '../queue/index.js';
 
 /**
- * Max times a single message may be re-routed between workers on a shared
- * queue before the dispatcher gives up. A queue shared by N roles needs at
- * most N-1 hops for the right consumer to claim a job; 3 covers realistic
- * multi-role queues while killing an unbounded loop (a message addressed to a
- * role with no consumer on the queue) within ~75ms instead of forever.
+ * Physical BullMQ queue for a (logical queue, to_role) pair. '.' separator —
+ * BullMQ rejects ':' in queue names. Keeping the logical category in the name
+ * keeps /metrics + DLQ names readable and preserves the one-worker-per-queue
+ * serialization each role already relies on (e.g. maxance-operator's single
+ * browser session serializes on 'quote.maxance-operator').
  */
-const MAX_REROUTES = 3;
+export function physicalQueueName(logicalQueue: string, toRole: string): string {
+  return `${logicalQueue}.${toRole}`;
+}
+
+/**
+ * Every physical queue this process has touched (sent to or consumed from).
+ * Feeds the /metrics queue-depth collector — physical names are only known
+ * dynamically since they depend on the to_role of live traffic.
+ */
+const _activePhysicalQueues = new Set<string>();
+
+/** Snapshot of physical queue names seen by this process (for /metrics). */
+export function listActivePhysicalQueues(): string[] {
+  return [..._activePhysicalQueues];
+}
 
 /** Routing — which BullMQ queue handles a given intent. */
 const INTENT_TO_QUEUE: Record<string, string> = {
@@ -203,9 +229,13 @@ export async function sendMessage(
     priority: input.priority ?? 5,
   });
 
-  // 4. Enqueue the lightweight BullMQ job. The job's `name` is the intent,
-  //    so worker traces are readable; the `data` is just the row id.
-  const queue = getQueue(queueName);
+  // 4. Enqueue the lightweight BullMQ job on the ROLE-SCOPED physical queue,
+  //    so only the addressed role's worker can ever pick it up. The job's
+  //    `name` is the intent, so worker traces are readable; the `data` is
+  //    just the row id.
+  const physical = physicalQueueName(queueName, input.toRole);
+  _activePhysicalQueues.add(physical);
+  const queue = getQueue(physical);
   await queue.add(
     input.intent,
     { messageId: row.id },
@@ -221,7 +251,7 @@ export async function sendMessage(
       messageId: row.id,
       intent: input.intent,
       toRole: input.toRole,
-      queue: queueName,
+      queue: physical,
     },
     'agent_message dispatched',
   );
@@ -246,76 +276,41 @@ export function consume(
     concurrency?: number;
   },
 ): Worker {
+  const physical = physicalQueueName(opts.queue, opts.role);
+  _activePhysicalQueues.add(physical);
   return createWorker(
-    opts.queue,
+    physical,
     async (jobName, data: unknown) => {
-      const { messageId, rerouteCount = 0 } = data as {
-        messageId: string;
-        rerouteCount?: number;
-      };
+      const { messageId } = data as { messageId: string };
 
       // Atomically claim the specific row. Returns null when:
       //   - the row was already consumed (duplicate BullMQ delivery)
-      //   - the row's to_role doesn't match (the job landed on a different
-      //     consumer because multiple roles share this queue)
+      //   - the row's to_role doesn't match (impossible via sendMessage on a
+      //     role-scoped queue; only a manually-enqueued job can get here)
       //   - the row doesn't exist (race against TRUNCATE / GDPR purge)
       const claimed = await agentMessages.claimSpecific(opts.db, messageId, opts.role);
       if (!claimed) {
-        // Disambiguate: if the row IS still unclaimed but addressed to a
-        // different role, requeue it so the correct consumer gets a turn.
-        // This is the normal case when multiple roles share a queue (e.g.
-        // 'sales-spawn-orchestrator' + 'sales-agent' both on 'lead'). The
-        // first pickup of each duplicate BullMQ delivery is essentially a
-        // re-route. Without this, the message would sit unclaimed forever.
+        // Defensive: a wrong-role row on a role-scoped queue means someone
+        // enqueued a raw BullMQ job on the wrong physical queue (or a legacy
+        // pre-role-scoping job survived the boot drain). Forward it to the
+        // correct role's queue instead of dropping — the durable row is the
+        // source of truth for the addressee.
         const row = await agentMessages.getById(opts.db, messageId);
         if (row && row.consumedAt === null && row.toRole !== opts.role) {
-          // BOUND the re-route. A queue shared by N roles can legitimately
-          // bounce a job a few times before the right consumer claims it — but
-          // a message addressed to a role with NO consumer on this queue would
-          // otherwise spin forever, re-adding a fresh job every 25ms. That hot
-          // loop starves the worker event loop and surfaces as BullMQ
-          // "Missing lock for job …" warnings (lock renewal misses its window).
-          // The re-route count rides in the job data (each add increments it);
-          // once it exceeds MAX_REROUTES we stop, mark the row errored so the
-          // misroute is visible (admin/audit), and log loudly — that's a
-          // routing bug to fix in INTENT_TO_QUEUE / the emitter's toRole.
-          if (rerouteCount >= MAX_REROUTES) {
-            logger.error(
-              {
-                messageId,
-                jobName,
-                role: opts.role,
-                toRole: row.toRole,
-                intent: row.intent,
-                queue: opts.queue,
-                rerouteCount,
-              },
-              'agent_message exceeded max re-routes — no consumer for to_role on this queue; dropping (fix INTENT_TO_QUEUE + emitter toRole)',
-            );
-            await agentMessages
-              .markError(
-                opts.db,
-                row.id,
-                `unroutable: no consumer for role '${row.toRole}' on queue '${opts.queue}' after ${rerouteCount} re-routes`,
-              )
-              .catch(() => {
-                /* best-effort annotation — never let it mask the drop */
-              });
-            return;
-          }
-          logger.debug(
-            { messageId, jobName, role: opts.role, toRole: row.toRole, rerouteCount },
-            'agent_message wrong role on this worker — requeueing for correct consumer',
+          const category = INTENT_TO_QUEUE[row.intent] ?? opts.queue;
+          const correct = physicalQueueName(category, row.toRole);
+          logger.warn(
+            { messageId, jobName, role: opts.role, toRole: row.toRole, queue: physical, correct },
+            'agent_message wrong-role job on role-scoped queue — forwarding to correct role queue',
           );
-          await getQueue(opts.queue).add(
+          _activePhysicalQueues.add(correct);
+          await getQueue(correct).add(
             row.intent,
-            { messageId: row.id, rerouteCount: rerouteCount + 1 },
+            { messageId: row.id },
             {
               priority: row.priority,
               removeOnComplete: { count: 1000 },
               removeOnFail: { count: 5000 },
-              // Small delay so we don't spin on a same-worker re-pickup.
-              delay: 25,
             },
           );
           return;
@@ -374,7 +369,56 @@ export async function requeue(opts: DispatcherOptions, messageId: string): Promi
   if (row.consumedAt) throw new Error(`agent_message ${messageId} already consumed`);
   const queueName = INTENT_TO_QUEUE[row.intent];
   if (!queueName) throw new Error(`No queue route for ${row.intent}`);
-  await getQueue(queueName).add(row.intent, { messageId: row.id }, { priority: row.priority });
+  const physical = physicalQueueName(queueName, row.toRole);
+  _activePhysicalQueues.add(physical);
+  await getQueue(physical).add(row.intent, { messageId: row.id }, { priority: row.priority });
+}
+
+/**
+ * One-shot boot migration (2026-07-03 role-scoped queues): move any job still
+ * parked on a LEGACY shared category queue (pre-role-scoping physical name,
+ * e.g. 'quote') onto the role-scoped queue its durable row addresses. Jobs
+ * whose row is already consumed or gone are simply removed. Idempotent —
+ * legacy queues are empty after the first run and nothing enqueues to them
+ * anymore.
+ */
+export async function drainLegacySharedQueues(
+  opts: DispatcherOptions,
+  legacyQueues: readonly string[],
+): Promise<number> {
+  let moved = 0;
+  for (const legacy of legacyQueues) {
+    const q = getQueue(legacy);
+    const jobs = await q.getJobs(['wait', 'prioritized', 'delayed', 'paused']);
+    for (const job of jobs) {
+      const { messageId } = (job.data ?? {}) as { messageId?: string };
+      if (messageId) {
+        const row = await agentMessages.getById(opts.db, messageId);
+        if (row && row.consumedAt === null) {
+          const category = INTENT_TO_QUEUE[row.intent] ?? legacy;
+          const physical = physicalQueueName(category, row.toRole);
+          _activePhysicalQueues.add(physical);
+          await getQueue(physical).add(
+            row.intent,
+            { messageId: row.id },
+            {
+              priority: row.priority,
+              removeOnComplete: { count: 1000 },
+              removeOnFail: { count: 5000 },
+            },
+          );
+          moved += 1;
+        }
+      }
+      await job.remove().catch(() => {
+        /* best-effort — a locked/active job will be handled by its owner */
+      });
+    }
+  }
+  if (moved > 0) {
+    logger.info({ moved }, 'drained legacy shared queues onto role-scoped queues');
+  }
+  return moved;
 }
 
 /**

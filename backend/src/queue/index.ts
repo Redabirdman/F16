@@ -130,13 +130,18 @@ export function createWorker<T = unknown, R = unknown>(
 /**
  * Register a scrape-time collector that snapshots BullMQ job counts per
  * queue + state into the `f16_queue_depth` gauge. Call once at boot with
- * the set of live queue names. Idempotent-ish: registering twice just adds a
- * second (harmless) collector that overwrites the same series.
+ * the set of live queue names — or a provider function when the set is only
+ * known dynamically (role-scoped physical queues appear as traffic flows).
+ * Idempotent-ish: registering twice just adds a second (harmless) collector
+ * that overwrites the same series.
  */
-export function registerQueueDepthCollector(queueNames: readonly string[]): void {
+export function registerQueueDepthCollector(
+  queueNames: readonly string[] | (() => readonly string[]),
+): void {
   const gauge = queueDepthGauge();
   metrics.registerCollector(async () => {
-    for (const name of queueNames) {
+    const names = typeof queueNames === 'function' ? queueNames() : queueNames;
+    for (const name of names) {
       const counts = await getQueue(name).getJobCounts(
         'wait',
         'active',
