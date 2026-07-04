@@ -11,6 +11,7 @@
  *   - F16_WEBSITE_SOURCE_PATH  — the conversion-machine React source tree
  *   - F16_MAXANCE_CATALOG_PATH — the Maxance product-fiche catalogue (M9)
  *   - F16_CLOSING_RULES_PATH   — the Assuryal closing/souscription rules (M8.T7)
+ *   - F16_OBJECTIONS_PATH      — the Assuryal objection-handling playbook
  */
 import { registerKnowledgeSource } from './source-registry.js';
 
@@ -59,6 +60,20 @@ export function bootstrapKnowledgeSources(): void {
     name: 'assuryal_closing_rules',
     adapter: 'markdown-file',
     path: process.env['F16_CLOSING_RULES_PATH'] ?? '../ASSURYAL closing souscription agent.md',
+    intervalHours: 24,
+    scheduled: true,
+  });
+
+  // Assuryal objection-handling playbook (cleaned from Ridaa's 31-objection
+  // sales-training doc): objection → technique → ready-made French response,
+  // adapted for the WhatsApp NVEI context (real monthly prices only, no delay
+  // promises, no coverage-active claims, [bracketed] placeholders the LLM must
+  // substitute — never send literally). Retrieved by the Sales Agent via
+  // `knowledge.search` when a lead pushes back. Hand-curated → daily is plenty.
+  registerKnowledgeSource({
+    name: 'assuryal_objections',
+    adapter: 'markdown-file',
+    path: process.env['F16_OBJECTIONS_PATH'] ?? '../ASSURYAL objections agent.md',
     intervalHours: 24,
     scheduled: true,
   });
