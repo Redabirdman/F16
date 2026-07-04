@@ -9,7 +9,8 @@
  *
  *   consulter_catalogue       -> knowledge.search       (ground answers)
  *   enregistrer_qualification -> audit_log append       (capture progress)
- *   demander_devis            -> quote.request          (real Maxance devis, async)
+ *   demander_devis            -> quote.request          (price menu prep, async)
+ *   confirmer_devis           -> quote.confirm          (REAL Maxance devis PDF)
  *   transferer_conseiller     -> human.escalate         (WhatsApp group + admin)
  *   programmer_rappel         -> human.escalate (callback intent)
  *   consulter_profil          -> customer.read_profile  (returning-customer context)
@@ -23,11 +24,13 @@
  * (consulter_profil) — that's spoken back to that same customer, which is fine.
  * We never LOG tool outputs.
  */
+import { desc, eq } from 'drizzle-orm';
 import type { Database } from '../db/index.js';
 import { logger } from '../logger.js';
 import { invokeTool } from '../tools/registry.js';
 import '../tools/builtins/index.js'; // side-effect: register the builtins
 import { appendAudit } from '../db/repositories/audit-log.js';
+import { quotes } from '../db/schema/index.js';
 
 /** Identity + correlation for the live call (subset of openai-sip CallContext). */
 export interface VoiceToolCtx {
@@ -81,7 +84,7 @@ export const VOICE_TOOLS = [
     type: 'function',
     name: 'demander_devis',
     description:
-      "Lancer le devis officiel d'assurance TROTTINETTE une fois les 5 champs réunis. Le devis se prépare en arrière-plan (~20 s) ; annonce ensuite au client qu'il le recevra et qu'un conseiller revient vers lui.",
+      "Lancer le calcul du tarif d'assurance TROTTINETTE une fois les 5 champs réunis. Le calcul tourne en arrière-plan (~20 s) ; le client reçoit ensuite sur WhatsApp (et par email) un MENU de tarifs : 3 formules aux prix mensuels réels, 2 options, et un pack conseillé. Annonce-lui ce menu et invite-le à répondre sur WhatsApp OU à te donner son choix au téléphone (appelle alors confirmer_devis).",
     parameters: {
       type: 'object',
       properties: {
@@ -97,6 +100,43 @@ export const VOICE_TOOLS = [
         },
       },
       required: ['prix_achat_eur', 'date_achat', 'code_postal', 'date_naissance', 'stationnement'],
+    },
+  },
+  {
+    type: 'function',
+    name: 'confirmer_devis',
+    description:
+      "Générer le devis Maxance OFFICIEL (PDF envoyé au client par WhatsApp + email) quand le client annonce son choix de formule AU TÉLÉPHONE, après demander_devis. Passe la formule choisie et avec_options=true si le client prend les 2 options (Assistance Mobilité + Garantie Personnelle du Conducteur). Si le résultat est champs_manquants, demande la civilité et l'adresse postale complète puis rappelle l'outil en les passant. Si le résultat est recalcul_en_cours, attends une petite minute puis rappelle l'outil.",
+    parameters: {
+      type: 'object',
+      properties: {
+        formule: {
+          type: 'string',
+          enum: ['tiers_illimite', 'vol_incendie', 'dommages_tous_accidents'],
+          description:
+            'Formule choisie : tiers_illimite (Tiers Illimité), vol_incendie (Tiers + Vol & Incendie), dommages_tous_accidents (Tous Risques). Omets-la si le client valide la formule déjà proposée.',
+        },
+        avec_options: {
+          type: 'boolean',
+          description:
+            'true si le client prend les 2 options du pack : Assistance Mobilité (~1 €/mois) et Garantie Personnelle du Conducteur (~1,50 €/mois).',
+        },
+        civilite: {
+          type: 'string',
+          enum: ['monsieur', 'madame'],
+          description: "Civilité du client, si donnée pendant l'appel.",
+        },
+        adresse_ligne: {
+          type: 'string',
+          description: "Numéro et rue de l'adresse postale du client, si donnés pendant l'appel.",
+        },
+        code_postal: {
+          type: 'string',
+          description: "Code postal (5 chiffres) de l'adresse postale du client.",
+        },
+        ville: { type: 'string', description: "Ville de l'adresse postale du client." },
+      },
+      required: [],
     },
   },
   {
@@ -265,8 +305,149 @@ export async function handleVoiceTool(
         return JSON.stringify({
           statut: 'devis_lancé',
           message:
-            'Le devis se prépare (~20s) et sera envoyé ; un conseiller revient vers le client.',
+            'Le calcul est lancé (~20s). Le client recevra sur WhatsApp et par email un menu de ' +
+            'tarifs (3 formules aux prix mensuels réels, 2 options, pack conseillé) — invite-le à ' +
+            'répondre sur WhatsApp ou à te donner son choix au téléphone.',
         });
+      }
+
+      case 'confirmer_devis': {
+        if (!ctx.customerId || !ctx.leadId) {
+          return JSON.stringify({
+            statut: 'identite_manquante',
+            message:
+              'Impossible de confirmer un devis pour cet appel. Note le choix du client et propose un rappel par un conseiller.',
+          });
+        }
+
+        // The latest quote is the one parked on the Maxance Garanties tab —
+        // its formule (default tiers_illimite) is what a confirm would lock
+        // in. If the caller picked ANOTHER formule, re-run quote.request with
+        // the stored formData so the official devis matches the choice.
+        const [latest] = await db
+          .select({ id: quotes.id, rawFormData: quotes.rawFormData })
+          .from(quotes)
+          .where(eq(quotes.leadId, ctx.leadId))
+          .orderBy(desc(quotes.requestedAt))
+          .limit(1);
+        if (!latest) {
+          return JSON.stringify({
+            statut: 'devis_inexistant',
+            message:
+              "Aucun tarif n'a encore été calculé pour cet appel — appelle d'abord demander_devis avec les 5 champs.",
+          });
+        }
+
+        const avecOptions = args.avec_options === true;
+        const garanties = avecOptions ? { assistance: true, garantiePersonnelle: true } : undefined;
+
+        const formData = (latest.rawFormData ?? {}) as Record<string, unknown>;
+        const formuleActuelle =
+          typeof formData['formule'] === 'string' ? formData['formule'] : 'tiers_illimite';
+        const formuleChoisie = [
+          'tiers_illimite',
+          'vol_incendie',
+          'dommages_tous_accidents',
+        ].includes(String(args.formule ?? ''))
+          ? String(args.formule)
+          : undefined;
+        if (formuleChoisie && formuleChoisie !== formuleActuelle) {
+          if (formData['vehicleKind'] !== 'trottinette') {
+            return JSON.stringify({
+              statut: 'erreur',
+              message:
+                'Impossible de recalculer cette formule automatiquement ; propose un rappel par un conseiller.',
+            });
+          }
+          const nextFormData: Record<string, unknown> = { ...formData, formule: formuleChoisie };
+          if (args.avec_options === true) nextFormData['garantiesAdditionnelles'] = garanties;
+          else if (args.avec_options === false) delete nextFormData['garantiesAdditionnelles'];
+          await invokeTool(toolCtx(db, ctx), 'quote.request', {
+            customerId: ctx.customerId,
+            leadId: ctx.leadId,
+            formData: nextFormData,
+          });
+          logger.info(
+            { callId: ctx.sipCallId, formule: formuleChoisie },
+            'voice-tools: formule changed, devis re-requested before confirm',
+          );
+          return JSON.stringify({
+            statut: 'recalcul_en_cours',
+            message:
+              'La formule choisie est en cours de recalcul (moins d’une minute). Garde la conversation vivante puis rappelle confirmer_devis avec le même choix.',
+          });
+        }
+
+        // Civilité/adresse the caller just gave verbally. Persist the durable
+        // copy on the profile FIRST (quote.confirm defaults from it — same as
+        // the WhatsApp playbook §6), then pass them explicitly to the confirm.
+        const civilite =
+          args.civilite === 'monsieur' || args.civilite === 'madame' ? args.civilite : undefined;
+        const adresseLigne =
+          typeof args.adresse_ligne === 'string' && args.adresse_ligne.trim().length > 0
+            ? args.adresse_ligne.trim()
+            : undefined;
+        const codePostal = /^\d{5}$/.test(String(args.code_postal ?? ''))
+          ? String(args.code_postal)
+          : undefined;
+        const ville =
+          typeof args.ville === 'string' && args.ville.trim().length > 0
+            ? args.ville.trim()
+            : undefined;
+        if (civilite && adresseLigne && codePostal && ville) {
+          try {
+            await invokeTool(toolCtx(db, ctx), 'customer.update_profile', {
+              customerId: ctx.customerId,
+              fields: {
+                address: { line1: adresseLigne, postalCode: codePostal, city: ville, civilite },
+              },
+            });
+          } catch (err) {
+            // Best-effort — the explicit params below still reach quote.confirm.
+            logger.warn(
+              { callId: ctx.sipCallId, err: err instanceof Error ? err.message : String(err) },
+              'voice-tools: profile address store failed (non-fatal)',
+            );
+          }
+        }
+
+        try {
+          const res = (await invokeTool(toolCtx(db, ctx), 'quote.confirm', {
+            customerId: ctx.customerId,
+            leadId: ctx.leadId,
+            // quoteId omitted on purpose — quote.confirm resolves the lead's
+            // latest quote, which is the one parked on the Maxance tab.
+            ...(civilite ? { civilite } : {}),
+            ...(adresseLigne ? { addressLine: adresseLigne } : {}),
+            ...(codePostal ? { postalCode: codePostal } : {}),
+            ...(ville ? { city: ville } : {}),
+            ...(garanties ? { garantiesAdditionnelles: garanties } : {}),
+          })) as { quoteId: string };
+          logger.info(
+            { callId: ctx.sipCallId, quoteId: res.quoteId, addOns: garanties ?? null },
+            'voice-tools: devis confirmed',
+          );
+          return JSON.stringify({
+            statut: 'devis_confirmé',
+            reference: res.quoteId,
+            info: 'le devis PDF arrive par WhatsApp et email dans quelques minutes',
+          });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          // quote.confirm throws a descriptive French error listing the
+          // missing subscriber fields — turn it into a status so the model
+          // ASKS the caller (civilité, adresse) and retries instead of
+          // erroring the live call.
+          if (msg.includes('souscripteur manquantes')) {
+            return JSON.stringify({
+              statut: 'champs_manquants',
+              details: msg,
+              message:
+                'Demande au client sa civilité (Monsieur ou Madame) et son adresse postale complète (numéro et rue, code postal, ville), puis rappelle confirmer_devis en les passant.',
+            });
+          }
+          throw err; // outer catch → generic French status
+        }
       }
 
       case 'transferer_conseiller': {
