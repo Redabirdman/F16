@@ -311,6 +311,22 @@ export async function start(port: number = Number(process.env.PORT ?? 3001)): Pr
   // Shared webhook secret consumed by the M5.T1 `/v1/leads` route. The same
   // value is used by the website + Meta forwarders to sign their POSTs.
   const leadIntakeSecret = process.env['HMAC_WEBHOOK_SECRET'];
+  // Fail-open is deliberate (dev boots without secrets) but must be LOUD:
+  // both webhooks are exposed on the public tunnel, and a rebuilt .env that
+  // drops a secret would otherwise silently accept unsigned POSTs (fake
+  // inbound WhatsApp / fake leads). 2026-07-04 audit, H3.
+  if (!wahaSecret) {
+    logger.error(
+      {},
+      'SECURITY: WAHA_HMAC_SECRET unset — the public WAHA webhook accepts UNSIGNED requests',
+    );
+  }
+  if (!leadIntakeSecret) {
+    logger.error(
+      {},
+      'SECURITY: HMAC_WEBHOOK_SECRET unset — the public /v1/leads intake accepts UNSIGNED requests',
+    );
+  }
 
   // M14.T2 — start the Postgres LISTEN/NOTIFY listener so the admin SSE
   // endpoint has events to fan out. Wrapped in try/catch so a missing
