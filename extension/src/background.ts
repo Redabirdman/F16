@@ -523,11 +523,19 @@ async function captureActiveTabScreenshot(): Promise<ScreenshotResponse> {
   if (!tab || tab.windowId === undefined) {
     return { kind: 'capture.err', error: 'no_maxance_tab' };
   }
+  // captureVisibleTab shoots whatever tab is ACTIVE in the window — if the
+  // Maxance tab is backgrounded we'd capture Ridaa's unrelated tab. Refuse
+  // instead of leaking the wrong page into flow diagnostics.
+  if (!tab.active) {
+    return { kind: 'capture.err', error: 'maxance_tab_not_active' };
+  }
   try {
     const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
     return { kind: 'capture.ok', dataUrl };
   } catch (err) {
-    return { kind: 'capture.err', error: err instanceof Error ? err.message : String(err) };
+    const error = err instanceof Error ? err.message : String(err);
+    console.warn('[f16-ext] captureVisibleTab failed:', error);
+    return { kind: 'capture.err', error };
   }
 }
 

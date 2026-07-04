@@ -601,8 +601,10 @@ export async function runQuotePreview(cmd: QuotePreviewCommand): Promise<Respons
   const shoot = async (step: string): Promise<void> => {
     try {
       screenshots.push(await captureScreenshot(step));
-    } catch {
-      /* screenshot is best-effort; don't fail the flow */
+    } catch (err) {
+      // Best-effort: never fail the flow — but say why, or the next
+      // permission regression stays invisible for weeks again.
+      console.warn('[f16-ext] screenshot failed at', step, err);
     }
   };
 

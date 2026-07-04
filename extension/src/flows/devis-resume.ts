@@ -199,8 +199,8 @@ export async function runDevisResume(cmd: DevisResumeCommand): Promise<Response>
   const shoot = async (step: string): Promise<void> => {
     try {
       screenshots.push(await captureScreenshot(step));
-    } catch {
-      /* best-effort */
+    } catch (err) {
+      console.warn('[f16-ext] screenshot failed at', step, err);
     }
   };
 

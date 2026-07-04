@@ -207,8 +207,8 @@ export async function runSubscriptionComplete(cmd: SubscriptionCommand): Promise
   const shoot = async (step: string): Promise<void> => {
     try {
       screenshots.push(await captureScreenshot(step));
-    } catch {
-      /* best-effort */
+    } catch (err) {
+      console.warn('[f16-ext] screenshot failed at', step, err);
     }
   };
   const navigating = (fromScreen: string, expectedScreen: string): Response =>
