@@ -365,12 +365,13 @@ export class EngagementAgent extends BaseAgent {
       summary:
         `${who} n'a plus répondu depuis 7 jours malgré 2 relances. ` +
         `Le lead est passé en sommeil. Souhaitez-vous reprendre contact ou clôturer ?`,
+      // English labels — these render verbatim in the management WA group.
       options: [
-        { id: 'manual_followup', label: 'Reprendre contact manuellement', kind: 'approve' },
-        { id: 'close_lost', label: 'Clôturer (lead perdu)', kind: 'reject' },
+        { id: 'manual_followup', label: 'I will follow up manually', kind: 'approve' },
+        { id: 'close_lost', label: 'Close as lost', kind: 'reject' },
         // 'custom' (not a 2nd 'approve'): keeps the text-alias matcher from
         // ambiguously resolving a typed "approuve" to two different options.
-        { id: 'wait', label: 'Laisser en sommeil', kind: 'custom' },
+        { id: 'wait', label: 'Leave dormant', kind: 'custom' },
       ],
     });
 

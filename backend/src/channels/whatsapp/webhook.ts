@@ -50,6 +50,7 @@ import {
   isMatch,
 } from './human-action-router.js';
 import { emitHubSpotActivity } from '../../integrations/hubspot/activity-worker.js';
+import { getRedis } from '../../queue/index.js';
 
 export interface WhatsAppWebhookOptions {
   db: Database;
@@ -138,6 +139,24 @@ export function buildWhatsAppWebhook(opts: WhatsAppWebhookOptions): Hono {
     //    our own outbound messages too — we must not loop back.
     if (msg.fromMe) {
       return c.json({ accepted: true, ignored: 'fromMe' }, 200);
+    }
+
+    // 5a. Duplicate-delivery guard (2026-07-05 audit): WAHA retries a
+    //     webhook delivery on timeout/5xx, and each retry carries the SAME
+    //     message id. Without this, a retry produced a second turn row + a
+    //     second LLM dispatch. Redis SETNX with a 24h TTL — best-effort:
+    //     if Redis is briefly unavailable we'd rather double-process than
+    //     drop a real customer message.
+    try {
+      const seen = await getRedis().set(`waha:msg:${msg.id}`, '1', 'EX', 86_400, 'NX');
+      if (seen === null) {
+        return c.json({ accepted: true, ignored: 'duplicate-message-id' }, 200);
+      }
+    } catch (err) {
+      logger.warn(
+        { err: err instanceof Error ? err.message : String(err) },
+        'waha webhook: dedup check failed — processing anyway',
+      );
     }
 
     // 5b. HUMAN_ACTION group intercept (option G follow-up). When the

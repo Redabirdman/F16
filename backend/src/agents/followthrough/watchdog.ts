@@ -206,10 +206,11 @@ async function checkPreviewStuck(
           `Devis en préparation depuis ${stuckMin} min sans résultat ` +
           `(quote ${q.id.slice(0, 8)}, lead ${q.leadId.slice(0, 8)}). ` +
           `Le flux Maxance semble bloqué — vérifier l'extension/le backend.`,
+        // English labels — these render verbatim in the management WA group.
         options: [
-          { id: 'retry', label: 'Relancer le devis', kind: 'approve' },
-          { id: 'manual', label: 'Faire à la main', kind: 'approve' },
-          { id: 'abandon', label: 'Abandonner', kind: 'reject' },
+          { id: 'retry', label: 'Retry the quote', kind: 'approve' },
+          { id: 'manual', label: 'Do it manually', kind: 'approve' },
+          { id: 'abandon', label: 'Abandon', kind: 'reject' },
         ],
       });
       await notifyHumanAction(
@@ -334,10 +335,11 @@ async function checkDeliveryStuck(
             `Devis ${devisNumber} confirmé il y a ${stuckMin} min mais le PDF n'est ` +
             `jamais arrivé sur contact@ (relais Maxance). Vérifier la boîte mail / ` +
             `renvoyer depuis Maxance.`,
+          // English labels — these render verbatim in the management WA group.
           options: [
-            { id: 'sent_manually', label: 'Envoyé manuellement', kind: 'approve' },
-            { id: 'investigate', label: 'Vérifier le relais', kind: 'approve' },
-            { id: 'abandon', label: 'Abandonner', kind: 'reject' },
+            { id: 'sent_manually', label: 'Sent manually', kind: 'approve' },
+            { id: 'investigate', label: 'Investigate the relay', kind: 'approve' },
+            { id: 'abandon', label: 'Abandon', kind: 'reject' },
           ],
         });
         await notifyHumanAction(

@@ -97,10 +97,11 @@ export async function scanAndFlagFatigue(
       intent: 'AD_FATIGUE',
       severity: 3,
       summary,
+      // English labels — these render verbatim in the management WA group.
       options: [
-        { id: 'rotate', label: 'Rafraîchir le visuel', kind: 'approve' },
-        { id: 'pause', label: "Mettre l'annonce en pause", kind: 'approve' },
-        { id: 'ignore', label: 'Laisser tourner', kind: 'reject' },
+        { id: 'rotate', label: 'Refresh the visual', kind: 'approve' },
+        { id: 'pause', label: 'Pause the ad', kind: 'approve' },
+        { id: 'ignore', label: 'Leave it running', kind: 'reject' },
       ],
     });
 

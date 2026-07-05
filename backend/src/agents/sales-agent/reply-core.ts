@@ -30,6 +30,7 @@ import type { ChannelId, ContactRef } from '../../channels/types.js';
 import { checkComplianceFor } from '../../compliance/index.js';
 import * as humanActions from '../../db/repositories/human-actions.js';
 import { notifyHumanAction } from '../human-notify.js';
+import { HUMAN_ACTION_DRAFT_MARKER } from '../reporter-agent/humanize.js';
 import { sendMessage } from '../../messaging/dispatcher.js';
 import { listTools } from '../../tools/index.js';
 import { recallCustomerFacts } from '../../memory/index.js';
@@ -370,11 +371,17 @@ export async function generateSalesReply(
       correlationId: lead.id,
       intent: 'COMPLIANCE_BLOCKED',
       severity: 2,
-      summary: `Sales Agent draft bloqué (${compliance.ruleHits.join(', ') || 'LLM'}). Raisons : ${compliance.reasons.join(' ; ')}`,
+      // The blocked draft rides along after the marker so the WA-group
+      // message can show WHAT was blocked (management can't decide "send
+      // anyway" blind). humanize.ts splits it back off before rendering.
+      summary:
+        `Sales Agent draft bloqué (${compliance.ruleHits.join(', ') || 'LLM'}). Raisons : ${compliance.reasons.join(' ; ')}` +
+        `${HUMAN_ACTION_DRAFT_MARKER}${draft}`,
+      // English labels — these render verbatim in the management WA group.
       options: [
-        { id: 'send_as_is', label: 'Envoyer quand même', kind: 'approve' },
-        { id: 'reject_send', label: "Refuser l'envoi", kind: 'reject' },
-        { id: 'revise', label: 'Demander une révision', kind: 'revise' },
+        { id: 'send_as_is', label: 'Send it anyway', kind: 'approve' },
+        { id: 'reject_send', label: 'Do not send', kind: 'reject' },
+        { id: 'revise', label: 'Ask for a revision', kind: 'revise' },
       ],
     });
 

@@ -160,7 +160,8 @@ export async function scanDraftApprovals(opts: DraftApprovalOptions): Promise<Ap
           intent: 'CAMPAIGN_LAUNCH_FAILED',
           severity: 2,
           summary: humanizeLaunchError(msg),
-          options: [{ id: 'ack', label: 'Compris', kind: 'approve' }],
+          // English label — renders verbatim in the management WA group.
+          options: [{ id: 'ack', label: 'Understood', kind: 'approve' }],
         });
         await sendMessage(
           { db: opts.db },

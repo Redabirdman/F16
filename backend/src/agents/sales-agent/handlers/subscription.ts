@@ -182,10 +182,11 @@ export async function handleSubscriptionFailed(
       `Souscription ${payload.quoteId} échouée (${payload.errorCode}). ` +
       `Lead ${leadId}. ${payload.detail ? `Détail : ${payload.detail}. ` : ''}` +
       `Capture(s) : ${payload.screenshots?.length ?? 0}.`,
+    // English labels — these render verbatim in the management WA group.
     options: [
-      { id: 'retry', label: 'Relancer la souscription', kind: 'approve' },
-      { id: 'manual', label: 'Finaliser à la main', kind: 'approve' },
-      { id: 'abandon', label: 'Abandonner ce lead', kind: 'reject' },
+      { id: 'retry', label: 'Retry the subscription', kind: 'approve' },
+      { id: 'manual', label: 'Finish it manually', kind: 'approve' },
+      { id: 'abandon', label: 'Abandon this lead', kind: 'reject' },
     ],
   });
   // Row alone only reaches the admin — the WA group needs the emit (H1).

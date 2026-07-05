@@ -5,8 +5,15 @@ export {
   __resetReporterAgentRegistrationForTests,
 } from './register.js';
 export {
-  formatHumanActionRequest,
-  formatHumanActionResolved,
-  formatOptionsBlock,
-  severityBadge,
-} from './format.js';
+  buildHumanActionRequestMessage,
+  buildHumanActionResolvedMessage,
+  optionsBlockEn,
+  severityBadgeEn,
+  intentTitleEn,
+  explainErrorCode,
+  shortRef,
+  stripUuids,
+  splitDraft,
+  resolveActionContext,
+  HUMAN_ACTION_DRAFT_MARKER,
+} from './humanize.js';

@@ -195,10 +195,11 @@ async function flagLoop(
       `Boucle agent détectée sur ${ctx.correlationId.slice(0, 8)} : ` +
       `${ctx.totalTurns} messages entre ${ctx.distinctAgents.join(' ↔ ')} en moins de 30 min. ` +
       `Aucune action automatique. Vérifier et arbitrer.`,
+    // English labels — these render verbatim in the management WA group.
     options: [
-      { id: 'investigate', label: 'Je regarde', kind: 'approve' },
-      { id: 'kill_first', label: `Arrêter ${ctx.distinctAgents[0] ?? 'A'}`, kind: 'reject' },
-      { id: 'kill_second', label: `Arrêter ${ctx.distinctAgents[1] ?? 'B'}`, kind: 'reject' },
+      { id: 'investigate', label: 'I will investigate', kind: 'approve' },
+      { id: 'kill_first', label: `Stop ${ctx.distinctAgents[0] ?? 'A'}`, kind: 'reject' },
+      { id: 'kill_second', label: `Stop ${ctx.distinctAgents[1] ?? 'B'}`, kind: 'reject' },
     ],
   });
   // A live agent loop is urgent — reach the WA group, not just the admin (H1).

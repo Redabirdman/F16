@@ -316,7 +316,8 @@ async function raiseInspectorHandoff(
       intent: 'INSPECTOR_HANDOFF',
       severity: 1,
       summary,
-      options: [{ id: 'done', label: 'Contrat débloqué', kind: 'custom' }],
+      // English label — renders verbatim in the management WA group.
+      options: [{ id: 'done', label: 'Contract unblocked', kind: 'custom' }],
       correlationId: quoteId,
     });
     humanActionId = action.id;

@@ -192,6 +192,32 @@ describe('parseHumanActionResolution — numeric matches', () => {
     expect(o.matchedActionVia).toBe('uuid');
   });
 
+  it('matches a numeric reply preceded by a SHORT REF (#8-char) — the English group format', () => {
+    // The group message footer is now "Ref: #22222222" (no full UUIDs) —
+    // quoting it + "1" must disambiguate among multiple pending actions.
+    const o = parseHumanActionResolution({
+      ...ridaaMsg(`#22222222 1`),
+      groupChatId: GROUP_ID,
+      authorisedResolvers: ALLOWLIST,
+      pendingActions: [sampleAction1, sampleAction2],
+    }) as ResolutionMatch;
+    expect(isMatch(o)).toBe(true);
+    expect(o.actionId).toBe(sampleAction2.id);
+    expect(o.option.id).toBe('callback');
+    expect(o.matchedActionVia).toBe('short_ref');
+    expect(o.matchedOptionVia).toBe('numeric');
+  });
+
+  it('returns action_not_found when the short ref matches no pending action', () => {
+    const o = parseHumanActionResolution({
+      ...ridaaMsg('#deadbeef 1'),
+      groupChatId: GROUP_ID,
+      authorisedResolvers: ALLOWLIST,
+      pendingActions: [sampleAction1, sampleAction2],
+    });
+    if (!isMatch(o)) expect(o.reason).toBe('action_not_found');
+  });
+
   it('returns option_not_recognised when numeric is out of bounds', () => {
     const o = parseHumanActionResolution({
       ...ridaaMsg('9'),

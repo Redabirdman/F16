@@ -333,10 +333,11 @@ export async function handleQuoteFailed(
       `Quote ${payload.quoteId} failed (${payload.errorCode}). ` +
       `Lead ${leadId}. ${payload.detail ? `Détail : ${payload.detail}. ` : ''}` +
       `Capture(s) : ${payload.screenshots.length}.`,
+    // English labels — these render verbatim in the management WA group.
     options: [
-      { id: 'retry', label: 'Relancer le devis', kind: 'approve' },
-      { id: 'manual', label: 'Faire le devis à la main', kind: 'approve' },
-      { id: 'abandon', label: 'Abandonner ce lead', kind: 'reject' },
+      { id: 'retry', label: 'Retry the quote', kind: 'approve' },
+      { id: 'manual', label: 'Do the quote manually', kind: 'approve' },
+      { id: 'abandon', label: 'Abandon this lead', kind: 'reject' },
     ],
   });
   // Row alone only reaches the admin — the WA group needs the emit (H1).
@@ -499,8 +500,8 @@ export async function handleDevisPdfReceived(
         `Devis ${payload.devisNumber} reçu de Maxance mais impossible à livrer au client ` +
         `(lead ${leadId}). PDF : ${payload.pdfPath}. Envoyer manuellement.`,
       options: [
-        { id: 'sent_manually', label: 'Envoyé manuellement', kind: 'approve' },
-        { id: 'abandon', label: 'Abandonner', kind: 'reject' },
+        { id: 'sent_manually', label: 'Sent manually', kind: 'approve' },
+        { id: 'abandon', label: 'Abandon', kind: 'reject' },
       ],
     });
     await notifyHumanAction(
@@ -528,8 +529,8 @@ export async function handleDevisPdfReceived(
         `Devis ${payload.devisNumber} livré sur ${Object.keys(deliveries).join(', ')} mais PAS ` +
         `sur : ${failedList}. Lead ${leadId}. PDF : ${payload.pdfPath}. Compléter manuellement.`,
       options: [
-        { id: 'sent_manually', label: 'Complété manuellement', kind: 'approve' },
-        { id: 'ignore', label: 'Ignorer (canal livré suffit)', kind: 'reject' },
+        { id: 'sent_manually', label: 'Completed manually', kind: 'approve' },
+        { id: 'ignore', label: 'Ignore (the delivered channel is enough)', kind: 'reject' },
       ],
     });
     await notifyHumanAction(

@@ -139,10 +139,11 @@ export async function assembleCampaignDraft(opts: AssembleDraftOptions): Promise
     intent: 'CAMPAIGN_DRAFT',
     severity: 2,
     summary,
+    // English labels — these render verbatim in the management WA group.
     options: [
-      { id: 'approve', label: 'Approuver et lancer (en pause)', kind: 'approve' },
-      { id: 'reject', label: 'Rejeter', kind: 'reject' },
-      { id: 'revise', label: 'Demander une révision', kind: 'revise' },
+      { id: 'approve', label: 'Approve and launch (paused)', kind: 'approve' },
+      { id: 'reject', label: 'Reject', kind: 'reject' },
+      { id: 'revise', label: 'Ask for a revision', kind: 'revise' },
     ],
   });
 

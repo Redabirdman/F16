@@ -11,12 +11,13 @@
  *
  * Consumes the `human_action` queue. Two intents handled:
  *
- *   - HUMAN_ACTION.REQUESTED → load the row, format a French message
- *     with severity glyph + summary + numbered options + action ID,
+ *   - HUMAN_ACTION.REQUESTED → load the row, build a decision-ready
+ *     ENGLISH message (severity glyph + customer block + plain-English
+ *     diagnosis + numbered options + short ref — see humanize.ts),
  *     post to the group chat via WAHA sendText.
  *
  *   - HUMAN_ACTION.RESOLVED → post a closure confirmation in the same
- *     group ("✅ Action XXX clôturée via admin — choix : approve").
+ *     group ("✅ Quote failed — resolved via WhatsApp: Retry the quote").
  *     Always posted, even if resolved via admin UI — keeps the group
  *     thread in sync.
  *
@@ -54,7 +55,7 @@ import { getActionById } from '../../db/repositories/human-actions.js';
 import { getCampaignTree } from '../../db/repositories/ads.js';
 import type { HumanActionOption } from '../../db/schema/agent-runtime.js';
 import type { WahaClient } from '../../channels/whatsapp/waha-client.js';
-import { formatHumanActionRequest, formatHumanActionResolved } from './format.js';
+import { buildHumanActionRequestMessage, buildHumanActionResolvedMessage } from './humanize.js';
 
 /**
  * Construction dependencies. Both are injected so tests can swap a stub
@@ -117,7 +118,9 @@ export class ReporterAgent extends BaseAgent {
       );
       return { ok: false, error: 'row_not_found' };
     }
-    const text = formatHumanActionRequest(action);
+    // 2026-07-05 (Ridaa): the group message is ENGLISH + decision-ready —
+    // customer name/source, plain-English diagnosis, short ref, no raw UUIDs.
+    const text = await buildHumanActionRequestMessage(this.db, action);
     await this.waha.sendText({ chatId: this.groupChatId, text });
 
     // M12: a campaign draft also ships its creative images so Ridaa can judge
@@ -167,7 +170,7 @@ export class ReporterAgent extends BaseAgent {
             data: bytes.toString('base64'),
             mimetype: 'image/png',
             filename: `${c.angle}.png`,
-            caption: `🅰️ Angle « ${c.angle} » — ${c.headline ?? ''}`,
+            caption: `🅰️ Angle "${c.angle}" — ${c.headline ?? ''}`,
           });
         } catch (err) {
           logger.warn(
@@ -192,23 +195,23 @@ export class ReporterAgent extends BaseAgent {
       source: 'admin' | 'whatsapp';
     };
     // Re-load the row so the closure can show the HUMAN option label + the
-    // French intent label instead of the raw option id / kind. `choice` is the
-    // chosen option's id. Best-effort: if the row is gone, fall back to a
+    // English intent title instead of the raw option id / kind. `choice` is
+    // the chosen option's id. Best-effort: if the row is gone, fall back to a
     // minimal human line (still no UUID / raw kind).
     const action = await getActionById(this.db, payload.humanActionId);
     let text: string;
     if (action) {
       const options = action.options as readonly HumanActionOption[];
       const chosen = options.find((o) => o.id === payload.choice);
-      text = formatHumanActionResolved({
+      text = buildHumanActionResolvedMessage({
         intent: action.intent,
         optionLabel: chosen?.label ?? payload.choice,
         kind: chosen?.kind ?? 'custom',
         source: payload.source,
       });
     } else {
-      const sourceLabel = payload.source === 'admin' ? "l'admin" : 'WhatsApp';
-      text = `✅ Action résolue via ${sourceLabel}.`;
+      const sourceLabel = payload.source === 'admin' ? 'the admin' : 'WhatsApp';
+      text = `✅ Action resolved via ${sourceLabel}.`;
     }
     await this.waha.sendText({ chatId: this.groupChatId, text });
     logger.info(

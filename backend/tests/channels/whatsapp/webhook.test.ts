@@ -29,7 +29,7 @@ import {
 import { hashPII } from '../../../src/db/crypto.js';
 import { insertCustomer } from '../../../src/db/repositories/customers.js';
 import { buildWhatsAppWebhook } from '../../../src/channels/whatsapp/webhook.js';
-import { __resetForTests, shutdownQueues } from '../../../src/queue/index.js';
+import { __resetForTests, getRedis, shutdownQueues } from '../../../src/queue/index.js';
 
 const pgUrl = process.env.TEST_DATABASE_URL;
 const redisUrl = process.env.TEST_REDIS_URL;
@@ -71,6 +71,8 @@ function buildBody(opts: {
   event?: string;
   isGroup?: boolean;
   timestamp?: number;
+  /** Pin the WAHA message id — used by the duplicate-delivery test. */
+  msgId?: string;
   payload?: unknown; // override to test malformed payloads
 }): string {
   if (opts.payload !== undefined) {
@@ -86,7 +88,10 @@ function buildBody(opts: {
     event: opts.event ?? 'message',
     session: 'default',
     payload: {
-      id: `false_${chatId}_3EB0ABCDEF`,
+      // Unique per call by default: the webhook's step-5a Redis SETNX dedup
+      // (waha:msg:<id>, 24h TTL) would otherwise swallow repeated fixture ids
+      // across tests AND across runs.
+      id: opts.msgId ?? `false_${chatId}_${randomBytes(6).toString('hex')}`,
       timestamp: opts.timestamp ?? 1715865000,
       from: chatId,
       fromMe: opts.fromMe ?? false,
@@ -119,6 +124,13 @@ d('WAHA inbound webhook (live)', () => {
     // CASCADE through customer_facts + conversation_turns + leads.
     await db.execute(sql`TRUNCATE TABLE customers RESTART IDENTITY CASCADE`);
     await db.execute(sql`TRUNCATE TABLE agent_messages RESTART IDENTITY CASCADE`);
+
+    // Flush the webhook's duplicate-message-id guard keys (waha:msg:*, 24h
+    // TTL, NOT namespaced by BULLMQ_PREFIX) so state from a previous test or
+    // a previous run can never dedup a fresh fixture message.
+    const redis = getRedis();
+    const dedupKeys = await redis.keys('waha:msg:*');
+    if (dedupKeys.length > 0) await redis.del(...dedupKeys);
   });
 
   afterEach(async () => {
@@ -226,6 +238,50 @@ d('WAHA inbound webhook (live)', () => {
       .from(agentMessages)
       .where(eq(agentMessages.correlationId, j1.customerId));
     expect(msgs.filter((m) => m.intent === 'CUSTOMER.MESSAGE_RECEIVED')).toHaveLength(2);
+  });
+
+  // -------------------------------------------------------------------------
+  // 2b. WAHA redelivery (same message id) -> deduped by the step-5a guard
+  // -------------------------------------------------------------------------
+  it('test 2b (duplicate delivery): same message id twice -> second ignored, one turn row', async () => {
+    const app = buildApp({ hmacSecret: SECRET });
+    const phone = '33611111022';
+    const body = buildBody({
+      phone,
+      body: 'retry me',
+      msgId: `false_${phone}@c.us_DUPLICATE01`,
+    });
+
+    const r1 = await app.request('/webhooks/waha', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-webhook-hmac': sign(body, SECRET) },
+      body,
+    });
+    expect(r1.status).toBe(200);
+    const j1 = (await r1.json()) as { accepted: boolean; customerId: string };
+    expect(j1.customerId).toBeDefined();
+
+    // WAHA retry: byte-identical redelivery with the SAME message id.
+    const r2 = await app.request('/webhooks/waha', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-webhook-hmac': sign(body, SECRET) },
+      body,
+    });
+    expect(r2.status).toBe(200);
+    const j2 = (await r2.json()) as { accepted: boolean; ignored?: string };
+    expect(j2.ignored).toBe('duplicate-message-id');
+
+    // Exactly ONE inbound turn row was written (no double LLM dispatch either).
+    const turns = await db
+      .select()
+      .from(conversationTurns)
+      .where(eq(conversationTurns.customerId, j1.customerId));
+    expect(turns).toHaveLength(1);
+    const msgs = await db
+      .select()
+      .from(agentMessages)
+      .where(eq(agentMessages.correlationId, j1.customerId));
+    expect(msgs.filter((m) => m.intent === 'CUSTOMER.MESSAGE_RECEIVED')).toHaveLength(1);
   });
 
   // -------------------------------------------------------------------------

@@ -123,10 +123,15 @@ describe('ReporterAgent — HUMAN_ACTION.REQUESTED', () => {
     expect(result).toEqual({ ok: true, result: { posted: true, humanActionId: sampleAction.id } });
     expect(waha.sent).toHaveLength(1);
     expect(waha.sent[0]?.chatId).toBe(GROUP_CHAT_ID);
+    // Unknown intent falls back to the raw code; header is English now.
     expect(waha.sent[0]?.text).toContain('APPROVE_REFUND');
     expect(waha.sent[0]?.text).toContain('🟡');
+    expect(waha.sent[0]?.text).toContain('ACTION NEEDED');
+    expect(waha.sent[0]?.text).toContain('Reply with the number:');
     expect(waha.sent[0]?.text).toContain('1. Approuver');
-    expect(waha.sent[0]?.text).toContain(`ID : ${sampleAction.id}`);
+    // Short ref only — never the full UUID (2026-07-05 English-group rework).
+    expect(waha.sent[0]?.text).toContain(`Ref: #${sampleAction.id.slice(0, 8)}`);
+    expect(waha.sent[0]?.text).not.toContain(sampleAction.id);
   });
 
   it("returns row_not_found and skips sendText when the action doesn't exist", async () => {
@@ -177,8 +182,7 @@ describe('ReporterAgent — HUMAN_ACTION.RESOLVED', () => {
     expect(waha.sent).toHaveLength(1);
     expect(waha.sent[0]?.chatId).toBe(GROUP_CHAT_ID);
     expect(waha.sent[0]?.text).toContain('✅');
-    expect(waha.sent[0]?.text).toContain('Validé');
-    expect(waha.sent[0]?.text).toContain("l'admin");
+    expect(waha.sent[0]?.text).toContain('resolved via the admin');
     expect(waha.sent[0]?.text).toContain('Approuver'); // option label, not the id "approve"
     // No raw UUID / raw kind leaks.
     expect(waha.sent[0]?.text).not.toContain(sampleAction.id);

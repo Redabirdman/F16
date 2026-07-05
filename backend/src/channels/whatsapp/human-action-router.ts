@@ -32,6 +32,14 @@ import { chatIdToE164 } from './webhook-types.js';
 const UUID_REGEX = /\b([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\b/i;
 
 /**
+ * Short-ref regex — the group messages now end with `Ref: #abcdef12` (the
+ * first 8 chars of the action id — see reporter-agent/humanize.ts). A quoted
+ * reply carries that ref instead of a full UUID, so we match it against the
+ * pending ids by prefix.
+ */
+const SHORT_REF_REGEX = /#([0-9a-f]{8})\b/i;
+
+/**
  * French + English aliases mapped to canonical option `kind` values. Used
  * when the body is text rather than a number. Match is lower-cased + word-
  * boundary so "approuver le devis" still resolves to "approve".
@@ -59,8 +67,8 @@ const KIND_ALIASES: ReadonlyArray<{ words: readonly RegExp[]; kind: HumanActionO
 export interface ResolutionMatch {
   actionId: string;
   option: HumanActionOption;
-  /** "uuid" | "latest_pending" — useful for audit logs. */
-  matchedActionVia: 'uuid' | 'latest_pending';
+  /** "uuid" | "short_ref" | "latest_pending" — useful for audit logs. */
+  matchedActionVia: 'uuid' | 'short_ref' | 'latest_pending';
   /** "numeric" | "kind_alias" | "freeform_revise" — same. */
   matchedOptionVia: 'numeric' | 'kind_alias' | 'freeform_revise';
   /** Author chat id we extracted, in E.164 (e.g. "+33612345678"). */
@@ -169,11 +177,14 @@ export function parseHumanActionResolution(input: ParseInput): ResolutionOutcome
     return { reason: 'empty_body' };
   }
 
-  // 4. Find the target action. UUID-in-body wins; otherwise fall back to
-  //    "latest pending" but only if there's exactly one.
+  // 4. Find the target action. UUID-in-body wins; then a short ref
+  //    ("#abcdef12", as emitted in the group message footer) matched by id
+  //    prefix; otherwise fall back to "latest pending" but only if there's
+  //    exactly one.
   const uuidMatch = UUID_REGEX.exec(body);
+  const shortRefMatch = SHORT_REF_REGEX.exec(body);
   let action: HumanAction | undefined;
-  let matchedActionVia: 'uuid' | 'latest_pending' = 'latest_pending';
+  let matchedActionVia: 'uuid' | 'short_ref' | 'latest_pending' = 'latest_pending';
   if (uuidMatch) {
     const captured = uuidMatch[1];
     const targetId = (captured ?? '').toLowerCase();
@@ -182,6 +193,20 @@ export function parseHumanActionResolution(input: ParseInput): ResolutionOutcome
       return { reason: 'action_not_found', detail: targetId };
     }
     matchedActionVia = 'uuid';
+  } else if (shortRefMatch) {
+    const prefix = (shortRefMatch[1] ?? '').toLowerCase();
+    const hits = input.pendingActions.filter((a) => a.id.toLowerCase().startsWith(prefix));
+    if (hits.length === 0) {
+      return { reason: 'action_not_found', detail: `#${prefix}` };
+    }
+    if (hits.length > 1) {
+      // Freak 8-hex-char collision between two pending actions.
+      return { reason: 'action_ambiguous', detail: `short_ref_collision:#${prefix}` };
+    }
+    const hit = hits[0];
+    if (!hit) return { reason: 'action_not_found', detail: `#${prefix}` };
+    action = hit;
+    matchedActionVia = 'short_ref';
   } else {
     if (input.pendingActions.length === 0) {
       return { reason: 'no_pending_actions' };
@@ -199,7 +224,7 @@ export function parseHumanActionResolution(input: ParseInput): ResolutionOutcome
 
   // 5. Match the option. Numeric first (1-indexed against the action's options).
   const options = action.options as readonly HumanActionOption[];
-  const stripped = body.replace(UUID_REGEX, '').trim();
+  const stripped = body.replace(UUID_REGEX, '').replace(SHORT_REF_REGEX, '').trim();
   const numericMatch = /^\s*(\d+)\b/.exec(stripped);
   if (numericMatch) {
     const capturedNumeric = numericMatch[1] ?? '0';

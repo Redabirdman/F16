@@ -362,10 +362,11 @@ async function emitProposalAsHumanAction(
     intent: 'CONFIG_CHANGE_PROPOSED',
     severity: 3,
     summary: `Proposition stratégique (${proposal.kind}) sur ${proposal.target} : ${proposal.rationale}`,
+    // English labels — these render verbatim in the management WA group.
     options: [
-      { id: 'approve', label: 'Appliquer', kind: 'approve' },
-      { id: 'reject', label: 'Ignorer', kind: 'reject' },
-      { id: 'defer', label: 'Plus tard', kind: 'approve' },
+      { id: 'approve', label: 'Apply', kind: 'approve' },
+      { id: 'reject', label: 'Ignore', kind: 'reject' },
+      { id: 'defer', label: 'Later', kind: 'approve' },
     ],
   });
 }
