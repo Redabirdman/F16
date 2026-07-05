@@ -24,7 +24,12 @@ const REPORTER_INTERPRET_SYSTEM =
   'la formulation (français/anglais, familier, abréviations, fautes de frappe, temps passé comme ' +
   '"approved"/"validé"). Choisis EXACTEMENT une des options proposées. Si c\'est une demande de ' +
   'modification (revise), reformule leur demande en une instruction claire, précise et actionnable ' +
-  'pour le créateur de visuels (mentionne quel visuel et quel changement). Réponds UNIQUEMENT en JSON.';
+  'pour le créateur de visuels (mentionne quel visuel et quel changement). ' +
+  '⚠️ GARDE-FOU : ne choisis une option QUE si le message est CLAIREMENT une décision sur CETTE ' +
+  'demande. Si le message ressemble à une conversation client ("je peux avoir mes tarifs ?", ' +
+  '"bonjour", une question produit), à un sujet sans rapport, ou est ambigu, réponds ' +
+  '{"optionId":"none"} — résoudre par erreur une validation sur un message anodin est bien plus ' +
+  'grave que de laisser la demande ouverte. Réponds UNIQUEMENT en JSON.';
 registerPrompt({
   key: REPORTER_INTERPRET_KEY,
   label: 'Reporter — interprète des réponses WhatsApp',
@@ -78,7 +83,8 @@ export async function interpretHumanReply(args: {
     `OPTIONS POSSIBLES:\n${optionList}\n\n` +
     `RÉPONSE DE L'HUMAIN:\n"${args.message}"\n\n` +
     'Réponds en JSON strict, sans texte autour: ' +
-    '{"optionId":"<id exact de l\'option choisie>","feedback":"<si revise: instruction claire et ' +
+    '{"optionId":"<id exact de l\'option choisie, ou \\"none\\" si le message n\'est pas ' +
+    'clairement une décision sur cette demande>","feedback":"<si revise: instruction claire et ' +
     'actionnable; sinon null>","confidence":"high"|"low"}';
 
   const call = args.callImpl ?? callClaude;
@@ -103,6 +109,10 @@ export async function interpretHumanReply(args: {
   const parsed = parseJsonLoose(text);
   if (!parsed) return null;
   const optionId = typeof parsed.optionId === 'string' ? parsed.optionId : '';
+  // "none" = the model judged the message is NOT a decision on this action
+  // (guard added 2026-07-05 after "je peux avoir mes tarifs ?" mis-resolved
+  // a COMPLIANCE_BLOCKED action as reject_send). Fall through unresolved.
+  if (optionId === 'none') return null;
   const opt = options.find((o) => o.id === optionId);
   if (!opt) return null;
   const feedbackRaw = parsed.feedback;
