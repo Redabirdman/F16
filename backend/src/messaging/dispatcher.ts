@@ -161,6 +161,13 @@ export interface SendMessageInput {
   requiresHuman?: boolean;
   /** BullMQ priority — 0 = highest, 9 = lowest. Default 5. */
   priority?: number;
+  /**
+   * Delay before the job becomes claimable, in ms. The durable row is
+   * persisted immediately (audit sees it now); only the BullMQ delivery
+   * waits. Used to park Maxance work until the portal's business window
+   * reopens (nights/weekends — 2026-07-05).
+   */
+  delayMs?: number;
 }
 
 export interface AgentMessageEnvelope {
@@ -241,6 +248,7 @@ export async function sendMessage(
     { messageId: row.id },
     {
       priority: input.priority ?? 5,
+      ...(input.delayMs && input.delayMs > 0 ? { delay: input.delayMs } : {}),
       removeOnComplete: { count: 1000 },
       removeOnFail: { count: 5000 },
     },

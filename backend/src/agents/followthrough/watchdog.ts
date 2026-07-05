@@ -37,6 +37,7 @@ import { decryptPII } from '../../db/crypto.js';
 import { listTurns } from '../../db/repositories/conversation-turns.js';
 import { createAction } from '../../db/repositories/human-actions.js';
 import { notifyHumanAction } from '../human-notify.js';
+import { isMaxanceOpen, msUntilMaxanceOpen } from '../maxance-operator/business-hours.js';
 import { sendViaChannel } from '../../channels/send.js';
 import { coerceSendableChannel } from '../../channels/registry.js';
 import type { ChannelId, ContactRef } from '../../channels/types.js';
@@ -153,6 +154,14 @@ async function checkPreviewStuck(
   counters: TickCounters,
 ): Promise<void> {
   const now = Date.now();
+  // Business window (2026-07-05): quotes queued while the Maxance portal is
+  // closed (nights 20h-8h Moroccan + weekends) are PARKED delayed jobs, not
+  // stuck flows — paging humans about them would cry wolf all weekend.
+  // Skip the check while closed, and give freshly-reopened mornings
+  // `previewStuckMin` of grace before judging (the parked backlog needs
+  // time to drain through the single Maxance tab).
+  if (!isMaxanceOpen()) return;
+  if (msUntilMaxanceOpen(new Date(now - previewStuckMin * 60_000)) > 0) return;
   const rows = await db
     .select()
     .from(quotes)

@@ -46,6 +46,11 @@ import { customers, leads, quotes } from '../../db/schema/index.js';
 import { insertQuote } from '../../db/repositories/quotes.js';
 import { setLeadStatus } from '../../db/repositories/leads.js';
 import { sendMessage } from '../../messaging/dispatcher.js';
+import {
+  isMaxanceOpen,
+  msUntilMaxanceOpen,
+  describeMaxanceReopening,
+} from '../../agents/maxance-operator/business-hours.js';
 import { logger } from '../../logger.js';
 
 export const quoteRequestToolName = 'quote.request';
@@ -101,6 +106,15 @@ const inputSchema = z.object({
 const outputSchema = z.object({
   quoteId: z.string().uuid(),
   queued: z.literal(true),
+  /**
+   * Set when the Maxance portal is in its closed window (nights 20h-8h
+   * Moroccan + weekends): the quote is parked as a delayed job and will run
+   * automatically at reopening. The agent MUST relay `reopensAt` to the
+   * customer instead of promising a fast devis.
+   */
+  portalClosed: z.boolean().optional(),
+  /** French phrase for when the tarifs will arrive, e.g. "lundi matin (à partir de 8h)". */
+  reopensAt: z.string().optional(),
 });
 
 /**
@@ -139,7 +153,11 @@ registerTool({
     '(ISO YYYY-MM-DD), et le lieu de stationnement (garage_box / parking_prive_clos / ' +
     'parking_prive_non_clos / rue). Retourne un quoteId — le devis arrive par message ' +
     'QUOTE.PREVIEW_READY en ~20 secondes. NE PAS rappeler cet outil pour le même lead ' +
-    "tant que le PREVIEW_READY n'est pas reçu.",
+    "tant que le PREVIEW_READY n'est pas reçu. Si le résultat contient portalClosed=true, " +
+    'le portail de tarification est fermé (nuits + week-ends) : le devis partira ' +
+    'AUTOMATIQUEMENT à la réouverture — dis au client que ses tarifs arriveront ' +
+    '«reopensAt» (reprends la formulation telle quelle), ne promets JAMAIS plus tôt et ne ' +
+    'relance pas l’outil.',
   inputSchema,
   outputSchema,
   handler: async (ctx, input) => {
@@ -192,6 +210,34 @@ registerTool({
       );
     }
 
+    // 1c. Parked-quote guard (2026-07-05): a quote requested while the portal
+    //     was CLOSED sits priceless for hours-to-days as a delayed job. A
+    //     re-ask during the closed window must not spawn a duplicate run.
+    if (!isMaxanceOpen()) {
+      const seventyTwoHAgo = new Date(Date.now() - 72 * 3_600_000);
+      const [parked] = await ctx.db
+        .select({ id: quotes.id, requestedAt: quotes.requestedAt })
+        .from(quotes)
+        .where(
+          and(
+            eq(quotes.leadId, input.leadId),
+            eq(quotes.status, 'requested'),
+            isNull(quotes.monthlyPremium),
+            gt(quotes.requestedAt, seventyTwoHAgo),
+          ),
+        )
+        .orderBy(desc(quotes.requestedAt))
+        .limit(1);
+      if (parked) {
+        throw new Error(
+          `Un devis est DÉJÀ programmé pour ce lead : le portail de tarification est fermé ` +
+            `(nuits + week-ends) et le devis partira automatiquement à la réouverture. ` +
+            `Réponds au client que ses tarifs arriveront ${describeMaxanceReopening()} — ` +
+            `ne relance PAS quote.request.`,
+        );
+      }
+    }
+
     // 2. Generate the payload + insert the canonical quotes row first.
     //    sessionId is a fresh UUID — correlates the quote with the
     //    maxance_actions rows the Operator agent will append.
@@ -213,6 +259,12 @@ registerTool({
     //    by the intent registry. fromInstance carries the lead id so the
     //    operator's reply (QUOTE.PREVIEW_READY) lands on the right Sales
     //    Agent instance.
+    //
+    //    Business window (2026-07-05): the Maxance portal shuts down nights
+    //    (20h-8h Moroccan) + weekends — launching now would fail fast. Park
+    //    the job as a DELAYED delivery until reopening and tell the LLM the
+    //    honest window so it sets the customer's expectation.
+    const closedDelayMs = msUntilMaxanceOpen();
     await sendMessage(
       { db: ctx.db },
       {
@@ -222,8 +274,15 @@ registerTool({
         toInstance: 'singleton',
         intent: 'QUOTE.REQUESTED',
         payload,
+        ...(closedDelayMs > 0 ? { delayMs: closedDelayMs } : {}),
       },
     );
+    if (closedDelayMs > 0) {
+      logger.info(
+        { quoteId: payload.quoteId, delayMs: closedDelayMs },
+        'quote.request: portal closed — QUOTE.REQUESTED parked until reopening',
+      );
+    }
 
     // 4. Lifecycle: the lead is now 'quoting'. Best-effort — the quote flow
     //    must not die on a status write, but without this the HubSpot deal
@@ -239,6 +298,10 @@ registerTool({
       );
     }
 
-    return { quoteId: payload.quoteId, queued: true as const };
+    return {
+      quoteId: payload.quoteId,
+      queued: true as const,
+      ...(closedDelayMs > 0 ? { portalClosed: true, reopensAt: describeMaxanceReopening() } : {}),
+    };
   },
 });

@@ -99,6 +99,11 @@ d('followthrough watchdog', () => {
     wa = new StubChannel('whatsapp');
     registerChannel(wa);
 
+    // CHECK A is suppressed while the Maxance portal is closed (nights +
+    // weekends, 2026-07-05) — disable the gate so these tests are
+    // deterministic regardless of when the suite runs.
+    process.env.MAXANCE_HOURS_247 = '1';
+
     devisDir = await mkdtemp(join(tmpdir(), 'f16-devis-'));
   });
 
@@ -106,6 +111,7 @@ d('followthrough watchdog', () => {
     watchdog?.stop();
     watchdog = null;
     __resetChannelsForTests();
+    delete process.env.MAXANCE_HOURS_247;
     await rm(devisDir, { recursive: true, force: true });
   });
 

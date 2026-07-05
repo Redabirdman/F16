@@ -59,6 +59,9 @@ import {
   markSubscriptionFailed,
 } from '../../db/repositories/quotes.js';
 import { setLeadStatus } from '../../db/repositories/leads.js';
+import { msUntilMaxanceOpen } from './business-hours.js';
+import { eq } from 'drizzle-orm';
+import { quotes } from '../../db/schema/index.js';
 import {
   handleSubscriptionRequested,
   type InspectorScreenshotSender,
@@ -194,6 +197,10 @@ export class MaxanceOperatorAgent extends BaseAgent {
       leadId?: string | null;
     };
 
+    // Business window (2026-07-05): souscriptions drive the same portal.
+    const deferred = await this.deferIfPortalClosed(envelope);
+    if (deferred) return deferred;
+
     // Driver gate — disabled → SUBSCRIPTION.FAILED (same posture as quotes).
     let driver: MaxanceDriver;
     try {
@@ -228,6 +235,40 @@ export class MaxanceOperatorAgent extends BaseAgent {
       envelope,
       client,
     );
+  }
+
+  /**
+   * Business-window guard (2026-07-05): when a QUOTE.* job lands while the
+   * Maxance portal is closed (nights 20h-8h Moroccan + weekends), re-emit
+   * the SAME envelope as a delayed job for the next opening and ack this
+   * one. The tools park work up front, but edges slip through (emitted at
+   * 19:59 and processed at 20:01, or a delayed job firing into a
+   * still-closed morning). Returns null when the portal is open.
+   */
+  private async deferIfPortalClosed(
+    envelope: AgentMessageEnvelope,
+  ): Promise<MessageHandlerResult | null> {
+    const delayMs = msUntilMaxanceOpen();
+    if (delayMs <= 0) return null;
+    await sendMessage(
+      { db: this.db },
+      {
+        fromRole: this.role,
+        fromInstance: this.instanceId,
+        toRole: this.role,
+        toInstance: 'singleton',
+        intent: envelope.intent,
+        payload: envelope.payload,
+        ...(envelope.correlationId ? { correlationId: envelope.correlationId } : {}),
+        priority: envelope.priority,
+        delayMs,
+      },
+    );
+    logger.info(
+      { intent: envelope.intent, delayMs, instanceId: this.instanceId },
+      'maxance-operator: portal closed — job re-parked until reopening',
+    );
+    return { ok: true, result: { deferred: true, reopensInMs: delayMs } };
   }
 
   /**
@@ -332,6 +373,12 @@ export class MaxanceOperatorAgent extends BaseAgent {
       /** 2026-07-02 (Achraf's pack): add-ons to tick before Valider devis. */
       garantiesAdditionnelles?: { assistance?: boolean; garantiePersonnelle?: boolean };
     };
+
+    // Business window (2026-07-05): a job can land here while the portal is
+    // closed (emitted at 19:59, processed 20:01; delayed job firing into a
+    // still-closed edge). Re-park instead of burning a fail.
+    const deferred = await this.deferIfPortalClosed(envelope);
+    if (deferred) return deferred;
 
     // M8.T8 phase 1 driver gate. See file header for the full rationale.
     let driver: MaxanceDriver;
@@ -508,6 +555,11 @@ export class MaxanceOperatorAgent extends BaseAgent {
       productVariant: string;
       formData: Record<string, unknown>;
     };
+
+    // Business window (2026-07-05): re-park work that lands while the
+    // portal is closed instead of burning a doomed Maxance run.
+    const deferred = await this.deferIfPortalClosed(envelope);
+    if (deferred) return deferred;
 
     // M8.T8 phase 1 driver gate. See file header for the full rationale.
     let driver: MaxanceDriver;
@@ -822,6 +874,22 @@ export class MaxanceOperatorAgent extends BaseAgent {
     errorCode: string,
     detail?: string,
   ): Promise<void> {
+    // Stamp the row DEAD first: a failed quote left in status='requested'
+    // is indistinguishable from a parked/in-flight one, and the
+    // quote.request guards then refuse to relaunch ("devis déjà programmé")
+    // when nothing will ever run (2026-07-05 live find). 'expired' = this
+    // quote session is over; a retry means a fresh quotes row.
+    try {
+      await this.db
+        .update(quotes)
+        .set({ status: 'expired', rejectedAt: new Date() })
+        .where(eq(quotes.id, quoteId));
+    } catch (err) {
+      logger.warn(
+        { quoteId, err: err instanceof Error ? err.message : String(err) },
+        'maxance-operator: failed to expire quote row on QUOTE.FAILED (non-fatal)',
+      );
+    }
     await sendMessage(
       { db: this.db },
       {

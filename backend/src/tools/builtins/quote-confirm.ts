@@ -40,6 +40,10 @@ import { registerTool } from '../registry.js';
 import { customers, leads, quotes } from '../../db/schema/index.js';
 import { decryptPII } from '../../db/crypto.js';
 import { sendMessage } from '../../messaging/dispatcher.js';
+import {
+  msUntilMaxanceOpen,
+  describeMaxanceReopening,
+} from '../../agents/maxance-operator/business-hours.js';
 import { logger } from '../../logger.js';
 
 export const quoteConfirmToolName = 'quote.confirm';
@@ -114,6 +118,10 @@ const inputSchema = z
 const outputSchema = z.object({
   quoteId: z.string().uuid(),
   queued: z.literal(true),
+  /** Portal in its closed window — the devis is parked until reopening. */
+  portalClosed: z.boolean().optional(),
+  /** French phrase for when the devis will go out, e.g. "lundi matin (à partir de 8h)". */
+  reopensAt: z.string().optional(),
 });
 
 registerTool({
@@ -128,7 +136,10 @@ registerTool({
     'pour inclure les options du pack sur le devis. Nom/email/téléphone sont repris ' +
     'automatiquement de la fiche client. Pour DEUX devis comparatifs (avec et sans options), ' +
     'enchaîner quote.request puis quote.confirm une fois PAR variante. NE PAS rappeler cet ' +
-    "outil pour le même devis tant que la confirmation d'envoi n'est pas arrivée.",
+    "outil pour le même devis tant que la confirmation d'envoi n'est pas arrivée. Si le " +
+    'résultat contient portalClosed=true, le portail est fermé (nuits + week-ends) : le devis ' +
+    "partira AUTOMATIQUEMENT à la réouverture — dis au client qu'il recevra son devis " +
+    '«reopensAt» et ne relance pas l’outil.',
   inputSchema,
   outputSchema,
   handler: async (ctx, input) => {
@@ -250,6 +261,10 @@ registerTool({
 
     // 3. Emit QUOTE.CONFIRM_REQUESTED — the maxance-operator drives the
     //    devis creation + courrier staged send from the parked Garanties tab.
+    //    Business window (2026-07-05): parked as a delayed job while the
+    //    portal is closed (nights 20h-8h Moroccan + weekends); the operator's
+    //    reprise/self-heal recovers the by-then-stale tab at reopening.
+    const closedDelayMs = msUntilMaxanceOpen();
     await sendMessage(
       { db: ctx.db },
       {
@@ -268,6 +283,7 @@ registerTool({
             : {}),
         },
         correlationId: quoteId,
+        ...(closedDelayMs > 0 ? { delayMs: closedDelayMs } : {}),
       },
     );
 
@@ -276,10 +292,15 @@ registerTool({
         quoteId,
         leadId: input.leadId,
         addOns: input.garantiesAdditionnelles ?? null,
+        ...(closedDelayMs > 0 ? { parkedForMs: closedDelayMs } : {}),
       },
       'quote.confirm: QUOTE.CONFIRM_REQUESTED emitted',
     );
 
-    return { quoteId, queued: true as const };
+    return {
+      quoteId,
+      queued: true as const,
+      ...(closedDelayMs > 0 ? { portalClosed: true, reopensAt: describeMaxanceReopening() } : {}),
+    };
   },
 });

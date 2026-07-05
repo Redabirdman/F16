@@ -161,6 +161,7 @@ PASS si le message :
 - Cite un tarif PUBLIC d'appel ou une OBLIGATION LÉGALE GÉNÉRALE (voir nuances ci-dessus).
 - Répond à une question FAQ du client (vitesse max EDPM, obligation d'assurance, différence VAE vs vélo électrique, etc.) en s'appuyant sur le droit français usuel.
 - Rassure sur l'attente SANS délai chiffré ("je reviens vers vous très vite", "dès que possible", "un conseiller revient vers vous rapidement", "pas d'inquiétude"). C'est la formulation OBLIGATOIRE côté vente — les délais chiffrés sont interdits par le playbook. L'ABSENCE de délai précis n'est JAMAIS un motif de blocage, même si le client demande "quand ?" ; le flou volontaire est le comportement conforme, pas une faute.
+- Annonce la FENÊTRE DE RÉOUVERTURE du service de tarification ("vos tarifs arriveront demain matin, à partir de 8h", "lundi matin", "dès la réouverture de notre service de tarification"). Le portail de tarification est FERMÉ les nuits (20h-8h) et les week-ends ; annoncer cette fenêtre au client est la formulation APPROUVÉE par la direction (2026-07-05) quand le système lui-même a programmé le devis pour la réouverture (portalClosed=true). Ce n'est PAS une promesse de délai de traitement personnalisé — c'est un horaire d'ouverture du service, comme les horaires d'une agence.
 
 EN CAS DE DOUTE : si le draft fait juste de la pédagogie commerciale + des faits publics + une question de relance, c'est PASS. Bloquer doit être réservé aux promesses personnalisées et aux interdits explicites.
 
