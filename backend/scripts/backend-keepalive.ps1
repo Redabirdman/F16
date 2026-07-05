@@ -46,11 +46,22 @@ Get-CimInstance Win32_Process |
   }
 Start-Sleep -Seconds 2
 
-Start-Process npx.cmd -ArgumentList 'tsx', 'src/index.ts' `
-  -WorkingDirectory $backendDir -WindowStyle Hidden `
-  -RedirectStandardOutput (Join-Path $varDir 'backend.keepalive-run.log') `
-  -RedirectStandardError (Join-Path $varDir 'backend.keepalive-run.err.log') `
-  -Environment @{ PORT = '3001' }
+# Task Scheduler runs Windows PowerShell 5.1 with a minimal PATH:
+#  - Start-Process -Environment does not exist there → set PORT on our own
+#    env and let the child inherit it;
+#  - npx.cmd may not resolve → absolute path, with a PATH-based fallback.
+$env:PORT = '3001'
+$npx = 'C:\Program Files\nodejs\npx.cmd'
+if (-not (Test-Path $npx)) { $npx = 'npx.cmd' }
+try {
+  Start-Process $npx -ArgumentList 'tsx', 'src/index.ts' `
+    -WorkingDirectory $backendDir -WindowStyle Hidden `
+    -RedirectStandardOutput (Join-Path $varDir 'backend.keepalive-run.log') `
+    -RedirectStandardError (Join-Path $varDir 'backend.keepalive-run.err.log')
+} catch {
+  Write-KeepaliveLog "spawn failed: $($_.Exception.Message)"
+  exit 1
+}
 
 Start-Sleep -Seconds 15
 try {
