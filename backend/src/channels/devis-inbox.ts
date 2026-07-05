@@ -33,10 +33,57 @@ import { logger } from '../logger.js';
 
 /** Poll cadence. The devis email typically lands <60s after the Maxance send. */
 const POLL_MS = 20_000;
-/** Reconnect backoff after an IMAP error. */
-const RECONNECT_MS = 30_000;
+/**
+ * Capped exponential reconnect backoff. Gmail hiccups are transient, so we
+ * retry FOREVER (self-healing mandate) — never park the watcher on a dead
+ * connection until a human restarts the backend.
+ */
+const MAX_RECONNECT_BACKOFF_MS = 60_000;
+const RECONNECT_BACKOFF_MS = [5_000, 10_000, 30_000, MAX_RECONNECT_BACKOFF_MS] as const;
 /** Anchored devis-number pattern — we control the subject (mailObjet). */
 const DR_RE = /\b(DR\d{8,12})\b/;
+
+/**
+ * Auth rejections (535 / "Invalid credentials" / AUTHENTICATIONFAILED) are
+ * NOT transient — the App Password was likely revoked (it has happened
+ * live). We log loud at error and retry only at the max backoff so we don't
+ * hammer Google (which can escalate to a temporary account lock).
+ */
+export function isAuthError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const flagged = err as Error & { authenticationFailed?: boolean };
+  if (flagged.authenticationFailed === true) return true;
+  return /\b535\b|invalid credentials|authenticationfailed|username and password not accepted/i.test(
+    err.message,
+  );
+}
+
+/**
+ * Connection-class errors — the IMAP session is gone (or never came up) and
+ * a reconnect fixes it. This is what "Connection not available" from
+ * imapflow looks like after an overnight drop (live-observed 2026-07-05).
+ */
+export function isConnectionError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  if (isAuthError(err)) return false;
+  const code = (err as NodeJS.ErrnoException).code ?? '';
+  if (
+    [
+      'ECONNRESET',
+      'ECONNREFUSED',
+      'EPIPE',
+      'ETIMEDOUT',
+      'ENOTFOUND',
+      'EAI_AGAIN',
+      'NoConnection',
+    ].includes(code)
+  ) {
+    return true;
+  }
+  return /connection (not available|closed|lost|reset|ended)|socket (hang ?up|closed|error)|ECONNRESET|greeting never received/i.test(
+    err.message,
+  );
+}
 
 export interface DevisInboxWatcher {
   stop(): Promise<void>;
@@ -70,46 +117,136 @@ export function startDevisInboxWatcher(deps: WatcherDeps): DevisInboxWatcher | n
 
   let stopped = false;
   let client: ImapFlow | null = null;
-  let timer: NodeJS.Timeout | null = null;
+  let connected = false;
+  let everConnected = false;
+  /**
+   * Single-flight reconnect guard: 'close'/'error' events, sweep failures
+   * and poll ticks can all detect the loss around the same time — they must
+   * share ONE reconnect, never spawn parallel IMAP connections.
+   */
+  let reconnectPromise: Promise<void> | null = null;
+  const timers = new Set<NodeJS.Timeout>();
+
+  const sleep = (ms: number): Promise<void> =>
+    new Promise((r) => {
+      const t = setTimeout(() => {
+        timers.delete(t);
+        r();
+      }, ms);
+      timers.add(t);
+    });
+
+  /**
+   * Flip to "down" exactly once per outage (one warn per state change — a
+   * dead connection must not warn-spam every 20s sweep) and kick the
+   * background reconnect.
+   */
+  const markDown = (reason: string): void => {
+    if (stopped || !connected) return;
+    connected = false;
+    logger.warn({ reason }, 'devis-inbox: connection lost — reconnecting');
+    void ensureConnected();
+  };
+
+  const connectOnce = async (): Promise<void> => {
+    const c = new ImapFlow({
+      host,
+      port: 993,
+      secure: true,
+      auth: { user, pass },
+      logger: false,
+    });
+    // Detect drops between sweeps. Guard on `client === c` so stragglers
+    // from an already-replaced client can't tear down the healthy one.
+    c.on('error', (err: Error) => {
+      logger.warn({ err: err.message }, 'devis-inbox: imap socket error');
+      if (client === c) markDown(`socket error: ${err.message}`);
+    });
+    c.on('close', () => {
+      if (client === c) markDown('socket closed');
+    });
+    await c.connect();
+    client = c;
+    connected = true;
+  };
+
+  /** Reconnect with capped exponential backoff; retries until stop(). */
+  const ensureConnected = (): Promise<void> => {
+    if (reconnectPromise) return reconnectPromise;
+    reconnectPromise = (async () => {
+      // Dispose the dead client first (best effort).
+      const dead = client;
+      client = null;
+      connected = false;
+      try {
+        await dead?.logout();
+      } catch {
+        /* already gone */
+      }
+      let attempt = 0;
+      while (!stopped) {
+        try {
+          await connectOnce();
+          logger.info(
+            { host, user },
+            everConnected ? 'devis-inbox: reconnected' : 'devis-inbox: connected',
+          );
+          everConnected = true;
+          return;
+        } catch (err) {
+          if (stopped) return;
+          const msg = err instanceof Error ? err.message : String(err);
+          const auth = isAuthError(err);
+          const delayMs = auth
+            ? MAX_RECONNECT_BACKOFF_MS
+            : (RECONNECT_BACKOFF_MS[Math.min(attempt, RECONNECT_BACKOFF_MS.length - 1)] ??
+              MAX_RECONNECT_BACKOFF_MS);
+          if (auth) {
+            logger.error(
+              { err: msg, retryInMs: delayMs },
+              'devis-inbox: IMAP auth rejected — App Password likely revoked (renew in Google Workspace); retrying slowly',
+            );
+          } else {
+            logger.warn(
+              { err: msg, attempt: attempt + 1, retryInMs: delayMs },
+              'devis-inbox: reconnect attempt failed — retrying',
+            );
+          }
+          attempt += 1;
+          await sleep(delayMs);
+        }
+      }
+    })().finally(() => {
+      reconnectPromise = null;
+    });
+    return reconnectPromise;
+  };
 
   const loop = async (): Promise<void> => {
+    await ensureConnected();
     while (!stopped) {
-      try {
-        client = new ImapFlow({
-          host,
-          port: 993,
-          secure: true,
-          auth: { user, pass },
-          logger: false,
-        });
-        // Surface socket-level errors to the catch below instead of crashing.
-        client.on('error', (err: Error) => {
-          logger.warn({ err: err.message }, 'devis-inbox: imap socket error');
-        });
-        await client.connect();
-        logger.info({ host, user }, 'devis-inbox: connected');
-
-        while (!stopped) {
-          await scanOnce(client, deps.db);
-          await new Promise<void>((r) => {
-            timer = setTimeout(r, POLL_MS);
-          });
-        }
-      } catch (err) {
-        if (stopped) return;
-        logger.warn(
-          { err: err instanceof Error ? err.message : String(err) },
-          'devis-inbox: connection lost — reconnecting',
-        );
+      if (!connected || reconnectPromise || !client) {
+        // Down — the reconnect path owns recovery; sweeps just skip quietly.
+        logger.debug('devis-inbox: connection down — skipping sweep');
+      } else {
+        const current = client;
         try {
-          await client?.logout();
-        } catch {
-          /* already gone */
+          await scanOnce(current, deps.db);
+        } catch (err) {
+          if (stopped) break;
+          const msg = err instanceof Error ? err.message : String(err);
+          if (client !== current) {
+            // Stale failure from a client that was already replaced.
+            logger.debug({ err: msg }, 'devis-inbox: sweep failed on replaced client — ignoring');
+          } else if (isConnectionError(err)) {
+            markDown(msg);
+          } else {
+            logger.warn({ err: msg }, 'devis-inbox: sweep failed');
+          }
         }
-        await new Promise<void>((r) => {
-          timer = setTimeout(r, RECONNECT_MS);
-        });
       }
+      if (stopped) break;
+      await sleep(POLL_MS);
     }
   };
   void loop();
@@ -117,7 +254,8 @@ export function startDevisInboxWatcher(deps: WatcherDeps): DevisInboxWatcher | n
   return {
     async stop(): Promise<void> {
       stopped = true;
-      if (timer) clearTimeout(timer);
+      for (const t of timers) clearTimeout(t);
+      timers.clear();
       try {
         await client?.logout();
       } catch {
@@ -140,6 +278,10 @@ async function scanOnce(client: ImapFlow, db: Database): Promise<void> {
     try {
       await scanMailbox(client, db, mailbox);
     } catch (err) {
+      // A dead connection must bubble up so the watcher reconnects —
+      // swallowing it here is exactly the 2026-07-05 "dead until manual
+      // restart" bug.
+      if (isConnectionError(err)) throw err;
       // A missing/renamed folder (locale variants of Spam) must not kill the
       // INBOX sweep — log and continue.
       logger.warn(
