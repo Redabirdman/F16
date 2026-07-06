@@ -11,6 +11,7 @@
  */
 import { ErrorResponseSchema, type Command, type Response } from './wire.js';
 import type { ContentInbound, FlowOutcome } from './content-protocol.js';
+import { MAINTENANCE_ERROR_CODE, isMaintenancePage } from './flows/maintenance.js';
 import { runLoginEnsure } from './flows/login.js';
 import { runQuotePreview } from './flows/quote-preview.js';
 import { runQuoteConfirm } from './flows/quote-confirm.js';
@@ -34,6 +35,21 @@ console.info('[f16-ext] content script loaded on', location.href);
  */
 async function handleFlow(command: Command): Promise<Response> {
   try {
+    // 2026-07-06 self-heal: Maxance serves a maintenance page while the
+    // portal is closed (nights + weekends) or during real downtime. Every
+    // flow would only fail with a misleading DOM-wait timeout — detect it
+    // up front and return the tagged `maxance_maintenance` error instead.
+    // The SW reloads the tab once and retries (stale overnight tab); if it
+    // persists, the backend PARKS the quote rather than failing it.
+    if (command.kind !== 'ping' && isMaintenancePage()) {
+      console.warn('[f16-ext] maintenance page detected on', location.href);
+      return ErrorResponseSchema.parse({
+        id: command.id,
+        kind: 'error',
+        errorCode: MAINTENANCE_ERROR_CODE,
+        detail: `Maxance maintenance page at ${location.href}`.slice(0, 240),
+      });
+    }
     switch (command.kind) {
       case 'ping':
         // SW handles ping itself — content script shouldn't see this.

@@ -102,24 +102,135 @@ function sendOnWs(sock: WebSocket | null, frame: Response | Event): void {
 /** Module-level reference to the live socket — used by progress.forward. */
 let liveSocket: WebSocket | null = null;
 
+/** Budget for a freshly-created Maxance tab to reach status 'complete'. */
+const TAB_CREATE_LOAD_TIMEOUT_MS = 30_000;
+
+/**
+ * Wait until `chrome.tabs.onUpdated` reports status 'complete' for `tabId`.
+ * Resolves (never rejects) on timeout — the downstream sendWithReinjection
+ * retry copes with a still-loading page. Also probes the current status
+ * once, in case the tab finished loading before the listener attached.
+ */
+function waitForTabLoadComplete(tabId: number, timeoutMs: number): Promise<void> {
+  return new Promise<void>((resolve) => {
+    let settled = false;
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      chrome.tabs.onUpdated.removeListener(listener);
+      clearTimeout(timer);
+      resolve();
+    };
+    const listener = (id: number, info: chrome.tabs.TabChangeInfo): void => {
+      if (id === tabId && info.status === 'complete') finish();
+    };
+    const timer = setTimeout(finish, timeoutMs);
+    chrome.tabs.onUpdated.addListener(listener);
+    chrome.tabs.get(tabId).then(
+      (t) => {
+        if (t.status === 'complete') finish();
+      },
+      () => finish(), // tab gone — let the send path surface the error
+    );
+  });
+}
+
+/**
+ * Self-heal (2026-07-06): no Maxance tab open → CREATE one instead of
+ * failing the command with `maxance_extension_no_active_tab` (which used
+ * to park/fail perfectly-good quotes whenever Ridaa's Chrome had no tab).
+ * Entry URL = the clean Proximéo home (accueil.do) — the same URL the
+ * phase-2j reset uses: login.ensure's `classifyCurrentUrl` reports any
+ * `www.maxance.com/Proximeo/*` page as `proximeo_home`, and accueil.do
+ * re-triggers the Proximéo SSO when the session cookie expired (silent
+ * when the Auth0 cookie is still valid).
+ *
+ * Waits for the tab to finish loading (content.js injects at
+ * document_idle, which precedes status 'complete'), plus a settle pause.
+ * A residual "Receiving end does not exist" race is absorbed by
+ * sendWithReinjection's executeScript retry.
+ */
+async function createMaxanceTab(commandId: string): Promise<chrome.tabs.Tab> {
+  console.warn('[f16-ext] no maxance tab — created one');
+  const tab = await chrome.tabs.create({ url: MAXANCE_HOME_URL, active: true });
+  if (tab.id === undefined) {
+    throw new Error('maxance_tab_create_failed: created tab has no id');
+  }
+  sendOnWs(
+    liveSocket,
+    ProgressEventSchema.parse({
+      kind: 'progress',
+      commandId,
+      step: 'maxance_tab_created',
+      detail: MAXANCE_HOME_URL,
+    }),
+  );
+  await waitForTabLoadComplete(tab.id, TAB_CREATE_LOAD_TIMEOUT_MS);
+  await sleep(POST_NAV_SETTLE_MS);
+  return tab;
+}
+
 /**
  * Forward a Command to the active Maxance tab's content script and await
  * its FlowOutcome. Times out if the content script doesn't respond within
  * the command's timeoutMs (default 60s — flows themselves can be long, so
  * we add a generous outer budget).
+ *
+ * Self-healing wrappers (2026-07-06):
+ *   - no Maxance tab → create one on the Proximéo home and continue.
+ *   - `maxance_maintenance` error → reload the tab ONCE, await the load,
+ *     re-forward. Still maintenance → return the error (the backend parks
+ *     the job until the portal reopens).
  */
 async function forwardToContent(command: Command): Promise<Response> {
-  const tab = await findMaxanceTab();
+  let tab = await findMaxanceTab();
   if (!tab || tab.id === undefined) {
+    try {
+      tab = await createMaxanceTab(command.id);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return ErrorResponseSchema.parse({
+        id: command.id,
+        kind: 'error',
+        errorCode: 'maxance_extension_no_active_tab',
+        detail: `no maxance.com tab open and auto-create failed: ${msg}`.slice(0, 240),
+      });
+    }
+  }
+  const tabId = tab.id;
+  if (tabId === undefined) {
     return ErrorResponseSchema.parse({
       id: command.id,
       kind: 'error',
       errorCode: 'maxance_extension_no_active_tab',
-      detail: 'no maxance.com tab open in this Chrome — operator must navigate first',
+      detail: 'maxance tab has no id — cannot forward',
     });
   }
-  const tabId = tab.id;
 
+  let resp = await dispatchToTab(tabId, command);
+
+  // Maintenance retry: a tab parked on Maxance's maintenance page overnight
+  // is STALE the next morning — one reload re-fetches the real portal. If
+  // the page is still maintenance after the reload, the portal really is
+  // closed and the error propagates to the backend's parking logic.
+  if (resp.kind === 'error' && resp.errorCode.includes('maxance_maintenance')) {
+    console.warn('[f16-ext] maintenance page reported — reloading tab and retrying once');
+    try {
+      await chrome.tabs.reload(tabId);
+      await waitForNavigationComplete(tabId, TAB_CREATE_LOAD_TIMEOUT_MS).catch(() => undefined);
+      await sleep(POST_NAV_SETTLE_MS);
+      resp = await dispatchToTab(tabId, command);
+    } catch (err) {
+      console.warn('[f16-ext] maintenance reload retry failed — keeping original error', err);
+    }
+  }
+  return resp;
+}
+
+/** Route one command to the content script in `tabId` (orchestrated for
+ *  navigating flows, single-shot otherwise). Extracted from
+ *  forwardToContent so the maintenance retry can re-run it verbatim. */
+async function dispatchToTab(tabId: number, command: Command): Promise<Response> {
   // M8.T8 phase 2e — quote.preview / quote.confirm go through the
   // navigation-aware orchestrator. Plain commands (login.ensure) still
   // use the single-shot path because they're intra-page or have their
