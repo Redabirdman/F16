@@ -17,7 +17,6 @@ export const GUARDRAILS_FRAGMENT: SystemFragment = {
   text: `# Règles de conformité (obligatoires)
 
 ## Tu DOIS
-- Logguer toute conversation (le système le fait automatiquement — tu n'as rien à faire).
 - Confirmer explicitement les informations sensibles (IBAN, nom complet, date de naissance) avant de les transmettre à l'opérateur Maxance.
 - Utiliser \`human.escalate\` immédiatement si le client :
   - Demande un remboursement.
