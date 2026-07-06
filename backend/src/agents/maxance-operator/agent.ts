@@ -271,6 +271,66 @@ export class MaxanceOperatorAgent extends BaseAgent {
     return { ok: true, result: { deferred: true, reopensInMs: delayMs } };
   }
 
+  /** Max maintenance re-parks per quote job before failing for real. */
+  private static readonly MAINTENANCE_MAX_DEFERS = 4;
+
+  /** Retry delay when the portal is nominally OPEN but Maxance still shows
+   *  its maintenance page (unscheduled downtime): probe again in 30 min. */
+  private static readonly MAINTENANCE_RETRY_DELAY_MS = 30 * 60_000;
+
+  /**
+   * Maintenance re-park (2026-07-06, Ridaa's self-heal mission). The
+   * extension reports `maxance_maintenance` when the portal serves its
+   * maintenance page (it already reloaded the tab once itself). That is
+   * NOT a real failure — the customer must not get an apology; the job is
+   * re-emitted to ourselves as a delayed message, exactly like
+   * deferIfPortalClosed, but BOUNDED via payload.deferCount: after
+   * MAINTENANCE_MAX_DEFERS re-parks the caller falls through to the normal
+   * emitFailed path (returns null here).
+   *
+   * Delay: until the next business-hours opening when we're in the closed
+   * window, else a 30-minute probe (mid-day unscheduled maintenance).
+   */
+  private async deferForMaintenance(
+    envelope: AgentMessageEnvelope,
+    deferCount: number | undefined,
+  ): Promise<MessageHandlerResult | null> {
+    const n = deferCount ?? 0;
+    if (n >= MaxanceOperatorAgent.MAINTENANCE_MAX_DEFERS) {
+      logger.warn(
+        { intent: envelope.intent, deferCount: n, instanceId: this.instanceId },
+        'maxance-operator: maintenance defer budget exhausted — failing the job for real',
+      );
+      return null;
+    }
+    const untilOpen = msUntilMaxanceOpen();
+    const delayMs = untilOpen > 0 ? untilOpen : MaxanceOperatorAgent.MAINTENANCE_RETRY_DELAY_MS;
+    await sendMessage(
+      { db: this.db },
+      {
+        fromRole: this.role,
+        fromInstance: this.instanceId,
+        toRole: this.role,
+        toInstance: 'singleton',
+        intent: envelope.intent,
+        // ⚠️ deferCount is part of the intent schema (intents/quote.ts) —
+        // the registry STRIPS unknown keys, so keep them in sync.
+        payload: { ...(envelope.payload as Record<string, unknown>), deferCount: n + 1 },
+        ...(envelope.correlationId ? { correlationId: envelope.correlationId } : {}),
+        priority: envelope.priority,
+        delayMs,
+      },
+    );
+    logger.info(
+      { intent: envelope.intent, delayMs, instanceId: this.instanceId },
+      `maxance-operator: maintenance page — re-parked (${n + 1}/${MaxanceOperatorAgent.MAINTENANCE_MAX_DEFERS})`,
+    );
+    return {
+      ok: true,
+      result: { deferred: 'maintenance', deferCount: n + 1, retryInMs: delayMs },
+    };
+  }
+
   /**
    * Mark the quote failed + emit SUBSCRIPTION.FAILED for the pre-orchestration
    * gates (driver disabled / init failed). Best-effort persist — the emit is
@@ -372,6 +432,8 @@ export class MaxanceOperatorAgent extends BaseAgent {
       subscriber: StagehandSubscriberInfo;
       /** 2026-07-02 (Achraf's pack): add-ons to tick before Valider devis. */
       garantiesAdditionnelles?: { assistance?: boolean; garantiePersonnelle?: boolean };
+      /** 2026-07-06: maintenance re-park counter (see deferForMaintenance). */
+      deferCount?: number;
     };
 
     // Business window (2026-07-05): a job can land here while the portal is
@@ -424,6 +486,11 @@ export class MaxanceOperatorAgent extends BaseAgent {
       await client.ensureLoggedIn(SESSION_NAME);
     } catch (err) {
       const code = readErrorCode(err) ?? 'login_unknown';
+      // Maintenance page (2026-07-06): park + retry, don't fail the customer.
+      if (code.includes('maxance_maintenance')) {
+        const parked = await this.deferForMaintenance(envelope, payload.deferCount);
+        if (parked) return parked;
+      }
       await this.emitFailed(
         payload.quoteId,
         payload.customerId,
@@ -452,6 +519,11 @@ export class MaxanceOperatorAgent extends BaseAgent {
     } catch (err) {
       const code = readErrorCode(err) ?? 'confirm_unknown';
       const msg = err instanceof Error ? err.message : String(err);
+      // Maintenance page (2026-07-06): park + retry, don't fail the customer.
+      if (code.includes('maxance_maintenance')) {
+        const parked = await this.deferForMaintenance(envelope, payload.deferCount);
+        if (parked) return parked;
+      }
       logger.error(
         { quoteId: payload.quoteId, code, err: msg },
         'maxance-operator: confirm flow failed',
@@ -554,6 +626,8 @@ export class MaxanceOperatorAgent extends BaseAgent {
       product: 'scooter' | 'car';
       productVariant: string;
       formData: Record<string, unknown>;
+      /** 2026-07-06: maintenance re-park counter (see deferForMaintenance). */
+      deferCount?: number;
     };
 
     // Business window (2026-07-05): re-park work that lands while the
@@ -654,6 +728,11 @@ export class MaxanceOperatorAgent extends BaseAgent {
     } catch (err) {
       const code = readErrorCode(err) ?? 'login_unknown';
       const msg = err instanceof Error ? err.message : String(err);
+      // Maintenance page (2026-07-06): park + retry, don't fail the customer.
+      if (code.includes('maxance_maintenance')) {
+        const parked = await this.deferForMaintenance(envelope, payload.deferCount);
+        if (parked) return parked;
+      }
       logger.error({ quoteId: payload.quoteId, code, err: msg }, 'maxance-operator: login failed');
       await this.emitFailed(
         payload.quoteId,
@@ -671,6 +750,11 @@ export class MaxanceOperatorAgent extends BaseAgent {
     } catch (err) {
       const code = readErrorCode(err) ?? 'quote_unknown';
       const msg = err instanceof Error ? err.message : String(err);
+      // Maintenance page (2026-07-06): park + retry, don't fail the customer.
+      if (code.includes('maxance_maintenance')) {
+        const parked = await this.deferForMaintenance(envelope, payload.deferCount);
+        if (parked) return parked;
+      }
       logger.error(
         { quoteId: payload.quoteId, code, err: msg },
         'maxance-operator: quote flow failed',

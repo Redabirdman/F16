@@ -44,6 +44,15 @@ export const QuoteRequestedPayload = registerIntent(
     product: z.enum(['scooter', 'car']),
     productVariant: z.string(),
     formData: z.record(z.string(), z.unknown()),
+    /**
+     * 2026-07-06 maintenance self-heal: how many times the maxance-operator
+     * re-parked THIS job because Maxance showed its maintenance page
+     * (`maxance_maintenance`). Incremented on each maintenance defer; past 4
+     * the job falls through to the normal QUOTE.FAILED path. ⚠️ Registry
+     * validator STRIPS unknown keys — schema + the operator's
+     * deferForMaintenance emitter/reader must change together.
+     */
+    deferCount: z.number().int().min(0).optional(),
   }),
 );
 
@@ -104,6 +113,13 @@ export const QuoteConfirmRequestedPayload = registerIntent(
      * unknown keys — schema + emit + read must change together.
      */
     garantiesAdditionnelles: GarantiesAdditionnellesSchema.optional(),
+    /**
+     * 2026-07-06 maintenance self-heal: maintenance re-park counter — same
+     * semantics as QUOTE.REQUESTED.deferCount (bounded at 4). ⚠️ Registry
+     * validator STRIPS unknown keys — schema + the operator's
+     * deferForMaintenance emitter/reader must change together.
+     */
+    deferCount: z.number().int().min(0).optional(),
   }),
 );
 

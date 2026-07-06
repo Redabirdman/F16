@@ -134,6 +134,12 @@ describe('explainErrorCode', () => {
   it('translates the RIB rejection', () => {
     expect(explainErrorCode('maxance_subscription_rib_rejected')).toContain('bank details (RIB)');
   });
+  it('translates the maintenance page (also when wrapped in login_failed)', () => {
+    expect(explainErrorCode('maxance_maintenance')).toContain('maintenance page');
+    expect(explainErrorCode('login_failed:maxance_maintenance')).toContain(
+      'retry automatically when it reopens',
+    );
+  });
   it('falls back to "technical error (<code>)" keeping the raw code', () => {
     expect(explainErrorCode('weird_new_thing')).toBe('technical error (weird_new_thing)');
   });

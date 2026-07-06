@@ -19,7 +19,10 @@
  *   - HUMAN_ACTION.RESOLVED → post a closure confirmation in the same
  *     group ("✅ Quote failed — resolved via WhatsApp: Retry the quote").
  *     Always posted, even if resolved via admin UI — keeps the group
- *     thread in sync.
+ *     thread in sync. Then EXECUTE the chosen option when a choice
+ *     executor is registered for it (choice-executors.ts — e.g.
+ *     QUOTE_FAILED:retry actually re-launches the Maxance quote) and
+ *     post its English follow-up line.
  *
  * Single instance (concurrency=1, instanceId='singleton'): one logical
  * group thread, no need for sharding. The BullMQ queue serialises
@@ -56,6 +59,7 @@ import { getCampaignTree } from '../../db/repositories/ads.js';
 import type { HumanActionOption } from '../../db/schema/agent-runtime.js';
 import type { WahaClient } from '../../channels/whatsapp/waha-client.js';
 import { buildHumanActionRequestMessage, buildHumanActionResolvedMessage } from './humanize.js';
+import { executeResolutionChoice } from './choice-executors.js';
 
 /**
  * Construction dependencies. Both are injected so tests can swap a stub
@@ -222,6 +226,48 @@ export class ReporterAgent extends BaseAgent {
       },
       'reporter-agent: posted human-action closure to WA group',
     );
-    return { ok: true, result: { posted: true, humanActionId: payload.humanActionId } };
+
+    // 2026-07-06: EXECUTE the choice, don't just record it. The registry maps
+    // `${intent}:${optionId}` → side effect (e.g. QUOTE_FAILED:retry actually
+    // re-launches the Maxance quote). Runs AFTER the closure post; returns an
+    // English follow-up line for the group when there is something to say.
+    // executeResolutionChoice never throws, and the follow-up send is
+    // best-effort — the side effect already ran, so failing the RESOLVED
+    // envelope here would make BullMQ replay it (duplicate closure + retry).
+    let executed: Record<string, unknown> | undefined;
+    if (action) {
+      const followUp = await executeResolutionChoice({
+        db: this.db,
+        action,
+        chosenOptionId: payload.choice,
+        fromRole: this.role,
+        fromInstance: this.instanceId,
+      });
+      if (followUp) {
+        executed = followUp.detail;
+        if (followUp.groupNote) {
+          await this.waha
+            .sendText({ chatId: this.groupChatId, text: followUp.groupNote })
+            .catch((err) => {
+              logger.warn(
+                {
+                  err: err instanceof Error ? err.message : String(err),
+                  humanActionId: payload.humanActionId,
+                },
+                'reporter-agent: failed to post choice-executor follow-up (side effect already ran)',
+              );
+            });
+        }
+      }
+    }
+
+    return {
+      ok: true,
+      result: {
+        posted: true,
+        humanActionId: payload.humanActionId,
+        ...(executed ? { executed } : {}),
+      },
+    };
   }
 }

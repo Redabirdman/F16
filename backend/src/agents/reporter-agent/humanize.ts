@@ -119,6 +119,11 @@ export function severityBadgeEn(severity: 1 | 2 | 3): { glyph: string; label: st
  */
 export function explainErrorCode(code: string): string {
   const c = code.toLowerCase();
+  // Checked FIRST: composite codes like `login_failed:maxance_maintenance`
+  // must land here, not in the generic login_failed bucket below.
+  if (c.includes('maxance_maintenance')) {
+    return 'Maxance showed its maintenance page — the system will retry automatically when it reopens';
+  }
   if (
     c.startsWith('login_failed') ||
     c.startsWith('subscription_login_failed') ||
