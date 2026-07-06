@@ -163,6 +163,8 @@ PASS si le message :
 - Récapitule au CLIENT ses PROPRES coordonnées (nom, adresse, email, téléphone) pour confirmation, sur le canal où il vient de les donner. C'est une bonne pratique commerciale, PAS une fuite de données — le client est le destinataire et la source. (Seul un IBAN/carte complet en clair reste interdit.)
 - Rassure sur l'attente SANS délai chiffré ("je reviens vers vous très vite", "dès que possible", "un conseiller revient vers vous rapidement", "pas d'inquiétude"). C'est la formulation OBLIGATOIRE côté vente — les délais chiffrés sont interdits par le playbook. L'ABSENCE de délai précis n'est JAMAIS un motif de blocage, même si le client demande "quand ?" ; le flou volontaire est le comportement conforme, pas une faute.
 - Annonce la FENÊTRE DE RÉOUVERTURE du service de tarification ("vos tarifs arriveront demain matin, à partir de 8h", "lundi matin", "dès la réouverture de notre service de tarification"). Le portail de tarification est FERMÉ les nuits (20h-8h) et les week-ends ; annoncer cette fenêtre au client est la formulation APPROUVÉE par la direction (2026-07-05) quand le système lui-même a programmé le devis pour la réouverture (portalClosed=true). Ce n'est PAS une promesse de délai de traitement personnalisé — c'est un horaire d'ouverture du service, comme les horaires d'une agence.
+- Explique les FRAIS Assuryal avec les formulations APPROUVÉES ("frais d'inscription au contrat", "honoraires de gestion du dossier", "accompagnement administratif") et des chiffres issus du devis DÉJÀ présenté au client (ex. "inclus dans votre premier paiement de 22,96 €"). Une fois le menu de prix envoyé (il indiquait déjà le premier paiement), reprendre ou détailler ces montants est AUTORISÉ — ce n'est pas un prix inventé. Seule l'annonce de chiffres SANS AUCUN devis existant reste bloquable.
+- Rappelle au client que ses devis "ont bien été envoyés" quand les tours PRÉCÉDENTS de la conversation contiennent leurs références (numéros DR..., "en pièce jointe", confirmation d'envoi). Référencer un devis DÉJÀ créé et livré est un FAIT vérifiable dans l'historique, PAS une affirmation non validée — ne bloque jamais un rappel factuel d'un envoi déjà effectué.
 
 EN CAS DE DOUTE : si le draft fait juste de la pédagogie commerciale + des faits publics + une question de relance, c'est PASS. Bloquer doit être réservé aux promesses personnalisées et aux interdits explicites.
 
@@ -185,6 +187,64 @@ registerPrompt({
     'Le message à juger est fourni dans le prompt utilisateur. ⚠️ Garde-fou réglementaire — éditer avec prudence.',
   getDefault: () => SENTRY_SYSTEM,
 });
+
+/**
+ * One LLM round-trip + parse. Discriminated so `llmSentryCheck` can tell a
+ * transport failure (fail closed immediately — the API is down, a second call
+ * lands on the same outage) from an UNPARSEABLE reply (model flake — worth
+ * one retry before failing closed; it happened twice in ~3 minutes on the
+ * 2026-07-06 live test, pure noise for management).
+ */
+type SentryAttempt =
+  | { status: 'ok'; pass: boolean; reasons: string[] }
+  | { status: 'transport'; reasons: string[]; rationale?: string }
+  | { status: 'unparseable'; reasons: string[] };
+
+async function llmSentryAttempt(system: string, userPrompt: string): Promise<SentryAttempt> {
+  let raw: string;
+  try {
+    const out = await callClaude({
+      tier: 'haiku',
+      systemFragments: [{ text: system, cache: true }],
+      userPrompt,
+      maxTokens: 200,
+      structured: false,
+    });
+    raw = typeof out === 'string' ? out : out.text;
+  } catch (err) {
+    logger.warn({ err }, 'compliance: LLM check failed; defaulting to block + escalate');
+    return {
+      status: 'transport',
+      reasons: ['compliance LLM unavailable'],
+      ...(err instanceof Error ? { rationale: err.message } : {}),
+    };
+  }
+
+  // Strip fences and surrounding non-JSON.
+  const cleaned = raw
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/```\s*$/, '')
+    .trim();
+  const start = cleaned.indexOf('{');
+  const end = cleaned.lastIndexOf('}');
+  if (start < 0 || end <= start) {
+    logger.warn({ raw }, 'compliance: LLM produced no JSON');
+    return { status: 'unparseable', reasons: ['compliance LLM response not parseable'] };
+  }
+  let obj: unknown;
+  try {
+    obj = JSON.parse(cleaned.slice(start, end + 1));
+  } catch (err) {
+    logger.warn({ err }, 'compliance: JSON parse failed');
+    return { status: 'unparseable', reasons: ['compliance LLM JSON parse failed'] };
+  }
+  const parsed = SentryLLMOutputSchema.safeParse(obj);
+  if (!parsed.success) {
+    return { status: 'unparseable', reasons: ['compliance LLM schema mismatch'] };
+  }
+  const result: SentryLLMOutput = parsed.data;
+  return { status: 'ok', pass: result.verdict === 'pass', reasons: result.reasons };
+}
 
 async function llmSentryCheck(
   db: Database,
@@ -214,51 +274,30 @@ async function llmSentryCheck(
     .filter((line): line is string => line !== null)
     .join('\n');
 
-  let raw: string;
-  try {
-    const out = await callClaude({
-      tier: 'haiku',
-      systemFragments: [
-        { text: await resolvePrompt(db, COMPLIANCE_SENTRY_KEY, () => SENTRY_SYSTEM), cache: true },
-      ],
-      userPrompt,
-      maxTokens: 200,
-      structured: false,
-    });
-    raw = typeof out === 'string' ? out : out.text;
-  } catch (err) {
-    logger.warn({ err }, 'compliance: LLM check failed; defaulting to block + escalate');
-    return {
-      pass: false,
-      reasons: ['compliance LLM unavailable'],
-      ...(err instanceof Error ? { rationale: err.message } : {}),
-    };
-  }
+  const system = await resolvePrompt(db, COMPLIANCE_SENTRY_KEY, () => SENTRY_SYSTEM);
 
-  // Strip fences and surrounding non-JSON.
-  const cleaned = raw
-    .replace(/^```(?:json)?\s*/i, '')
-    .replace(/```\s*$/, '')
-    .trim();
-  const start = cleaned.indexOf('{');
-  const end = cleaned.lastIndexOf('}');
-  if (start < 0 || end <= start) {
-    logger.warn({ raw }, 'compliance: LLM produced no JSON; defaulting to block');
-    return { pass: false, reasons: ['compliance LLM response not parseable'] };
+  // Unparseable output gets ONE same-prompt retry before failing closed —
+  // a single Haiku flake must not escalate a clean draft to management.
+  // Transport errors stay immediately fail-closed (same-outage retry is
+  // wasted latency), and everything else keeps fail-closed semantics.
+  let attempt = await llmSentryAttempt(system, userPrompt);
+  if (attempt.status === 'unparseable') {
+    logger.warn(
+      { reasons: attempt.reasons },
+      'compliance: LLM output unparseable — retrying once before fail-closed',
+    );
+    attempt = await llmSentryAttempt(system, userPrompt);
   }
-  let obj: unknown;
-  try {
-    obj = JSON.parse(cleaned.slice(start, end + 1));
-  } catch (err) {
-    logger.warn({ err }, 'compliance: JSON parse failed; defaulting to block');
-    return { pass: false, reasons: ['compliance LLM JSON parse failed'] };
+  if (attempt.status === 'ok') {
+    return { pass: attempt.pass, reasons: attempt.reasons };
   }
-  const parsed = SentryLLMOutputSchema.safeParse(obj);
-  if (!parsed.success) {
-    return { pass: false, reasons: ['compliance LLM schema mismatch'] };
-  }
-  const result: SentryLLMOutput = parsed.data;
-  return { pass: result.verdict === 'pass', reasons: result.reasons };
+  return {
+    pass: false,
+    reasons: attempt.reasons,
+    ...(attempt.status === 'transport' && attempt.rationale
+      ? { rationale: attempt.rationale }
+      : {}),
+  };
 }
 
 /** ---------- public API ---------- */

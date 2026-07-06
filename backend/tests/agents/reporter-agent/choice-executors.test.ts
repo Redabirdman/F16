@@ -25,16 +25,20 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { Redis } from 'ioredis';
 import { eq, sql } from 'drizzle-orm';
 import { createDb, type Database } from '../../../src/db/index.js';
-import { agentMessages, leads, quotes } from '../../../src/db/schema/index.js';
+import { agentMessages, conversationTurns, leads, quotes } from '../../../src/db/schema/index.js';
 import type { HumanAction } from '../../../src/db/schema/agent-runtime.js';
 import { insertCustomer } from '../../../src/db/repositories/customers.js';
 import { createAction } from '../../../src/db/repositories/human-actions.js';
+import { insertTurn } from '../../../src/db/repositories/conversation-turns.js';
 import { physicalQueueName } from '../../../src/messaging/dispatcher.js';
 import { getQueue, shutdownQueues, __resetForTests } from '../../../src/queue/index.js';
 import {
   executeResolutionChoice,
   hasChoiceExecutor,
 } from '../../../src/agents/reporter-agent/choice-executors.js';
+import { HUMAN_ACTION_DRAFT_MARKER } from '../../../src/agents/reporter-agent/humanize.js';
+import { registerChannel, __resetChannelsForTests } from '../../../src/channels/registry.js';
+import type { DeliveryReceipt, SendOptions } from '../../../src/channels/types.js';
 import { ReporterAgent } from '../../../src/agents/reporter-agent/agent.js';
 import type { WahaClient } from '../../../src/channels/whatsapp/waha-client.js';
 import type { AgentMessageEnvelope } from '../../../src/messaging/dispatcher.js';
@@ -99,6 +103,9 @@ d('reporter-agent choice executors (live)', () => {
   afterEach(async () => {
     vi.useRealTimers();
     delete process.env.MAXANCE_HOURS_247;
+    // send_as_is tests register a fake whatsapp adapter — other suites (and
+    // the quote-retry tests) rely on an EMPTY registry.
+    __resetChannelsForTests();
     // Best-effort wipe of test-prefix keys, then drop the cached singletons.
     try {
       const cleaner = new Redis(redisUrl!, { maxRetriesPerRequest: null, enableReadyCheck: false });
@@ -175,9 +182,13 @@ d('reporter-agent choice executors (live)', () => {
     };
   }
 
-  it('registers the two V1 executors', () => {
+  it('registers the V1 executors', () => {
     expect(hasChoiceExecutor('QUOTE_FAILED', 'retry')).toBe(true);
     expect(hasChoiceExecutor('QUOTE_STUCK', 'retry')).toBe(true);
+    expect(hasChoiceExecutor('COMPLIANCE_BLOCKED', 'send_as_is')).toBe(true);
+    // reject = do nothing; revise = future work — no executors on purpose.
+    expect(hasChoiceExecutor('COMPLIANCE_BLOCKED', 'reject_send')).toBe(false);
+    expect(hasChoiceExecutor('COMPLIANCE_BLOCKED', 'revise')).toBe(false);
     expect(hasChoiceExecutor('QUOTE_FAILED', 'manual')).toBe(false);
     expect(hasChoiceExecutor('SUBSCRIPTION_FAILED', 'retry')).toBe(false);
   });
@@ -382,5 +393,157 @@ d('reporter-agent choice executors (live)', () => {
     expect(await db.select().from(quotes)).toHaveLength(2);
     const msgs = await db.select().from(agentMessages);
     expect(msgs.some((m) => m.intent === 'QUOTE.REQUESTED')).toBe(true);
+  });
+
+  // -------------------------------------------------------------------------
+  // COMPLIANCE_BLOCKED:send_as_is — "Send it anyway" actually sends the draft
+  // (2026-07-06 live test: Achraf approved blocked drafts and NOTHING went out)
+  // -------------------------------------------------------------------------
+
+  const BLOCKED_DRAFT =
+    'Parfait Karim ! Vos deux devis ont bien été envoyés par email : ' +
+    'DR0000984054 (sans options) et DR0000984055 (avec options). ' +
+    "N'hésitez pas si vous avez la moindre question.";
+
+  /** Seed customer + lead only (no quote) — send_as_is correlates by LEAD id. */
+  async function seedLead(): Promise<{ leadId: string; customerId: string }> {
+    const suffix = String(seedSeq++).padStart(2, '0');
+    const cust = await insertCustomer(db, {
+      fullName: 'Karim Testeur',
+      phone: `+336333333${suffix}`,
+      email: `karim.blocked.${suffix}@example.com`,
+    });
+    const [lead] = await db
+      .insert(leads)
+      .values({
+        customerId: cust.id,
+        source: 'website',
+        productLine: 'scooter',
+        status: 'quoting',
+        score: 80,
+      })
+      .returning();
+    return { leadId: lead!.id, customerId: cust.id };
+  }
+
+  /** human_actions row shaped like the COMPLIANCE_BLOCKED creation sites (reply-core.ts / agent.ts). */
+  async function seedBlockedAction(leadId: string, draft: string | null) {
+    return createAction(db, {
+      createdByAgent: 'sales-agent#singleton',
+      correlationId: leadId,
+      intent: 'COMPLIANCE_BLOCKED',
+      severity: 2,
+      summary:
+        'Sales Agent draft bloqué (LLM). Raisons : affirmation non validée' +
+        (draft === null ? '' : `${HUMAN_ACTION_DRAFT_MARKER}${draft}`),
+      options: [
+        { id: 'send_as_is', label: 'Send it anyway', kind: 'approve' },
+        { id: 'reject_send', label: 'Do not send', kind: 'reject' },
+        { id: 'revise', label: 'Ask for a revision', kind: 'revise' },
+      ],
+    });
+  }
+
+  /** Register a fake whatsapp adapter capturing every send. */
+  function registerFakeWhatsapp(): SendOptions[] {
+    const sends: SendOptions[] = [];
+    registerChannel({
+      id: 'whatsapp',
+      capabilities: () => ({
+        interactive: false,
+        voice: false,
+        attachments: true,
+        markdown: false,
+      }),
+      send: async (opts: SendOptions): Promise<DeliveryReceipt> => {
+        sends.push(opts);
+        return {
+          channel: 'whatsapp',
+          externalId: `wa-${sends.length}`,
+          acceptedAt: new Date(),
+        };
+      },
+    });
+    return sends;
+  }
+
+  it('COMPLIANCE_BLOCKED:send_as_is sends the draft verbatim + logs the outbound turn', async () => {
+    const sends = registerFakeWhatsapp();
+    const { leadId, customerId } = await seedLead();
+    const action = await seedBlockedAction(leadId, BLOCKED_DRAFT);
+
+    const result = await executeResolutionChoice(execCtx(action, 'send_as_is'));
+
+    expect(result).not.toBeNull();
+    expect(result?.detail).toMatchObject({ sent: true, channel: 'whatsapp' });
+    expect(result?.groupNote).toBe('Approved message sent to Karim.');
+
+    // The channel adapter received the draft VERBATIM, addressed to the
+    // customer's phone, attributed to the sales-agent.
+    expect(sends).toHaveLength(1);
+    expect(sends[0]?.body).toEqual([{ type: 'text', text: BLOCKED_DRAFT }]);
+    expect(sends[0]?.to.channel).toBe('whatsapp');
+    expect(sends[0]?.agentRole).toBe('sales-agent');
+    expect(sends[0]?.correlationId).toBe(leadId);
+
+    // sendViaChannel wrote the audit turn with the draft text.
+    const turns = await db
+      .select()
+      .from(conversationTurns)
+      .where(eq(conversationTurns.customerId, customerId));
+    expect(turns).toHaveLength(1);
+    expect(turns[0]?.direction).toBe('outbound');
+    expect(turns[0]?.content).toBe(BLOCKED_DRAFT);
+    expect(turns[0]?.leadId).toBe(leadId);
+    expect(turns[0]?.agentRole).toBe('sales-agent');
+  });
+
+  it('send_as_is degrades gracefully when the summary carries no draft', async () => {
+    const sends = registerFakeWhatsapp();
+    const { leadId } = await seedLead();
+    const action = await seedBlockedAction(leadId, null);
+
+    const result = await executeResolutionChoice(execCtx(action, 'send_as_is'));
+
+    expect(result?.groupNote).toBe('No stored draft — nothing sent.');
+    expect(result?.detail).toMatchObject({ sent: false, reason: 'no_stored_draft' });
+    expect(sends).toHaveLength(0);
+    expect(await db.select().from(conversationTurns)).toHaveLength(0);
+  });
+
+  it('send_as_is is idempotent — skips when a recent outbound turn already carries the draft', async () => {
+    const sends = registerFakeWhatsapp();
+    const { leadId, customerId } = await seedLead();
+    const action = await seedBlockedAction(leadId, BLOCKED_DRAFT);
+
+    // A prior delivery (e.g. a redelivered RESOLVED envelope already ran the
+    // executor) — the draft text sits in a recent outbound turn.
+    await insertTurn(db, {
+      customerId,
+      leadId,
+      channel: 'whatsapp',
+      direction: 'outbound',
+      agentRole: 'sales-agent',
+      content: BLOCKED_DRAFT,
+    });
+
+    const result = await executeResolutionChoice(execCtx(action, 'send_as_is'));
+
+    expect(result?.groupNote).toBe('Already sent.');
+    expect(result?.detail).toMatchObject({ sent: false, reason: 'already_sent' });
+    expect(sends).toHaveLength(0);
+    // Still exactly the one pre-existing turn — no double text to the customer.
+    expect(await db.select().from(conversationTurns)).toHaveLength(1);
+  });
+
+  it('send_as_is warns (not throws) when the customer cannot be resolved', async () => {
+    registerFakeWhatsapp();
+    // correlationId points at a lead that does not exist.
+    const action = await seedBlockedAction(randomUUID(), BLOCKED_DRAFT);
+
+    const result = await executeResolutionChoice(execCtx(action, 'send_as_is'));
+
+    expect(result?.groupNote).toBe('Could not send the approved message — handle from the admin.');
+    expect(result?.detail).toMatchObject({ sent: false, reason: 'lead_not_resolved' });
   });
 });

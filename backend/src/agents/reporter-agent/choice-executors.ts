@@ -14,8 +14,12 @@
  * are informational-only keep behaving exactly as before.
  *
  * V1 registrations: QUOTE_FAILED:retry + QUOTE_STUCK:retry → re-launch the
- * Maxance quote. Future executors (e.g. SUBSCRIPTION_FAILED:retry) plug in
- * with one `registerChoiceExecutor` call.
+ * Maxance quote; COMPLIANCE_BLOCKED:send_as_is → send the blocked draft to
+ * the customer verbatim (2026-07-06: Achraf approved blocked drafts on
+ * WhatsApp and NOTHING was sent — approval only recorded the choice).
+ * COMPLIANCE_BLOCKED:reject_send needs no executor (reject = do nothing) and
+ * :revise is future work. Future executors (e.g. SUBSCRIPTION_FAILED:retry)
+ * plug in with one `registerChoiceExecutor` call.
  *
  * Hard rule: NEVER crash the resolution path. The closure message is already
  * posted when we run; a throw here would fail the RESOLVED envelope and make
@@ -38,14 +42,18 @@
 import { randomUUID } from 'node:crypto';
 import { and, desc, eq, gt, isNull, ne } from 'drizzle-orm';
 import type { Database } from '../../db/index.js';
-import { customers, quotes } from '../../db/schema/index.js';
+import { customers, leads, quotes } from '../../db/schema/index.js';
 import type { HumanAction } from '../../db/schema/agent-runtime.js';
 import { decryptPII } from '../../db/crypto.js';
 import { insertQuote } from '../../db/repositories/quotes.js';
 import { setLeadStatus } from '../../db/repositories/leads.js';
+import { listTurns } from '../../db/repositories/conversation-turns.js';
 import { sendMessage } from '../../messaging/dispatcher.js';
+import { sendViaChannel } from '../../channels/send.js';
+import { coerceSendableChannel } from '../../channels/registry.js';
+import type { ChannelId, ContactRef } from '../../channels/types.js';
 import { msUntilMaxanceOpen } from '../maxance-operator/business-hours.js';
-import { shortRef } from './humanize.js';
+import { shortRef, splitDraft } from './humanize.js';
 import { logger } from '../../logger.js';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -279,3 +287,159 @@ const retryQuote: ChoiceExecutor = async (ctx) => {
 
 registerChoiceExecutor('QUOTE_FAILED', 'retry', retryQuote);
 registerChoiceExecutor('QUOTE_STUCK', 'retry', retryQuote);
+
+// ---------------------------------------------------------------------------
+// Approved-draft send executor (COMPLIANCE_BLOCKED:send_as_is)
+// ---------------------------------------------------------------------------
+
+const SEND_FAILED_NOTE = 'Could not send the approved message — handle from the admin.';
+
+/** First N chars of the draft used as the idempotency needle in recent turns. */
+const IDEMPOTENCY_NEEDLE_CHARS = 60;
+
+/**
+ * "Send it anyway": deliver the compliance-blocked draft to the customer
+ * verbatim. Both creation sites (sales-agent agent.ts + reply-core.ts) store
+ * the draft after HUMAN_ACTION_DRAFT_MARKER in the summary and set
+ * `correlationId = lead id`, so we peel the draft off, resolve lead →
+ * customer → sendable channel + ContactRef (same heuristic as the sales
+ * handlers: last turn's channel, coerced through the registry, WhatsApp
+ * default), and send as the sales-agent so the timeline attribution matches
+ * what WOULD have been sent had compliance passed.
+ *
+ * Idempotency: a redelivered RESOLVED envelope (BullMQ replay, double-tap on
+ * WhatsApp) must not text the customer twice — if a recent outbound turn
+ * already carries the draft's first 60 chars, we skip with a note.
+ */
+const sendApprovedDraft: ChoiceExecutor = async (ctx) => {
+  const { db, action } = ctx;
+
+  // 1. The blocked draft rides the summary after the marker (see humanize.ts).
+  const { draft } = splitDraft(action.summary);
+  const draftText = draft?.trim() ?? '';
+  if (!draftText) {
+    logger.warn(
+      { humanActionId: action.id, intent: action.intent },
+      'choice-executors: send_as_is has no stored draft — nothing to send',
+    );
+    return {
+      groupNote: 'No stored draft — nothing sent.',
+      detail: { sent: false, reason: 'no_stored_draft' },
+    };
+  }
+
+  // 2. correlationId IS the lead id (both COMPLIANCE_BLOCKED creation sites).
+  const leadId = action.correlationId;
+  try {
+    const lead =
+      leadId && UUID_RE.test(leadId)
+        ? (await db.select().from(leads).where(eq(leads.id, leadId)).limit(1))[0]
+        : undefined;
+    if (!lead?.customerId) {
+      logger.warn(
+        { humanActionId: action.id, correlationId: leadId, leadFound: Boolean(lead) },
+        'choice-executors: send_as_is could not resolve lead/customer',
+      );
+      return { groupNote: SEND_FAILED_NOTE, detail: { sent: false, reason: 'lead_not_resolved' } };
+    }
+    const [customer] = await db
+      .select()
+      .from(customers)
+      .where(eq(customers.id, lead.customerId))
+      .limit(1);
+    if (!customer) {
+      logger.warn(
+        { humanActionId: action.id, leadId: lead.id },
+        'choice-executors: send_as_is customer row missing',
+      );
+      return { groupNote: SEND_FAILED_NOTE, detail: { sent: false, reason: 'customer_missing' } };
+    }
+
+    // 3. Channel + idempotency off the same recent-turns read (sales-handler
+    //    heuristic: last turn's channel wins, coerced sendable, WA default).
+    const recentTurns = await listTurns(db, {
+      customerId: customer.id,
+      leadId: lead.id,
+      limit: 10,
+    });
+    const needle = draftText.slice(0, IDEMPOTENCY_NEEDLE_CHARS);
+    const alreadySent = recentTurns.some(
+      (t) => t.direction === 'outbound' && (t.content ?? '').includes(needle),
+    );
+    if (alreadySent) {
+      logger.info(
+        { humanActionId: action.id, leadId: lead.id },
+        'choice-executors: send_as_is skipped — draft already in a recent outbound turn',
+      );
+      return { groupNote: 'Already sent.', detail: { sent: false, reason: 'already_sent' } };
+    }
+    const channel: ChannelId = coerceSendableChannel(
+      recentTurns[0]?.channel as ChannelId | undefined,
+    );
+
+    // 4. ContactRef — decryptPII at this boundary, mirror resolveSalesContext.
+    const address = channel === 'email' ? decryptPII(customer.email) : decryptPII(customer.phone);
+    if (!address) {
+      logger.warn(
+        { humanActionId: action.id, leadId: lead.id, channel },
+        'choice-executors: send_as_is has no contact address for channel',
+      );
+      return { groupNote: SEND_FAILED_NOTE, detail: { sent: false, reason: 'no_contact_address' } };
+    }
+    const fullName = decryptPII(customer.fullName) ?? '';
+    const contactRef: ContactRef = {
+      channel,
+      address,
+      ...(fullName ? { displayName: fullName } : {}),
+    };
+
+    // 5. Send verbatim, attributed to the sales-agent — the customer sees the
+    //    exact message the agent drafted, and the timeline reads the same as
+    //    a normal sales reply.
+    const send = await sendViaChannel({
+      db,
+      customerId: customer.id,
+      leadId: lead.id,
+      to: contactRef,
+      body: [{ type: 'text', text: draftText }],
+      agentRole: 'sales-agent',
+      agentInstance: 'singleton',
+      correlationId: lead.id,
+    });
+
+    const firstName = (fullName.split(' ')[0] ?? '').trim();
+    logger.info(
+      {
+        humanActionId: action.id,
+        leadId: lead.id,
+        customerId: customer.id,
+        channel,
+        externalId: send.receipt.externalId,
+      },
+      'choice-executors: approved blocked draft sent to customer',
+    );
+    return {
+      groupNote: `Approved message sent to ${firstName || 'the customer'}.`,
+      detail: { sent: true, channel, externalId: send.receipt.externalId },
+    };
+  } catch (err) {
+    logger.warn(
+      {
+        err: err instanceof Error ? err.message : String(err),
+        humanActionId: action.id,
+        correlationId: leadId,
+      },
+      'choice-executors: send_as_is failed — customer NOT messaged',
+    );
+    return {
+      groupNote: SEND_FAILED_NOTE,
+      detail: {
+        sent: false,
+        reason: 'send_failed',
+        error: err instanceof Error ? err.message : String(err),
+      },
+    };
+  }
+};
+
+registerChoiceExecutor('COMPLIANCE_BLOCKED', 'send_as_is', sendApprovedDraft);

@@ -18,13 +18,16 @@ import type { Database } from '../../src/db/index.js';
 class StubAnthropic {
   public calls: Array<{ model: string; max_tokens: number }> = [];
   public nextText = '{"verdict":"pass","reasons":[]}';
+  /** Per-call replies consumed FIFO before falling back to `nextText` — lets the retry tests vary the first vs second attempt. */
+  public textQueue: string[] = [];
   public nextError: Error | null = null;
   public messages = {
     create: async (req: { model: string; max_tokens: number }) => {
       this.calls.push({ model: req.model, max_tokens: req.max_tokens });
       if (this.nextError) throw this.nextError;
+      const text = this.textQueue.length > 0 ? this.textQueue.shift()! : this.nextText;
       return {
-        content: [{ type: 'text' as const, text: this.nextText }],
+        content: [{ type: 'text' as const, text }],
         stop_reason: 'end_turn' as const,
         usage: { input_tokens: 50, output_tokens: 20 },
       };
@@ -184,7 +187,7 @@ describe('checkComplianceFor() — LLM outcomes', () => {
   });
 
   // 10
-  it('test 10: LLM transport error → fail-closed block', async () => {
+  it('test 10: LLM transport error → fail-closed block, no retry (same outage)', async () => {
     stub.nextError = new Error('network timeout');
     const out = await checkComplianceFor(noDb, {
       draft: 'Bonjour, je peux vous aider.',
@@ -193,10 +196,12 @@ describe('checkComplianceFor() — LLM outcomes', () => {
     expect(out.verdict).toBe('block');
     expect(out.reasons.join(' ')).toMatch(/unavailable/i);
     expect(out.llmRationale).toBe('network timeout');
+    expect(stub.callCount).toBe(1);
   });
 
-  // 11
-  it('test 11: LLM returns garbage (no JSON) → fail-closed block', async () => {
+  // 11 — 2026-07-06: unparseable output now gets ONE same-prompt retry
+  // before failing closed (two flakes in ~3 min escalated clean drafts).
+  it('test 11: LLM returns garbage (no JSON) twice → fail-closed block after one retry', async () => {
     stub.nextText = 'pas du tout du JSON, juste du texte libre';
     const out = await checkComplianceFor(noDb, {
       draft: 'Bonjour, je peux vous aider.',
@@ -204,10 +209,11 @@ describe('checkComplianceFor() — LLM outcomes', () => {
     });
     expect(out.verdict).toBe('block');
     expect(out.reasons.join(' ')).toMatch(/not parseable/i);
+    expect(stub.callCount).toBe(2);
   });
 
   // 12
-  it('test 12: LLM schema violation → fail-closed block', async () => {
+  it('test 12: LLM schema violation twice → fail-closed block after one retry', async () => {
     stub.nextText = '{"verdict":"maybe"}';
     const out = await checkComplianceFor(noDb, {
       draft: 'Bonjour, je peux vous aider.',
@@ -215,6 +221,31 @@ describe('checkComplianceFor() — LLM outcomes', () => {
     });
     expect(out.verdict).toBe('block');
     expect(out.reasons.join(' ')).toMatch(/schema mismatch/i);
+    expect(stub.callCount).toBe(2);
+  });
+
+  // 12b — the whole point of the retry: one flake must not block a clean draft.
+  it('test 12b: garbage first attempt + clean pass on retry → verdict pass', async () => {
+    stub.textQueue = ['pas du JSON du tout', '{"verdict":"pass","reasons":[]}'];
+    const out = await checkComplianceFor(noDb, {
+      draft: 'Bonjour, je peux vous aider.',
+      ctx,
+    });
+    expect(out.verdict).toBe('pass');
+    expect(out.reasons).toEqual([]);
+    expect(stub.callCount).toBe(2);
+  });
+
+  // 12c — the retry keeps fail-closed teeth: a real block on retry still blocks.
+  it('test 12c: garbage first attempt + block on retry → verdict block with LLM reasons', async () => {
+    stub.textQueue = ['###', '{"verdict":"block","reasons":["sort du périmètre"]}'];
+    const out = await checkComplianceFor(noDb, {
+      draft: 'Aujourd’hui il fait beau, parlons météo plutôt.',
+      ctx,
+    });
+    expect(out.verdict).toBe('block');
+    expect(out.reasons).toEqual(['sort du périmètre']);
+    expect(stub.callCount).toBe(2);
   });
 
   // 13
