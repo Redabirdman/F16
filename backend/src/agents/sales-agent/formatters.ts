@@ -178,6 +178,28 @@ export function formatQuoteRelayPendingMessage(opts: {
  * Customer-facing confirmation after Maxance has emailed the quote PDF.
  * Achraf's wording — locked once, templated forever.
  */
+/**
+ * dryRun confirm (MAXANCE_CONFIRM_FORCE_DRYRUN=1): the devis RECORD exists
+ * but NO courrier was sent — claiming "arrivé par mail" would be a lie the
+ * customer can check (live 2026-07-06, DR0000984054). Announce the creation
+ * only; delivery follows when a real send happens.
+ */
+export function formatQuoteDryRunReadyMessage(opts: {
+  firstName?: string;
+  devisNumber: string;
+  quoteId: string;
+}): string {
+  const greeting = opts.firstName ? `Bonjour ${capFirst(opts.firstName)},` : 'Bonjour,';
+  return [
+    greeting,
+    '',
+    `Votre devis trottinette est créé ✅ Référence : ${opts.devisNumber}.`,
+    `L'envoi du document est en cours de préparation — il vous parvient très vite.`,
+    '',
+    `(réf #${opts.quoteId.slice(0, 8)} envoyé)`,
+  ].join('\n');
+}
+
 export function formatQuoteReadyMessage(opts: {
   firstName?: string;
   pdfSentTo: string;

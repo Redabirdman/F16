@@ -550,6 +550,7 @@ export class MaxanceOperatorAgent extends BaseAgent {
           quoteId: payload.quoteId,
           customerId: payload.customerId,
           leadId: payload.leadId,
+          dryRun,
           monthlyPremium: 0,
           comptantDue: 0,
           devisNumber: confirm.devisNumber,

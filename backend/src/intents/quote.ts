@@ -64,6 +64,9 @@ export const QuoteReadyPayload = registerIntent(
     /** 2026-07-02: explicit lead — the sales-agent SINGLETON has no per-lead
      *  meta and the envelope correlationId is the quoteId. */
     leadId: z.string().uuid().optional(),
+    /** 2026-07-06: true when MAXANCE_CONFIRM_FORCE_DRYRUN=1 — NO courrier was
+     *  sent; the customer message must not claim an email arrived. */
+    dryRun: z.boolean().optional(),
     monthlyPremium: z.number().nonnegative(),
     comptantDue: z.number().nonnegative(),
     devisNumber: z.string(),

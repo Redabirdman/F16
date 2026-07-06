@@ -22,6 +22,7 @@ import * as humanActions from '../../../db/repositories/human-actions.js';
 import { notifyHumanAction } from '../../human-notify.js';
 import {
   formatQuotePreviewMessage,
+  formatQuoteDryRunReadyMessage,
   formatQuoteReadyMessage,
   formatQuoteRelayPendingMessage,
   formatQuoteFailedMessage,
@@ -183,6 +184,7 @@ export async function handleQuoteReady(
     quoteId: string;
     customerId: string;
     leadId?: string;
+    dryRun?: boolean;
     monthlyPremium: number;
     comptantDue: number;
     devisNumber: string;
@@ -230,18 +232,26 @@ export async function handleQuoteReady(
   // PDF message follows from handleDevisPdfReceived within ~1 min.
   const relayTo = process.env.F16_DEVIS_COURRIER_TO;
   const relayed = relayTo !== undefined && payload.pdfSentTo === relayTo;
-  const draft = relayed
-    ? formatQuoteRelayPendingMessage({
+  // dryRun: no courrier left Maxance — never claim an email arrived (live
+  // 2026-07-06: DR0000984054's message said "arrivé par mail", a lie).
+  const draft = payload.dryRun
+    ? formatQuoteDryRunReadyMessage({
         firstName,
         devisNumber: payload.devisNumber,
         quoteId: payload.quoteId,
       })
-    : formatQuoteReadyMessage({
-        firstName,
-        pdfSentTo: payload.pdfSentTo,
-        devisNumber: payload.devisNumber,
-        quoteId: payload.quoteId,
-      });
+    : relayed
+      ? formatQuoteRelayPendingMessage({
+          firstName,
+          devisNumber: payload.devisNumber,
+          quoteId: payload.quoteId,
+        })
+      : formatQuoteReadyMessage({
+          firstName,
+          pdfSentTo: payload.pdfSentTo,
+          devisNumber: payload.devisNumber,
+          quoteId: payload.quoteId,
+        });
 
   const send = await sendViaChannel({
     db: ctx.db,
