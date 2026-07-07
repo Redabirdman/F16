@@ -28,6 +28,7 @@ import { callClaudeWithTools } from '../../llm/tool-loop.js';
 import { buildSalesAgentSystemFragments, type SalesAgentTurnContext } from './prompts/index.js';
 import type { ChannelId, ContactRef } from '../../channels/types.js';
 import { checkComplianceFor } from '../../compliance/index.js';
+import { buildQuoteContextLine } from '../../compliance/sentry.js';
 import * as humanActions from '../../db/repositories/human-actions.js';
 import { notifyHumanAction } from '../human-notify.js';
 import { HUMAN_ACTION_DRAFT_MARKER } from '../reporter-agent/humanize.js';
@@ -344,6 +345,9 @@ export async function generateSalesReply(
   // Compliance Sentry — two-layer check (server rules + Haiku LLM)
   // synchronously gates the send. Fail-closed: any block routes the draft to a
   // human action and emits COMPLIANCE.BLOCKED instead of returning a 'reply'.
+  // quoteContext feeds the lead's REAL devis/price facts to the sentry — it was
+  // judging blind and blocking devis-backed prices as "invented" (2026-07-07).
+  const quoteContext = channel === 'voice' ? undefined : await buildQuoteContextLine(db, lead.id);
   const compliance = await checkComplianceFor(
     db,
     {
@@ -354,6 +358,7 @@ export async function generateSalesReply(
         productLine: (lead.productLine ?? 'car') as 'scooter' | 'car',
         leadStatus: lead.status,
         lastInboundContent: content,
+        ...(quoteContext ? { quoteContext } : {}),
       },
     },
     // Voice = live call: run rules-only compliance (hard server rules still

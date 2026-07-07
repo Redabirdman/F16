@@ -38,6 +38,15 @@ export interface ComplianceCheckInput {
     leadStatus: string;
     /** Last inbound from customer — to detect if draft is responsive vs out-of-context. */
     lastInboundContent?: string;
+    /**
+     * The lead's REAL quote/devis state, one French line (e.g. "2 devis générés
+     * et envoyés au client (DR0000984252, DR0000984255) — mensualité 7,97 €/mois,
+     * annuel 83,71 €"). Without it the sentry judged every draft BLIND and
+     * blocked correct devis-backed prices as "prix inventé sans devis" (live
+     * 2026-07-07, Ridaa: pointless approvals). Callers with DB access build it
+     * via buildQuoteContextLine().
+     */
+    quoteContext?: string;
   };
 }
 
@@ -168,6 +177,8 @@ PASS si le message :
 - Annonce qu'un devis / document DEMANDÉ PAR LE CLIENT est "en route", "en préparation", "arrive très vite / tout de suite" quand la conversation montre que le client vient de le demander ou de confirmer. Le système génère et envoie les devis AUTOMATIQUEMENT — dire qu'il arrive est factuel. (Live 2026-07-07 : bloquer "le second devis est en route" pendant que le système l'envoyait a fait taire l'agent au pire moment.)
 - Promet une RELANCE de suivi à granularité jour ("je vous recontacte demain", "je reviens vers vous demain pour voir si vous avez des questions"). L'agent de relance automatique (24h/72h/7j) tient cette promesse — c'est un engagement SYSTÈME, pas une promesse en l'air.
 
+⚠️ SOURCE DE VÉRITÉ DEVIS : le contexte fourni peut contenir la ligne « Devis Maxance de CE client » — ce sont des FAITS vérifiés en base de données (références DR..., mensualité, annuel, comptant). Quand cette ligne existe, TOUT chiffre du draft cohérent avec ces devis (mensualité, options ≈1-1,50 €/mois de plus, frais d'inscription 50/60/65 € selon la formule, premier prélèvement) est AUTORISÉ — ne bloque JAMAIS pour « prix sans devis » ou « chiffre inventé » dans ce cas. Bloque pour prix inventé UNIQUEMENT quand AUCUN devis n'est listé dans le contexte ET que le chiffre n'est pas un tarif public d'appel.
+
 EN CAS DE DOUTE : si le draft fait juste de la pédagogie commerciale + des faits publics + une question de relance, c'est PASS. Bloquer doit être réservé aux promesses personnalisées et aux interdits explicites. RÈGLE DE CALIBRAGE (direction, 2026-07-07) : chaque blocage interrompt la conversation client et exige une validation humaine — un blocage injustifié coûte plus cher qu'un message imparfait. Bloque UNIQUEMENT les lignes rouges listées ci-dessus ; le style, la tournure, l'enthousiasme commercial et les formulations vagues ne sont JAMAIS des motifs de blocage.
 
 Tu réponds UNIQUEMENT par le JSON, jamais de préambule ou de markdown.`;
@@ -259,6 +270,9 @@ async function llmSentryCheck(
     `- Canal : ${ctx.channel}`,
     `- Produit : ${ctx.productLine === 'scooter' ? 'trottinette' : 'auto'}`,
     `- Statut du lead : ${ctx.leadStatus}`,
+    ctx.quoteContext
+      ? `- Devis Maxance de CE client (FAITS vérifiés en base — les chiffres cohérents avec ces devis sont AUTORISÉS) : ${ctx.quoteContext}`
+      : null,
     ctx.lastInboundContent
       ? `- Dernier message client : "${ctx.lastInboundContent.slice(0, 500)}"`
       : null,
@@ -359,6 +373,50 @@ export async function checkComplianceFor(
     ruleHits: softHits.map((r) => r.name),
     durationMs: Date.now() - t0,
   };
+}
+
+/**
+ * Build the sentry's `quoteContext` line from the lead's quotes — the FACTS
+ * that stop the LLM sentry from blocking devis-backed prices as "invented".
+ * One line, newest-first, only quotes that produced prices or a real devis.
+ * Best-effort: returns undefined on any error (the sentry then just judges
+ * without it, as before).
+ */
+export async function buildQuoteContextLine(
+  db: Database,
+  leadId: string,
+): Promise<string | undefined> {
+  try {
+    const { quotes } = await import('../db/schema/index.js');
+    const { desc, eq } = await import('drizzle-orm');
+    const rows = await db
+      .select({
+        devis: quotes.maxanceDevisNumber,
+        monthly: quotes.monthlyPremium,
+        annual: quotes.annualPremium,
+        comptant: quotes.montantComptant,
+      })
+      .from(quotes)
+      .where(eq(quotes.leadId, leadId))
+      .orderBy(desc(quotes.requestedAt))
+      .limit(5);
+    const useful = rows.filter((r) => r.devis || r.monthly);
+    if (useful.length === 0) return undefined;
+    const devisRefs = useful.map((r) => r.devis).filter(Boolean);
+    const priced = useful.find((r) => r.monthly);
+    const parts: string[] = [];
+    if (devisRefs.length > 0) {
+      parts.push(`${devisRefs.length} devis générés et envoyés (${devisRefs.join(', ')})`);
+    } else {
+      parts.push('tarification Maxance effectuée (menu de prix présenté au client)');
+    }
+    if (priced?.monthly) parts.push(`mensualité ${priced.monthly} €/mois`);
+    if (priced?.annual) parts.push(`annuel ${priced.annual} €`);
+    if (priced?.comptant) parts.push(`premier paiement ${priced.comptant} €`);
+    return parts.join(' — ');
+  } catch {
+    return undefined;
+  }
 }
 
 // Exposed for unit tests that introspect the rule book.
