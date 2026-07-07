@@ -168,6 +168,7 @@ Tu réponds STRICTEMENT par UN JSON :
   "severity": "critical" | "minor",
   "reasons": ["raison 1 si block", "raison 2", ...]
 }
+"reasons" : 1 à 2 raisons COURTES (≤ 15 mots chacune) — jamais de paragraphe.
 
 "severity" ne compte que si verdict=block :
 - "critical" = UNIQUEMENT ces 5 familles : (1) contrat/couverture de CE client affirmé conclu/actif/signé ; (2) prix personnalisé INVENTÉ alors qu'AUCUN devis n'existe dans le contexte ; (3) demande de mot de passe / code / données de paiement ; (4) conseil médical ou juridique personnalisé ; (5) IBAN/carte en clair. → le message sera RETENU et la direction devra trancher.
@@ -245,7 +246,10 @@ async function llmSentryAttempt(system: string, userPrompt: string): Promise<Sen
       tier: 'haiku',
       systemFragments: [{ text: system, cache: true }],
       userPrompt,
-      maxTokens: 200,
+      // 200 was truncating the JSON mid-reasons once severity + verbose French
+      // reasons landed (live 2026-07-07: "LLM output unparseable" on every
+      // turn) — the parse failure then flag-ran every message.
+      maxTokens: 400,
       structured: false,
     });
     raw = typeof out === 'string' ? out : out.text;

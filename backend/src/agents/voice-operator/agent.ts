@@ -36,6 +36,7 @@ import { appendAudit } from '../../db/repositories/audit-log.js';
 import { getCustomerById } from '../../db/repositories/customers.js';
 import { type VoiceOriginator, asteriskClientFromEnv } from '../../voice/asterisk-client.js';
 import { putSession } from '../../voice/session-store.js';
+import { getRedis } from '../../queue/index.js';
 
 export interface VoiceOperatorConfig extends BaseAgentConfig {
   /**
@@ -95,6 +96,29 @@ export class VoiceOperatorAgent extends BaseAgent {
   private async handleScheduled(envelope: AgentMessageEnvelope): Promise<MessageHandlerResult> {
     const payload = envelope.payload as CallScheduledPayload;
     const { callId, customerId } = payload;
+
+    // Duplicate-call guard (2026-07-07 live: two retried LLM turns each
+    // scheduled a call → the customer's phone rang TWICE a second apart).
+    // One outbound call per customer per 5 minutes; best-effort — if Redis is
+    // down we'd rather risk a duplicate than block a legitimate call.
+    try {
+      const first = await getRedis().set(
+        `f16:voice-call-inflight:${customerId}`,
+        callId,
+        'EX',
+        300,
+        'NX',
+      );
+      if (first === null) {
+        logger.warn(
+          { callId, customerId, instanceId: this.instanceId },
+          'voice-operator: a call to this customer is already in flight — skipping duplicate',
+        );
+        return { ok: true, result: { skipped: 'call-already-inflight', callId } };
+      }
+    } catch {
+      // Redis unavailable — proceed without the guard.
+    }
 
     const client = this.resolveClient();
     if (!client) {
