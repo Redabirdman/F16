@@ -48,6 +48,7 @@ import type { Tool, ToolContext } from '../tools/registry.js';
 import { invokeTool } from '../tools/registry.js';
 import { logger } from '../logger.js';
 import { getClaudeClientForToolLoop } from './claude.js';
+import { maybeAlertLlmBillingError } from './billing-alert.js';
 
 export interface ToolLoopInput {
   tier: ModelTier;
@@ -214,7 +215,15 @@ export async function callClaudeWithTools(input: ToolLoopInput): Promise<ToolLoo
       ...(system !== undefined ? { system } : {}),
       ...(anthropicTools.length > 0 ? { tools: anthropicTools } : {}),
     };
-    const resp = (await client.messages.create(req)) as Anthropic.Messages.Message;
+    let resp: Anthropic.Messages.Message;
+    try {
+      resp = (await client.messages.create(req)) as Anthropic.Messages.Message;
+    } catch (err) {
+      // Credits-exhausted / key-revoked kills the whole sales brain silently —
+      // wake management directly (LLM-free, throttled 1/h), then rethrow.
+      maybeAlertLlmBillingError(err instanceof Error ? err.message : String(err));
+      throw err;
+    }
 
     // Accumulate usage across iterations so the caller sees the full cost.
     const u = resp.usage;

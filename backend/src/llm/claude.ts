@@ -30,6 +30,7 @@ import type {
 import type { ModelTier } from '../agents/base.js';
 import { modelIdForTier } from './router.js';
 import { buildSystemPrompt, type SystemFragment } from './cache.js';
+import { maybeAlertLlmBillingError } from './billing-alert.js';
 import { logger } from '../logger.js';
 
 export interface ClaudeCallInput {
@@ -198,15 +199,19 @@ export async function callClaude(
       ...(input.signal ? { signal: input.signal } : {}),
     })) as Message;
   } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
     logger.error(
       {
         tier: input.tier,
         model: modelId,
-        err: err instanceof Error ? err.message : String(err),
+        err: errMsg,
         ...(input.logContext ?? {}),
       },
       'claude.call.error',
     );
+    // Credits-exhausted / key-revoked = the ENTIRE brain is down and customers
+    // get silence — wake management directly (LLM-free, throttled 1/h).
+    maybeAlertLlmBillingError(errMsg);
     throw err;
   }
 
