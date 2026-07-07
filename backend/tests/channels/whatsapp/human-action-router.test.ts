@@ -241,7 +241,9 @@ describe('parseHumanActionResolution — kind aliases', () => {
       pendingActions: [sampleAction1],
     }) as ResolutionMatch;
     expect(o.option.id).toBe('approve');
-    expect(o.matchedOptionVia).toBe('kind_alias');
+    // "approuver" is the exact option label ("Approuver") → label match takes
+    // precedence over the kind alias (both resolve to the same approve option).
+    expect(o.matchedOptionVia).toBe('label');
   });
 
   it('matches "oui" → approve', () => {
@@ -283,6 +285,92 @@ describe('parseHumanActionResolution — kind aliases', () => {
       pendingActions: [sampleAction1],
     });
     if (!isMatch(o)) expect(o.reason).toBe('option_not_recognised');
+  });
+});
+
+// QUOTE_FAILED/QUOTE_STUCK-style action: two approve-kinded options whose
+// labels are the only thing distinguishing them ("Retry the quote" vs "Do it
+// manually"), plus a reject. Mirrors followthrough/watchdog.ts + choice-executors.
+const quoteFailedAction: HumanAction = {
+  ...sampleAction1,
+  id: '33333333-3333-4333-8333-333333333333',
+  intent: 'QUOTE_FAILED',
+  options: [
+    { id: 'retry', label: 'Retry the quote', kind: 'approve' },
+    { id: 'manual', label: 'Do it manually', kind: 'approve' },
+    { id: 'abandon', label: 'Abandon', kind: 'reject' },
+  ],
+  createdAt: new Date('2026-07-06T18:00:00Z'),
+};
+
+describe('parseHumanActionResolution — option-label matching (single action)', () => {
+  it('matches "Retry the quote" to the retry option, not the first approve', () => {
+    const o = parseHumanActionResolution({
+      ...ridaaMsg('Retry the quote'),
+      groupChatId: GROUP_ID,
+      authorisedResolvers: ALLOWLIST,
+      pendingActions: [quoteFailedAction],
+    }) as ResolutionMatch;
+    expect(isMatch(o)).toBe(true);
+    expect(o.option.id).toBe('retry');
+    expect(o.matchedOptionVia).toBe('label');
+  });
+
+  it('matches "Do it manually" to the manual option (same kind as retry)', () => {
+    const o = parseHumanActionResolution({
+      ...ridaaMsg('Do it manually please'),
+      groupChatId: GROUP_ID,
+      authorisedResolvers: ALLOWLIST,
+      pendingActions: [quoteFailedAction],
+    }) as ResolutionMatch;
+    expect(o.option.id).toBe('manual');
+    expect(o.matchedOptionVia).toBe('label');
+  });
+});
+
+describe('parseHumanActionResolution — auto-target newest matching action', () => {
+  it('auto-targets the QUOTE_FAILED action when the reply names its option, despite 2+ pending', () => {
+    // sampleAction1 (approve/reject) + quoteFailedAction both pending, no id in
+    // body. "Retry the quote" names only the QUOTE_FAILED action's option → we
+    // target it instead of returning action_ambiguous (the 07-06 fall-through).
+    const o = parseHumanActionResolution({
+      ...ridaaMsg('Retry the quote'),
+      groupChatId: GROUP_ID,
+      authorisedResolvers: ALLOWLIST,
+      pendingActions: [quoteFailedAction, sampleAction1],
+    }) as ResolutionMatch;
+    expect(isMatch(o)).toBe(true);
+    expect(o.actionId).toBe(quoteFailedAction.id);
+    expect(o.option.id).toBe('retry');
+    expect(o.matchedActionVia).toBe('auto_target');
+  });
+
+  it('picks the NEWEST matching action when several match', () => {
+    // Two QUOTE_FAILED actions, most-recent-first. "abandon" names an option in
+    // both; the newest (head of the list) wins.
+    const newer = { ...quoteFailedAction, id: '44444444-4444-4444-8444-444444444444' };
+    const older = { ...quoteFailedAction, id: '55555555-5555-4555-8555-555555555555' };
+    const o = parseHumanActionResolution({
+      ...ridaaMsg('abandon'),
+      groupChatId: GROUP_ID,
+      authorisedResolvers: ALLOWLIST,
+      pendingActions: [newer, older],
+    }) as ResolutionMatch;
+    expect(o.actionId).toBe(newer.id);
+    expect(o.option.id).toBe('abandon');
+  });
+
+  it('still returns action_ambiguous when no pending option is named (bare "1")', () => {
+    const o = parseHumanActionResolution({
+      ...ridaaMsg('1'),
+      groupChatId: GROUP_ID,
+      authorisedResolvers: ALLOWLIST,
+      pendingActions: [quoteFailedAction, sampleAction1],
+    });
+    if (!isMatch(o)) {
+      expect(o.reason).toBe('action_ambiguous');
+      expect(o.resolverPhone).toBe(RIDAA);
+    }
   });
 });
 

@@ -40,6 +40,17 @@ const DEFAULT_WINDOW_MIN = 30;
 const DEFAULT_LOOP_MIN_TURNS = 5;
 const LOOP_DISTINCT_AGENTS = 2;
 
+/**
+ * A `channel.*` fromRole is an inbound CUSTOMER message relayed by a channel
+ * adapter (channel.whatsapp, channel.intake …), not an autonomous agent. A
+ * long back-and-forth between `channel.whatsapp` and `sales-agent` is just a
+ * normal customer conversation, NOT an agent ping-pong loop — excluding these
+ * pairs kills the AGENT_LOOP_DETECTED false-positive Achraf hit on 07-06.
+ */
+function isChannelRole(role: string): boolean {
+  return role.startsWith('channel.');
+}
+
 export interface ArbitrationOptions {
   db: Database;
   /** Override the tick cadence (ms). Default 5 minutes. */
@@ -158,13 +169,19 @@ async function findLoopCandidates(
       sql`count(*) >= ${opts.loopMinTurns} AND count(distinct ${agentMessages.fromRole}) = ${LOOP_DISTINCT_AGENTS}`,
     );
 
-  return rows
-    .filter((r): r is typeof r & { correlationId: string } => r.correlationId !== null)
-    .map((r) => ({
-      correlationId: r.correlationId,
-      totalTurns: r.totalTurns,
-      distinctAgents: r.distinctAgents.split(',').sort(),
-    }));
+  return (
+    rows
+      .filter((r): r is typeof r & { correlationId: string } => r.correlationId !== null)
+      .map((r) => ({
+        correlationId: r.correlationId,
+        totalTurns: r.totalTurns,
+        distinctAgents: r.distinctAgents.split(',').sort(),
+      }))
+      // Drop customer conversations: a pair where either side is a channel
+      // adapter (channel.whatsapp ↔ sales-agent) is inbound customer traffic,
+      // not an agent loop. Only true agent↔agent pairs are real loops.
+      .filter((c) => !c.distinctAgents.some(isChannelRole))
+  );
 }
 
 /**

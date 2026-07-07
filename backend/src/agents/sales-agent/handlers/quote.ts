@@ -30,6 +30,11 @@ import {
   type FormulePricingLine,
 } from '../formatters.js';
 import type { SalesHandlerCtx } from './context.js';
+import {
+  continueComparisonAfterDelivery,
+  continueComparisonAfterPreview,
+  consumeComparisonPending,
+} from './comparison-continuation.js';
 
 /**
  * Maxance Operator (M8.T4) produced a price preview. Format a deterministic
@@ -63,6 +68,21 @@ export async function handleQuotePreviewReady(
   // fallback heuristic resolves the wrong id (2026-07-02 pipeline verify).
   const leadId = payload.leadId ?? ctx.leadIdFromEnvelope(envelope);
   if (!leadId) return { ok: false, error: 'no leadId available' };
+
+  // Comparison 2nd-leg gate (2026-07-07): if the after-delivery continuation
+  // armed this lead, these prices are the 2nd variant of a comparison the
+  // customer already accepted — auto-CONFIRM it instead of re-sending the price
+  // menu. Single-use marker, so normal first-quote previews never enter here.
+  if (await consumeComparisonPending(leadId)) {
+    const handled = await continueComparisonAfterPreview(ctx, {
+      leadId,
+      customerId: payload.customerId,
+    });
+    if (handled) {
+      return { ok: true, result: { comparisonAutoConfirmed: true, quoteId: payload.quoteId } };
+    }
+    // Fell through (no 2nd variant after all) — send the menu as usual.
+  }
 
   // Pick the channel the customer last used (or the most recent outbound
   // channel if they haven't replied yet). Default to WhatsApp — the
@@ -554,5 +574,16 @@ export async function handleDevisPdfReceived(
     { devisNumber: payload.devisNumber, leadId, deliveries },
     'sales-agent: devis PDF delivered to customer',
   );
+
+  // Two-devis comparison auto-continuation (2026-07-07): if this delivery was
+  // the 1st of a promised comparison, wake the agent to send the 2nd devis
+  // instead of going idle until the customer complains. Best-effort — never
+  // let it undo the delivery just logged above.
+  await continueComparisonAfterDelivery(ctx, {
+    leadId,
+    customerId: quote.customerId,
+    devisNumber: payload.devisNumber,
+  });
+
   return { ok: true, result: { devisNumber: payload.devisNumber, deliveries } };
 }

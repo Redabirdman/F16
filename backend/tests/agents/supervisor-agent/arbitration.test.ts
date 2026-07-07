@@ -114,6 +114,29 @@ d('startArbitration.tickOnce', () => {
     }
   });
 
+  it('does NOT flag a customer conversation (channel.* ↔ agent)', async () => {
+    // A normal WhatsApp customer conversation appears as many alternations
+    // between `channel.whatsapp` (inbound relay) and `sales-agent` — exactly
+    // 2 distinct fromRole values, so it would trip the raw 2-agent detector.
+    // The channel-role exclusion must keep it OUT (07-06 false positive).
+    await seedLoop('corr-customer', [
+      ['channel.whatsapp', 'sales-agent'],
+      ['sales-agent', 'channel.whatsapp'],
+      ['channel.whatsapp', 'sales-agent'],
+      ['sales-agent', 'channel.whatsapp'],
+      ['channel.whatsapp', 'sales-agent'],
+      ['sales-agent', 'channel.whatsapp'],
+    ]);
+    const handle = startArbitration({ db, intervalMs: 3_600_000 });
+    try {
+      const result = await handle.tickOnce();
+      expect(result.scanned).toBe(0);
+      expect(result.flagged).toBe(0);
+    } finally {
+      handle.stop();
+    }
+  });
+
   it('does NOT flag below the minimum turn threshold', async () => {
     await seedLoop('corr-tiny', [
       ['agent-A', 'agent-B'],

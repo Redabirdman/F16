@@ -63,14 +63,47 @@ const KIND_ALIASES: ReadonlyArray<{ words: readonly RegExp[]; kind: HumanActionO
   },
 ];
 
+/**
+ * Deterministic text→option match for auto-targeting. Given one action's
+ * options and the (id-stripped) reply body, decide whether the reply clearly
+ * NAMES one of the options — either by the option's own label ("Retry the
+ * quote") or by a French/English kind alias ("approve"/"refuser"). Numeric is
+ * deliberately excluded here: a bare "1" can't disambiguate between actions
+ * whose option lists differ. Returns the matched option + how it matched, or
+ * undefined when the reply doesn't clearly name any of these options.
+ */
+function matchOptionByText(
+  options: readonly HumanActionOption[],
+  strippedLower: string,
+): { option: HumanActionOption; via: 'label' | 'kind_alias' } | undefined {
+  // Strongest signal: the reply contains an option's exact label text. Skip
+  // very short labels (< 3 chars, e.g. "OK") to avoid accidental substring hits.
+  const byLabel = options.find(
+    (o) => o.label && o.label.trim().length >= 3 && strippedLower.includes(o.label.toLowerCase()),
+  );
+  if (byLabel) return { option: byLabel, via: 'label' };
+  for (const alias of KIND_ALIASES) {
+    if (alias.words.some((rx) => rx.test(strippedLower))) {
+      const chosen = options.find((o) => o.kind === alias.kind);
+      if (chosen) return { option: chosen, via: 'kind_alias' };
+    }
+  }
+  return undefined;
+}
+
 /** Result of a successful parse — the webhook applies this. */
 export interface ResolutionMatch {
   actionId: string;
   option: HumanActionOption;
-  /** "uuid" | "short_ref" | "latest_pending" — useful for audit logs. */
-  matchedActionVia: 'uuid' | 'short_ref' | 'latest_pending';
-  /** "numeric" | "kind_alias" | "freeform_revise" — same. */
-  matchedOptionVia: 'numeric' | 'kind_alias' | 'freeform_revise';
+  /**
+   * "uuid" | "short_ref" | "latest_pending" | "auto_target" — useful for audit
+   * logs. `auto_target` = several actions were pending with no id in the body,
+   * but the reply named one action's option ("Retry the quote"), so we targeted
+   * the NEWEST pending action that matched instead of giving up as ambiguous.
+   */
+  matchedActionVia: 'uuid' | 'short_ref' | 'latest_pending' | 'auto_target';
+  /** "numeric" | "kind_alias" | "label" | "freeform_revise" — same. */
+  matchedOptionVia: 'numeric' | 'kind_alias' | 'label' | 'freeform_revise';
   /** Author chat id we extracted, in E.164 (e.g. "+33612345678"). */
   resolverPhone: string;
   /** Free-text feedback (the operator's own words) — set on a revise match. */
@@ -212,9 +245,37 @@ export function parseHumanActionResolution(input: ParseInput): ResolutionOutcome
       return { reason: 'no_pending_actions' };
     }
     if (input.pendingActions.length > 1) {
+      // Several actions pending, no id in the body. Before giving up as
+      // ambiguous (which drops the reply — on the sim number it even fell
+      // through into the customer conversation, 07-06), try to auto-target:
+      // if the reply NAMES an option ("Retry the quote"), pick the NEWEST
+      // pending action that offers it. pendingActions is most-recent-first.
+      const strippedLower = body
+        .replace(UUID_REGEX, '')
+        .replace(SHORT_REF_REGEX, '')
+        .trim()
+        .toLowerCase();
+      for (const candidate of input.pendingActions) {
+        const hit = matchOptionByText(
+          candidate.options as readonly HumanActionOption[],
+          strippedLower,
+        );
+        if (hit) {
+          return {
+            actionId: candidate.id,
+            option: hit.option,
+            matchedActionVia: 'auto_target',
+            matchedOptionVia: hit.via,
+            resolverPhone,
+          };
+        }
+      }
+      // Genuinely can't tell which action — surface resolverPhone so the caller
+      // can log it / hand to the LLM rather than silently dropping the reply.
       return {
         reason: 'action_ambiguous',
         detail: `${input.pendingActions.length}_pending`,
+        resolverPhone,
       };
     }
     const head = input.pendingActions[0];
@@ -243,21 +304,19 @@ export function parseHumanActionResolution(input: ParseInput): ResolutionOutcome
     return { reason: 'option_not_recognised', detail: `numeric:${numericMatch[1]}` };
   }
 
-  // 6. Text alias — match against the option's kind via French/English aliases.
+  // 6. Text — prefer an exact option-LABEL name ("Retry the quote" vs
+  //    "Do it manually", both kind:approve, so the kind alias alone can't tell
+  //    them apart), then fall back to French/English kind aliases.
   const lower = stripped.toLowerCase();
-  for (const alias of KIND_ALIASES) {
-    if (alias.words.some((rx) => rx.test(lower))) {
-      const chosen = options.find((o) => o.kind === alias.kind);
-      if (chosen) {
-        return {
-          actionId: action.id,
-          option: chosen,
-          matchedActionVia,
-          matchedOptionVia: 'kind_alias',
-          resolverPhone,
-        };
-      }
-    }
+  const byText = matchOptionByText(options, lower);
+  if (byText) {
+    return {
+      actionId: action.id,
+      option: byText.option,
+      matchedActionVia,
+      matchedOptionVia: byText.via,
+      resolverPhone,
+    };
   }
 
   // 7. No deterministic match. Free-form replies ("approved", "redo the speed

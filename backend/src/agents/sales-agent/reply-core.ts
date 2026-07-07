@@ -146,7 +146,16 @@ export interface GenerateSalesReplyDeps {
  *                 Mirrors the `{ ok:false, error }` shapes the agent returned.
  */
 export type GenerateSalesReplyResult =
-  | { outcome: 'reply'; replyText: string; customerId: string; leadId: string }
+  | {
+      outcome: 'reply';
+      replyText: string;
+      customerId: string;
+      leadId: string;
+      /** Dotted registry names of any tools the model invoked this turn (e.g.
+       *  ['quote.request','quote.confirm']). Used by the comparison-continuation
+       *  path to tell "produced the next devis" from "just chatted". */
+      toolsInvoked: string[];
+    }
   | { outcome: 'blocked'; humanActionId: string; reasons: string[] }
   | { outcome: 'skip'; reason: string }
   | { outcome: 'error'; error: string };
@@ -412,5 +421,11 @@ export async function generateSalesReply(
     return { outcome: 'blocked', humanActionId: action.id, reasons: compliance.reasons };
   }
 
-  return { outcome: 'reply', replyText: draft, customerId: customer.id, leadId: lead.id };
+  return {
+    outcome: 'reply',
+    replyText: draft,
+    customerId: customer.id,
+    leadId: lead.id,
+    toolsInvoked: llmResult.toolCalls.map((t) => t.toolName),
+  };
 }
