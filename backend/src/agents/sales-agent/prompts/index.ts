@@ -90,6 +90,21 @@ export function buildTurnContextFragment(ctx: SalesAgentTurnContext): SystemFrag
   const lines: string[] = [];
   lines.push('# Contexte de cette conversation');
   lines.push('');
+  // Today's REAL date — without it the model computed "il y a 2 semaines"
+  // from its training-era sense of time and told a customer "19 décembre
+  // 2024" in July 2026 (live find). French locale, Paris timezone (customers
+  // are in France). Lives in the per-turn fragment: the cached prefix must
+  // never contain a changing value.
+  lines.push(
+    `- Date du jour : ${new Date().toLocaleDateString('fr-FR', {
+      weekday: 'long',
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric',
+      timeZone: 'Europe/Paris',
+    })}`,
+  );
+  lines.push('');
   lines.push('## Client');
   if (ctx.customer.civility) lines.push(`- Civilité : ${ctx.customer.civility}`);
   if (ctx.customer.fullName) lines.push(`- Nom : ${ctx.customer.fullName}`);

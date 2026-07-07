@@ -284,7 +284,9 @@ describe('ExtensionClient — error path', () => {
 
   it('throws no_active_connection when no extension is connected', async () => {
     const port = await freePort();
-    const client = new ExtensionClient({ port, timeoutMs: 1_000 });
+    // reconnectGraceMs 0: production waits up to 60s for the MV3 service
+    // worker to reconnect (2026-07-07 fix) — the test wants the immediate path.
+    const client = new ExtensionClient({ port, timeoutMs: 1_000, reconnectGraceMs: 0 });
     await client.start();
     await expect(client.ensureLoggedIn()).rejects.toThrow(/no_active_connection/);
     await client.stop();

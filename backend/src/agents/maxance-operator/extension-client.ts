@@ -195,6 +195,12 @@ export interface ExtensionClientConfig {
   port?: number;
   /** Default per-command timeout in ms. Default 6 min. */
   timeoutMs?: number;
+  /**
+   * How long a non-ping command waits for the extension WS to (re)connect
+   * before failing with no_active_connection. Default 60s — covers the MV3
+   * service-worker suspend/reconnect cycle. Tests pass 0.
+   */
+  reconnectGraceMs?: number;
 }
 
 type PendingEntry = {
@@ -210,6 +216,7 @@ type PendingEntry = {
 export class ExtensionClient {
   private readonly port: number;
   private readonly timeoutMs: number;
+  private readonly reconnectGraceMs: number;
   private wss: WebSocketServer | null = null;
   private socket: WsClient | null = null;
   private readonly pending = new Map<string, PendingEntry>();
@@ -217,6 +224,7 @@ export class ExtensionClient {
   constructor(cfg: ExtensionClientConfig = {}) {
     this.port = cfg.port ?? DEFAULT_WS_PORT;
     this.timeoutMs = cfg.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.reconnectGraceMs = cfg.reconnectGraceMs ?? 60_000;
   }
 
   /** Start the WS server. Idempotent. */
@@ -367,16 +375,47 @@ export class ExtensionClient {
     return this.runExclusive(cmd.kind, () => this.sendNow<R>(cmd, timeoutMs));
   }
 
-  private sendNow<R extends Response>(cmd: Command, timeoutMs?: number): Promise<R> {
-    const sock = this.socket;
+  /**
+   * Wait for the extension WS to (re)connect, up to `maxWaitMs`. The MV3
+   * service worker gets suspended by Chrome and reconnects within seconds —
+   * but a command landing inside that gap used to fail the whole quote with
+   * `no_active_connection` (live 2026-07-07: two customer quotes died in a
+   * blink-length gap while the portal was open and logged in).
+   */
+  private async waitForConnection(maxWaitMs: number): Promise<boolean> {
+    const deadline = Date.now() + maxWaitMs;
+    for (;;) {
+      const s = this.socket;
+      if (s && s.readyState === WsClient.OPEN) return true;
+      if (Date.now() >= deadline) return false;
+      await new Promise((r) => setTimeout(r, 500));
+    }
+  }
+
+  private async sendNow<R extends Response>(cmd: Command, timeoutMs?: number): Promise<R> {
+    let sock = this.socket;
     if (!sock || sock.readyState !== WsClient.OPEN) {
-      return Promise.reject(
-        new ExtensionClientError(
-          'extension_no_active_connection: no Chrome extension is connected to the backend WS',
-          'no_active_connection',
-        ),
+      // Grace window for the MV3 service-worker reconnect cycle before
+      // declaring the extension gone. Pings skip this path (send() routes
+      // them straight here, but a failed ping is cheap and shouldn't wait) —
+      // only real flow commands get the patience.
+      const grace = cmd.kind === 'ping' ? 0 : this.reconnectGraceMs;
+      const reconnected = grace > 0 ? await this.waitForConnection(grace) : false;
+      sock = this.socket;
+      if (!reconnected || !sock || sock.readyState !== WsClient.OPEN) {
+        return Promise.reject(
+          new ExtensionClientError(
+            'extension_no_active_connection: no Chrome extension is connected to the backend WS',
+            'no_active_connection',
+          ),
+        );
+      }
+      logger.info(
+        { kind: cmd.kind },
+        'extension-client: WS reconnected within the grace window — proceeding',
       );
     }
+    const sockFinal = sock;
     return new Promise<R>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(cmd.id);
@@ -396,7 +435,7 @@ export class ExtensionClient {
         timer,
       });
       try {
-        sock.send(JSON.stringify(cmd));
+        sockFinal.send(JSON.stringify(cmd));
       } catch (err) {
         this.pending.delete(cmd.id);
         clearTimeout(timer);
