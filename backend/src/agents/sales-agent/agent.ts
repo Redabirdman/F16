@@ -319,6 +319,8 @@ export class SalesAgent extends BaseAgent {
       customerId: string;
       channel: ChannelId;
       content: string;
+      /** ISO datetime of the inbound message (webhook sets it). */
+      occurredAt?: string;
     };
     if (!payload.content || payload.content.trim().length === 0) {
       return { ok: true, result: { skipped: 'empty-inbound' } };
@@ -352,6 +354,28 @@ export class SalesAgent extends BaseAgent {
       agentRole: this.role,
       agentInstance: this.instanceId,
     });
+
+    // Supersede check (2026-07-07 live: Achraf sent two messages seconds apart
+    // → two overlapping LLM turns → two near-duplicate, contradicting replies).
+    // If a NEWER inbound arrived while this reply was generating, drop this
+    // reply — the newer message's own turn sees the full history (both
+    // messages) and answers ONCE with complete context.
+    if (reply.outcome === 'reply' && payload.occurredAt) {
+      const myTs = new Date(payload.occurredAt).getTime();
+      if (Number.isFinite(myTs)) {
+        const latest = await listTurns(this.db, { customerId: payload.customerId, limit: 10 });
+        const newerInbound = latest.find(
+          (t) => t.direction === 'inbound' && t.occurredAt.getTime() > myTs,
+        );
+        if (newerInbound) {
+          logger.info(
+            { leadId, instanceId: this.instanceId },
+            'sales-agent: reply superseded by a newer inbound — dropping (the newer turn answers)',
+          );
+          return { ok: true, result: { skipped: 'superseded-by-newer-inbound' } };
+        }
+      }
+    }
 
     switch (reply.outcome) {
       case 'skip':
