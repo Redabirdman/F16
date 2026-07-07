@@ -349,6 +349,13 @@ export async function generateSalesReply(
   // quoteContext feeds the lead's REAL devis/price facts to the sentry — it was
   // judging blind and blocking devis-backed prices as "invented" (2026-07-07).
   const quoteContext = channel === 'voice' ? undefined : await buildQuoteContextLine(db, lead.id);
+  // The price MENU already sent to the customer grounds derived numbers too
+  // (pack = formule + options sums — blocked as "invented" without it).
+  const menuTurn =
+    channel === 'voice'
+      ? undefined
+      : recentTurnsDesc.find((t) => t.direction === 'outbound' && /€\/mois/.test(t.content ?? ''));
+  const sentMenuExcerpt = menuTurn?.content ?? undefined;
   const compliance = await checkComplianceFor(
     db,
     {
@@ -360,6 +367,7 @@ export async function generateSalesReply(
         leadStatus: lead.status,
         lastInboundContent: content,
         ...(quoteContext ? { quoteContext } : {}),
+        ...(sentMenuExcerpt ? { sentMenuExcerpt } : {}),
       },
     },
     // Voice = live call: run rules-only compliance (hard server rules still

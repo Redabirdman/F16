@@ -47,6 +47,14 @@ export interface ComplianceCheckInput {
      * via buildQuoteContextLine().
      */
     quoteContext?: string;
+    /**
+     * Excerpt of the price-menu message ALREADY SENT to this customer (3
+     * formules + options + pack). Numbers consistent with it — including sums
+     * like formule+options — are facts the customer has seen, not inventions.
+     * Without it the sentry blocked the pack price (8,57 = 6,01+1,09+1,48) as
+     * "invented" (live 2026-07-07 eve).
+     */
+    sentMenuExcerpt?: string;
   };
 }
 
@@ -171,8 +179,9 @@ Tu réponds STRICTEMENT par UN JSON :
 "reasons" : 1 à 2 raisons COURTES (≤ 15 mots chacune) — jamais de paragraphe.
 
 "severity" ne compte que si verdict=block :
-- "critical" = UNIQUEMENT ces 5 familles : (1) contrat/couverture de CE client affirmé conclu/actif/signé ; (2) prix personnalisé INVENTÉ alors qu'AUCUN devis n'existe dans le contexte ; (3) demande de mot de passe / code / données de paiement ; (4) conseil médical ou juridique personnalisé ; (5) IBAN/carte en clair. → le message sera RETENU et la direction devra trancher.
-- "minor" = TOUT LE RESTE, y compris : promesses de délai (même chiffrées — "deux minutes", "demain") concernant l'ENVOI ou la PRÉPARATION d'un devis/document ; approximations sur l'état du dossier ("vos deux devis" quand un seul est parti) ; style, doute, contexte flou. Le message PARTIRA et sera journalisé pour revue. Quand tu hésites, choisis "minor" : une conversation interrompue coûte plus cher qu'un message imparfait.
+- "critical" = UNIQUEMENT ces 6 familles : (1) contrat/couverture de CE client affirmé conclu/actif/signé ; (2) prix personnalisé INVENTÉ alors qu'AUCUN devis n'existe dans le contexte ; (3) demande de mot de passe / code / données de paiement ; (4) conseil médical ou juridique personnalisé ; (5) IBAN/carte en clair ; (6) message manifestement NON DESTINÉ au client (monologue interne, raisonnement de l'agent à la 3e personne). → le message sera RETENU et la direction devra trancher.
+- "minor" = TOUT LE RESTE, y compris : promesses de délai (même chiffrées — "deux minutes", "demain") concernant l'ENVOI ou la PRÉPARATION d'un devis/document ; approximations sur l'état du dossier ("vos deux devis" quand un seul est parti, "je vous les envoie maintenant") ; style, doute, contexte flou. Le message PARTIRA et sera journalisé pour revue. Quand tu hésites, choisis "minor" : une conversation interrompue coûte plus cher qu'un message imparfait.
+⚠️ PRÉSÉANCE ABSOLUE : dès que le contexte contient une ligne « Devis Maxance de CE client » ou « Menu de prix DÉJÀ ENVOYÉ », les familles (1) et (2) ne s'appliquent JAMAIS à des questions de PRIX ni d'ÉTAT D'ENVOI de devis — au pire "minor". Un prix égal à une somme de chiffres du menu (formule + options) N'EST PAS un prix inventé.
 
 Bloque ABSOLUMENT si le message :
 - Affirme que LE CONTRAT DE CE CLIENT est conclu / signé / actif / lié avant validation humaine côté Maxance. (NB : rappeler qu'un type de contrat existe est OK ; promettre que CELUI DU CLIENT est validé n'est pas OK.)
@@ -310,6 +319,9 @@ async function llmSentryCheck(
     `- Statut du lead : ${ctx.leadStatus}`,
     ctx.quoteContext
       ? `- Devis Maxance de CE client (FAITS vérifiés en base — les chiffres cohérents avec ces devis sont AUTORISÉS) : ${ctx.quoteContext}`
+      : null,
+    ctx.sentMenuExcerpt
+      ? `- Menu de prix DÉJÀ ENVOYÉ à ce client (tout chiffre qui en découle — y compris les SOMMES formule+options — est AUTORISÉ) : "${ctx.sentMenuExcerpt.slice(0, 600)}"`
       : null,
     ctx.lastInboundContent
       ? `- Dernier message client : "${ctx.lastInboundContent.slice(0, 500)}"`
