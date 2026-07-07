@@ -60,7 +60,8 @@ import {
 } from '../../db/repositories/quotes.js';
 import { setLeadStatus } from '../../db/repositories/leads.js';
 import { msUntilMaxanceOpen } from './business-hours.js';
-import { eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
+import { getRedis } from '../../queue/index.js';
 import { quotes } from '../../db/schema/index.js';
 import {
   handleSubscriptionRequested,
@@ -964,16 +965,32 @@ export class MaxanceOperatorAgent extends BaseAgent {
     // quote.request guards then refuse to relaunch ("devis déjà programmé")
     // when nothing will ever run (2026-07-05 live find). 'expired' = this
     // quote session is over; a retry means a fresh quotes row.
+    // GUARD (2026-07-07 live find): never expire a quote that already
+    // SUCCEEDED — a duplicate confirm's failure was overwriting status='ready'
+    // + a real devis number (DR0000984252) with 'expired'.
     try {
       await this.db
         .update(quotes)
         .set({ status: 'expired', rejectedAt: new Date() })
-        .where(eq(quotes.id, quoteId));
+        .where(
+          and(
+            eq(quotes.id, quoteId),
+            sql`${quotes.status} <> 'ready'`,
+            sql`${quotes.maxanceDevisNumber} IS NULL`,
+          ),
+        );
     } catch (err) {
       logger.warn(
         { quoteId, err: err instanceof Error ? err.message : String(err) },
         'maxance-operator: failed to expire quote row on QUOTE.FAILED (non-fatal)',
       );
+    }
+    // Release the duplicate-confirm in-flight marker so a legitimate retry
+    // (retry choice-executor / fresh confirm) isn't blocked for the TTL.
+    try {
+      await getRedis().del(`f16:confirm-inflight:${quoteId}`);
+    } catch {
+      // best-effort — the 10 min TTL is the fallback
     }
     await sendMessage(
       { db: this.db },

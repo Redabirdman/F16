@@ -44,6 +44,7 @@ import {
   msUntilMaxanceOpen,
   describeMaxanceReopening,
 } from '../../agents/maxance-operator/business-hours.js';
+import { getRedis } from '../../queue/index.js';
 import { logger } from '../../logger.js';
 
 export const quoteConfirmToolName = 'quote.confirm';
@@ -166,7 +167,12 @@ registerTool({
     //     newest first. The newest quote is also what the Maxance tab is
     //     parked on, so the no-input default is the correct one.
     const recentQuotes = await ctx.db
-      .select({ id: quotes.id, customerId: quotes.customerId })
+      .select({
+        id: quotes.id,
+        customerId: quotes.customerId,
+        status: quotes.status,
+        maxanceDevisNumber: quotes.maxanceDevisNumber,
+      })
       .from(quotes)
       .where(eq(quotes.leadId, input.leadId))
       .orderBy(desc(quotes.requestedAt))
@@ -187,6 +193,45 @@ registerTool({
       throw new Error('Le devis résolu appartient à un autre client — vérifie leadId/customerId.');
     }
     const quoteId = resolved.id;
+
+    // DUPLICATE-CONFIRM GUARDS (2026-07-07 live find: the LLM confirmed the
+    // same quote twice ~30s apart — the duplicate re-drove Maxance on a
+    // freshly-reset tab, failed with unknown_screen, and spammed a QUOTE_FAILED
+    // alert + a confusing "quote failed" message between the customer's
+    // "devis arrive" and the actual PDF).
+    // Guard 1: the quote already HAS a devis — nothing to confirm again.
+    if (resolved.maxanceDevisNumber || resolved.status === 'ready') {
+      throw new Error(
+        `Ce devis est DÉJÀ généré${resolved.maxanceDevisNumber ? ` (${resolved.maxanceDevisNumber})` : ''} ` +
+          `et son envoi est en cours ou fait. NE PAS relancer quote.confirm — informe le client ` +
+          `que son devis arrive (ou est arrivé).`,
+      );
+    }
+    // Guard 2: a confirm for this quote is already IN FLIGHT (Redis SETNX,
+    // 10 min TTL — the operator's whole confirm+courrier run fits well inside).
+    // Best-effort: if Redis is down we'd rather risk a duplicate than block a
+    // legitimate confirm.
+    try {
+      const inflight = await getRedis().set(
+        `f16:confirm-inflight:${quoteId}`,
+        '1',
+        'EX',
+        600,
+        'NX',
+      );
+      if (inflight === null) {
+        throw new Error(
+          `La confirmation de ce devis est DÉJÀ en cours — le PDF arrive dans ~1 min. ` +
+            `NE PAS relancer quote.confirm ; dis au client que son devis est en préparation.`,
+        );
+      }
+    } catch (err) {
+      if (err instanceof Error && /DÉJÀ en cours/.test(err.message)) throw err;
+      logger.warn(
+        { quoteId, err: err instanceof Error ? err.message : String(err) },
+        'quote.confirm: in-flight guard unavailable (redis) — proceeding',
+      );
+    }
 
     // 2. Assemble the subscriber block — explicit input wins, customer-row
     //    PII (decrypted) is the default. The stored address is a free-shape

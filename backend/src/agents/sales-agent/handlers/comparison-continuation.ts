@@ -35,8 +35,11 @@ import type { SalesHandlerCtx } from './context.js';
 
 /** Sentinel the LLM returns when there is nothing more to send. */
 export const NO_CONTINUATION = '__NO_CONTINUATION__';
-/** Outbound devis-delivery messages carry `Réf. DR…` (see handleDevisPdfReceived). */
-const DELIVERED_MARKER = /Réf\.\s*DR/i;
+/** Outbound devis-delivery messages carry `Réf. DR…` (see handleDevisPdfReceived).
+ *  Capture the DR number: one delivery lands as TWO turns (WhatsApp + email),
+ *  so the cap must count DISTINCT devis, not marker-bearing turns (live
+ *  2026-07-07: 2 delivered devis read as 4 turns → premature cap). */
+const DELIVERED_MARKER = /Réf\.\s*(DR\d+)/gi;
 /** Hard backstop: never self-continue past this many delivered devis on a lead. */
 const MAX_DEVIS_PER_LEAD = 3;
 /** How long a "second leg in flight" marker lives — one request→preview window. */
@@ -81,8 +84,14 @@ async function countDeliveredDevis(
   leadId: string,
 ): Promise<number> {
   const turns = await listTurns(ctx.db, { customerId, leadId, limit: 50 });
-  return turns.filter((t) => t.direction === 'outbound' && DELIVERED_MARKER.test(t.content ?? ''))
-    .length;
+  const devis = new Set<string>();
+  for (const t of turns) {
+    if (t.direction !== 'outbound') continue;
+    for (const m of (t.content ?? '').matchAll(DELIVERED_MARKER)) {
+      if (m[1]) devis.add(m[1].toUpperCase());
+    }
+  }
+  return devis.size;
 }
 
 /**
@@ -110,8 +119,16 @@ async function pickChannel(
   customerId: string,
   leadId: string,
 ): Promise<ChannelId> {
-  const recent = await listTurns(ctx.db, { customerId, leadId, limit: 5 });
-  return coerceSendableChannel(recent[0]?.channel as ChannelId | undefined);
+  // Prefer the customer's OWN last channel (most recent INBOUND turn) — the
+  // PDF delivery writes outbound turns on BOTH whatsapp + email, and using
+  // recent[0] blindly sent the "je prépare le 2e" ack by email while the
+  // conversation lived on WhatsApp (live 2026-07-07). Fall back to the most
+  // recent turn of any direction, then the WhatsApp default.
+  const recent = await listTurns(ctx.db, { customerId, leadId, limit: 10 });
+  const lastInbound = recent.find((t) => t.direction === 'inbound');
+  return coerceSendableChannel(
+    (lastInbound?.channel ?? recent[0]?.channel) as ChannelId | undefined,
+  );
 }
 
 /**

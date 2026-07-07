@@ -51,6 +51,17 @@ function isChannelRole(role: string): boolean {
   return role.startsWith('channel.');
 }
 
+/**
+ * Service/driver agents that operate strict request→response protocols with
+ * the sales-agent (QUOTE.REQUESTED → PREVIEW_READY → CONFIRM_REQUESTED →
+ * READY/FAILED …). A busy quote — especially a two-devis comparison —
+ * legitimately exchanges 5+ messages on one correlation within minutes, which tripped the
+ * detector live on 2026-07-07 ("5 messages entre maxance-operator ↔
+ * sales-agent"). These flows can stall but cannot ping-pong; stalls are the
+ * followthrough watchdog's job (QUOTE_STUCK), not arbitration's.
+ */
+const SERVICE_ROLES: ReadonlySet<string> = new Set(['maxance-operator']);
+
 export interface ArbitrationOptions {
   db: Database;
   /** Override the tick cadence (ms). Default 5 minutes. */
@@ -177,10 +188,11 @@ async function findLoopCandidates(
         totalTurns: r.totalTurns,
         distinctAgents: r.distinctAgents.split(',').sort(),
       }))
-      // Drop customer conversations: a pair where either side is a channel
-      // adapter (channel.whatsapp ↔ sales-agent) is inbound customer traffic,
-      // not an agent loop. Only true agent↔agent pairs are real loops.
-      .filter((c) => !c.distinctAgents.some(isChannelRole))
+      // Drop customer conversations (channel adapter pairs) and service-driver
+      // pairs (maxance-operator ↔ sales-agent request/response pipeline):
+      // neither is an agent ping-pong loop. Only true peer agent↔agent pairs
+      // are real loops.
+      .filter((c) => !c.distinctAgents.some((r) => isChannelRole(r) || SERVICE_ROLES.has(r)))
   );
 }
 

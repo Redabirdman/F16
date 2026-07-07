@@ -137,6 +137,29 @@ d('startArbitration.tickOnce', () => {
     }
   });
 
+  it('does NOT flag the quote pipeline (maxance-operator ↔ sales-agent)', async () => {
+    // A two-devis comparison legitimately exchanges 5+ request/response
+    // messages on one correlation within minutes (live 2026-07-07 false
+    // positive). Service-driver pairs are excluded — stalls are the
+    // followthrough watchdog's job, not arbitration's.
+    await seedLoop('corr-pipeline', [
+      ['sales-agent', 'maxance-operator'],
+      ['maxance-operator', 'sales-agent'],
+      ['sales-agent', 'maxance-operator'],
+      ['maxance-operator', 'sales-agent'],
+      ['sales-agent', 'maxance-operator'],
+      ['maxance-operator', 'sales-agent'],
+    ]);
+    const handle = startArbitration({ db, intervalMs: 3_600_000 });
+    try {
+      const result = await handle.tickOnce();
+      expect(result.scanned).toBe(0);
+      expect(result.flagged).toBe(0);
+    } finally {
+      handle.stop();
+    }
+  });
+
   it('does NOT flag below the minimum turn threshold', async () => {
     await seedLoop('corr-tiny', [
       ['agent-A', 'agent-B'],
