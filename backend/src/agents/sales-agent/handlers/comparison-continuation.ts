@@ -85,6 +85,26 @@ async function countDeliveredDevis(
     .length;
 }
 
+/**
+ * Cheap deterministic pre-gate so the (LLM) continuation turn only runs when the
+ * conversation actually shows two-devis / comparison intent — the customer asked
+ * for it or the agent promised it. Skips the LLM entirely for the common
+ * single-devis flow. Broad on purpose: a false positive just costs one turn that
+ * returns the NO_CONTINUATION sentinel; a false negative reverts to the old
+ * "customer had to complain" behaviour, so we cast wide.
+ */
+const COMPARISON_INTENT =
+  /\bdeux devis\b|\bles deux\b|\b2e? devis\b|\bsecond devis\b|\bdeuxi[eè]me devis\b|\bj['’ ]?encha[iî]ne\b|\bavec et sans\b|\bcomparer\b|\bcomparat/i;
+
+async function conversationShowsComparison(
+  ctx: SalesHandlerCtx,
+  customerId: string,
+  leadId: string,
+): Promise<boolean> {
+  const turns = await listTurns(ctx.db, { customerId, leadId, limit: 20 });
+  return turns.some((t) => COMPARISON_INTENT.test(t.content ?? ''));
+}
+
 async function pickChannel(
   ctx: SalesHandlerCtx,
   customerId: string,
@@ -156,6 +176,11 @@ export async function continueComparisonAfterDelivery(
         { leadId: args.leadId, delivered },
         'comparison-continuation: delivered-devis cap reached; not continuing',
       );
+      return;
+    }
+    // Cheap gate: skip the LLM turn entirely unless the conversation shows
+    // comparison intent — the common single-devis delivery does nothing.
+    if (!(await conversationShowsComparison(ctx, args.customerId, args.leadId))) {
       return;
     }
     const prompt =
