@@ -55,6 +55,19 @@ export interface ComplianceCheckInput {
      * "invented" (live 2026-07-07 eve).
      */
     sentMenuExcerpt?: string;
+    /**
+     * Recent conversation history (CLIENT/AGENT lines, most recent last).
+     * THE robustness fix (Ridaa 2026-07-07 eve): judging drafts with only the
+     * last inbound made the sentry invent context errors ("le client n'a
+     * jamais demandé de second devis" — he had, three turns earlier).
+     */
+    conversationExcerpt?: string;
+    /**
+     * This turn was triggered by the SYSTEM (e.g. the comparison
+     * auto-continuation), not by a customer message — so the "last message"
+     * is an internal instruction and must not be judged as customer input.
+     */
+    systemTriggered?: boolean;
   };
 }
 
@@ -323,7 +336,13 @@ async function llmSentryCheck(
     ctx.sentMenuExcerpt
       ? `- Menu de prix DÉJÀ ENVOYÉ à ce client (tout chiffre qui en découle — y compris les SOMMES formule+options — est AUTORISÉ) : "${ctx.sentMenuExcerpt.slice(0, 600)}"`
       : null,
-    ctx.lastInboundContent
+    ctx.conversationExcerpt
+      ? `- HISTORIQUE RÉCENT de la conversation (SOURCE DE VÉRITÉ pour "le client a demandé X" — vérifie ici avant d'affirmer qu'une demande n'existe pas) :\n${ctx.conversationExcerpt.slice(0, 2500)}`
+      : null,
+    ctx.systemTriggered
+      ? `- ⚠️ Ce tour a été déclenché par le SYSTÈME (suite automatique interne) — il n'y a PAS de "dernier message client" ; ne conclus JAMAIS "message non destiné au client" ou "demande inexistante" à cause de ce déclencheur : juge le draft sur l'HISTORIQUE ci-dessus.`
+      : null,
+    ctx.lastInboundContent && !ctx.systemTriggered
       ? `- Dernier message client : "${ctx.lastInboundContent.slice(0, 500)}"`
       : null,
     serverHits.length > 0

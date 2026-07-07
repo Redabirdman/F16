@@ -287,10 +287,11 @@ export async function generateSalesReply(
   // only the context already in the prompt (history + recalled facts), so voice
   // runs a single-shot Haiku call. WhatsApp keeps the full toolset.
   const tools = channel === 'voice' ? [] : listTools({ allowed: SALES_AGENT_TOOL_NAMES });
+  const systemFragments = await buildSalesAgentSystemFragments(db, ctx);
   const _tLlm0 = Date.now();
   const llmResult = await callClaudeWithTools({
     tier: channel === 'voice' ? 'haiku' : 'sonnet',
-    systemFragments: await buildSalesAgentSystemFragments(db, ctx),
+    systemFragments,
     userPrompt: content,
     tools,
     toolContext: {
@@ -356,25 +357,120 @@ export async function generateSalesReply(
       ? undefined
       : recentTurnsDesc.find((t) => t.direction === 'outbound' && /€\/mois/.test(t.content ?? ''));
   const sentMenuExcerpt = menuTurn?.content ?? undefined;
-  const compliance = await checkComplianceFor(
-    db,
-    {
-      draft,
-      ctx: {
-        customerId: customer.id,
-        channel,
-        productLine: (lead.productLine ?? 'car') as 'scooter' | 'car',
-        leadStatus: lead.status,
-        lastInboundContent: content,
-        ...(quoteContext ? { quoteContext } : {}),
-        ...(sentMenuExcerpt ? { sentMenuExcerpt } : {}),
-      },
-    },
-    // Voice = live call: run rules-only compliance (hard server rules still
-    // fail-closed) and skip the LLM sentry round-trip, which would add multiple
-    // seconds of dead air per turn. WhatsApp keeps the full two-layer check.
-    { rulesOnly: channel === 'voice' },
-  );
+  // THE robustness fix (Ridaa 2026-07-07 eve): the sentry judged drafts with
+  // no history and invented context errors ("le client n'a jamais demandé de
+  // second devis" — he had, three turns earlier). Give it the recent
+  // conversation, and flag SYSTEM-triggered turns (comparison continuation)
+  // whose "last message" is an internal instruction, not customer input.
+  const conversationExcerpt =
+    channel === 'voice'
+      ? undefined
+      : recentTurns
+          .slice(-8)
+          .map(
+            (t) =>
+              `${t.direction === 'inbound' ? 'CLIENT' : 'AGENT'}: ${(t.content ?? '').slice(0, 180)}`,
+          )
+          .join('\n');
+  const systemTriggered = /^\[CONTINUATION AUTOMATIQUE/.test(content);
+  const complianceCtx = {
+    customerId: customer.id,
+    channel,
+    productLine: (lead.productLine ?? 'car') as 'scooter' | 'car',
+    leadStatus: lead.status,
+    lastInboundContent: content,
+    ...(quoteContext ? { quoteContext } : {}),
+    ...(sentMenuExcerpt ? { sentMenuExcerpt } : {}),
+    ...(conversationExcerpt ? { conversationExcerpt } : {}),
+    ...(systemTriggered ? { systemTriggered } : {}),
+  };
+  // Voice = live call: rules-only compliance (hard server rules still
+  // fail-closed), no LLM sentry round-trip (seconds of dead air per turn).
+  const rulesOnly = { rulesOnly: channel === 'voice' };
+  let finalDraft = draft;
+  let compliance = await checkComplianceFor(db, { draft, ctx: complianceCtx }, rulesOnly);
+
+  // SELF-CORRECTION (Ridaa 2026-07-07: "the system should manage by itself").
+  // A refused draft gets ONE automatic rewrite with the refusal reasons as
+  // feedback, then re-judged. Most blocks are generation flaws (internal
+  // monologue leaked as the reply, sloppy phrasing) — the agent fixes its own
+  // message and the customer never waits on a human. Only a rewrite that is
+  // STILL refused escalates to management. Tools are disabled on the rewrite:
+  // attempt 1 already executed its side effects (quote.request etc.) and the
+  // rewrite must only rephrase the MESSAGE, never re-drive Maxance.
+  if (compliance.verdict === 'block' && channel !== 'voice') {
+    logger.info(
+      { leadId: lead.id, reasons: compliance.reasons },
+      'sales-agent: draft refused — attempting one self-correction rewrite',
+    );
+    try {
+      const retry = await callClaudeWithTools({
+        tier: 'sonnet',
+        systemFragments,
+        userPrompt:
+          `${content}\n\n[SYSTÈME — ta réponse précédente a été REFUSÉE par la conformité pour : ` +
+          `${compliance.reasons.join(' ; ').slice(0, 500)}. Rédige une NOUVELLE réponse destinée au ` +
+          `CLIENT, conforme, naturelle, sans mentionner ce refus ni cette instruction. N'appelle aucun outil.]`,
+        tools: [],
+        toolContext: {
+          db,
+          agentRole,
+          agentInstance,
+          correlationId: lead.id,
+          customerId: customer.id,
+          leadId: lead.id,
+        },
+        maxTokens: REPLY_TOKEN_BUDGET,
+        logContext: {
+          agent: 'sales-agent',
+          instanceId: agentInstance,
+          leadId,
+          selfCorrection: true,
+        },
+      });
+      const retryDraft = cleanLLMReply(retry.text);
+      if (retryDraft && retryDraft.length > 0 && retryDraft.length <= MAX_REPLY_CHARS) {
+        const recheck = await checkComplianceFor(
+          db,
+          { draft: retryDraft, ctx: complianceCtx },
+          rulesOnly,
+        );
+        if (recheck.verdict === 'pass') {
+          logger.info(
+            { leadId: lead.id },
+            'sales-agent: self-correction passed compliance — sending the rewrite',
+          );
+          try {
+            await appendAudit(db, {
+              actorType: 'agent',
+              actorId: `${agentRole}#${agentInstance}`,
+              action: 'compliance.self-corrected',
+              targetType: 'lead',
+              targetId: lead.id,
+              meta: {
+                refusedReasons: compliance.reasons,
+                refusedDraft: draft.slice(0, 400),
+                sentDraft: retryDraft.slice(0, 400),
+              },
+            });
+          } catch {
+            // best-effort
+          }
+          finalDraft = retryDraft;
+          compliance = recheck;
+        } else {
+          // Escalate the REWRITE (the better of the two attempts) below.
+          finalDraft = retryDraft;
+          compliance = recheck;
+        }
+      }
+    } catch (err) {
+      logger.warn(
+        { leadId: lead.id, err: err instanceof Error ? err.message : String(err) },
+        'sales-agent: self-correction rewrite failed — escalating the original block',
+      );
+    }
+  }
 
   if (compliance.verdict === 'block') {
     logger.warn(
@@ -407,7 +503,7 @@ export async function generateSalesReply(
       // anyway" blind). humanize.ts splits it back off before rendering.
       summary:
         `Sales Agent draft bloqué (${compliance.ruleHits.join(', ') || 'LLM'}). Raisons : ${compliance.reasons.join(' ; ')}` +
-        `${HUMAN_ACTION_DRAFT_MARKER}${draft}`,
+        `${HUMAN_ACTION_DRAFT_MARKER}${finalDraft}`,
       // English labels — these render verbatim in the management WA group.
       options: [
         { id: 'send_as_is', label: 'Send it anyway', kind: 'approve' },
@@ -467,7 +563,7 @@ export async function generateSalesReply(
         action: 'compliance.flagged',
         targetType: 'lead',
         targetId: lead.id,
-        meta: { reasons: compliance.reasons, draft: draft.slice(0, 500) },
+        meta: { reasons: compliance.reasons, draft: finalDraft.slice(0, 500) },
       });
     } catch {
       // best-effort — the send matters more than the audit row
@@ -476,7 +572,7 @@ export async function generateSalesReply(
 
   return {
     outcome: 'reply',
-    replyText: draft,
+    replyText: finalDraft,
     customerId: customer.id,
     leadId: lead.id,
     toolsInvoked: llmResult.toolCalls.map((t) => t.toolName),
