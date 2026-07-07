@@ -209,15 +209,26 @@ export class WahaClient {
     });
   }
 
-  /** Toggle WAHA's "typing" indicator on/off. Best-effort — failures logged, not thrown. */
+  /**
+   * Toggle WAHA's "typing" indicator on/off. Best-effort, SINGLE attempt —
+   * a cosmetic indicator is never worth the retry/backoff latency of
+   * `request()` (a WAHA blip would add seconds before every message), and
+   * failures are logged, never thrown.
+   */
   async setTyping(chatId: string, on: boolean): Promise<void> {
     try {
-      await this.request<unknown>(on ? '/api/startTyping' : '/api/stopTyping', {
-        session: this.session,
-        chatId,
+      const headers: Record<string, string> = { 'content-type': 'application/json' };
+      if (this.apiKey) headers['x-api-key'] = this.apiKey;
+      await this.fetchImpl(`${this.baseUrl}${on ? '/api/startTyping' : '/api/stopTyping'}`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ session: this.session, chatId }),
       });
     } catch (err) {
-      logger.warn({ err, on }, 'waha: setTyping failed (non-fatal)');
+      logger.warn(
+        { err: err instanceof Error ? err.message : String(err), on },
+        'waha: setTyping failed (non-fatal)',
+      );
     }
   }
 

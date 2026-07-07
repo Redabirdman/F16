@@ -34,12 +34,18 @@ const seenRequests: SeenRequest[] = [];
  */
 let respond: (req: IncomingMessage, res: ServerResponse, body: unknown) => void;
 
+/** Typing-indicator calls (2026-07-07 human-feel) are cosmetic — exclude them
+ *  from send-sequence assertions AND from the fake-id counter so receipts stay
+ *  deterministic regardless of how many typing toggles surround a send. */
+const isTypingUrl = (url: string): boolean => /\/api\/(start|stop)Typing/.test(url);
+const sends = (): SeenRequest[] => seenRequests.filter((r) => !isTypingUrl(r.url));
+
 function defaultRespond(_req: IncomingMessage, res: ServerResponse): void {
   res.statusCode = 200;
   res.setHeader('content-type', 'application/json');
   res.end(
     JSON.stringify({
-      id: { _serialized: `wamid.fake-${seenRequests.length}` },
+      id: { _serialized: `wamid.fake-${sends().length}` },
       ack: 1,
       timestamp: Math.floor(Date.now() / 1000),
     }),
@@ -93,7 +99,9 @@ function buildClient(): WahaClient {
 }
 
 function buildAdapter(): WhatsAppAdapter {
-  return new WhatsAppAdapter({ client: buildClient() });
+  // sleepMs skipped — the typing pause is real-time (1-3.5s per text block)
+  // and would slow every test for no assertion value.
+  return new WhatsAppAdapter({ client: buildClient(), sleepMs: () => Promise.resolve() });
 }
 
 describe('phoneToChatId', () => {
@@ -114,8 +122,8 @@ describe('WhatsAppAdapter.send — text', () => {
       body: [{ type: 'text', text: 'Bonjour Marie' }],
     });
 
-    expect(seenRequests).toHaveLength(1);
-    const req = seenRequests[0]!;
+    expect(sends()).toHaveLength(1);
+    const req = sends()[0]!;
     expect(req.url).toBe('/api/sendText');
     expect(req.method).toBe('POST');
     expect(req.headers['x-api-key']).toBe('test-key');
@@ -139,7 +147,7 @@ describe('WhatsAppAdapter.send — text', () => {
       replyTo: { channel: 'whatsapp', externalId: 'wamid.prev-123' },
     });
 
-    expect(seenRequests[0]?.body).toMatchObject({
+    expect(sends()[0]?.body).toMatchObject({
       chatId: '33612345678@c.us',
       text: 'Re: votre devis',
       replyTo: 'wamid.prev-123',
@@ -160,8 +168,8 @@ describe('WhatsAppAdapter.send — media', () => {
       ],
     });
 
-    expect(seenRequests[0]?.url).toBe('/api/sendImage');
-    expect(seenRequests[0]?.body).toMatchObject({
+    expect(sends()[0]?.url).toBe('/api/sendImage');
+    expect(sends()[0]?.body).toMatchObject({
       chatId: '33612345678@c.us',
       file: { url: 'https://cdn.example.fr/photo.jpg' },
       caption: 'Votre toit',
@@ -181,8 +189,8 @@ describe('WhatsAppAdapter.send — media', () => {
       ],
     });
 
-    expect(seenRequests[0]?.url).toBe('/api/sendFile');
-    expect(seenRequests[0]?.body).toMatchObject({
+    expect(sends()[0]?.url).toBe('/api/sendFile');
+    expect(sends()[0]?.body).toMatchObject({
       chatId: '33612345678@c.us',
       file: { url: 'https://cdn.example.fr/devis.pdf', filename: 'devis.pdf' },
     });
@@ -207,11 +215,7 @@ describe('WhatsAppAdapter.send — multi-block', () => {
       body,
     });
 
-    expect(seenRequests.map((r) => r.url)).toEqual([
-      '/api/sendText',
-      '/api/sendImage',
-      '/api/sendFile',
-    ]);
+    expect(sends().map((r) => r.url)).toEqual(['/api/sendText', '/api/sendImage', '/api/sendFile']);
     expect(receipt.externalId).toBe('wamid.fake-3');
   });
 
@@ -243,8 +247,8 @@ describe('WhatsAppAdapter.send — interactive', () => {
       ],
     });
 
-    expect(seenRequests[0]?.url).toBe('/api/sendButtons');
-    expect(seenRequests[0]?.body).toMatchObject({
+    expect(sends()[0]?.url).toBe('/api/sendButtons');
+    expect(sends()[0]?.body).toMatchObject({
       session: 'default',
       chatId: '33612345678@c.us',
       header: 'Votre rendez-vous',
@@ -265,8 +269,9 @@ describe('WhatsAppAdapter — guardrails', () => {
       }),
     ).rejects.toThrow(/cannot send to email/);
 
-    // Did not hit the network either.
-    expect(seenRequests).toHaveLength(0);
+    // Did not hit the network either (typing toggles from earlier tests'
+    // fire-and-forget stopTyping are excluded — they're not sends).
+    expect(sends()).toHaveLength(0);
   });
 
   it('on WAHA 500: throws without echoing the request body (PII protection)', async () => {
@@ -336,8 +341,11 @@ describe('WahaClient.setTyping', () => {
     const client = buildClient();
 
     await client.setTyping('33612345678@c.us', true);
-    expect(seenRequests[0]?.url).toBe('/api/startTyping');
-    expect(seenRequests[0]?.body).toMatchObject({
+    // find() (not [0]) — a fire-and-forget stopTyping from an earlier test can
+    // land in seenRequests at any time.
+    const typingReq = seenRequests.find((r) => r.url === '/api/startTyping');
+    expect(typingReq).toBeDefined();
+    expect(typingReq?.body).toMatchObject({
       session: 'default',
       chatId: '33612345678@c.us',
     });

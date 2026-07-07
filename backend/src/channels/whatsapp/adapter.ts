@@ -25,14 +25,34 @@ import { logger } from '../../logger.js';
 
 export interface WhatsAppAdapterOptions {
   client: WahaClient;
+  /** Test seam — override the typing-pause sleep. Default: real setTimeout. */
+  sleepMs?: (ms: number) => Promise<void>;
+}
+
+/**
+ * Human-feel typing indicator (2026-07-07, Ridaa): show WhatsApp's "typing…"
+ * briefly before each TEXT message. Duration scales with message length —
+ * ~35 ms per character, clamped to [1s, 3.5s] so a long price menu doesn't
+ * stall the pipeline. Media blocks (image/document) skip it: WhatsApp shows
+ * its own upload progress for those.
+ */
+const TYPING_MS_PER_CHAR = 35;
+const TYPING_MIN_MS = 1_000;
+const TYPING_MAX_MS = 3_500;
+
+function typingDurationMs(text: string): number {
+  return Math.max(TYPING_MIN_MS, Math.min(TYPING_MAX_MS, text.length * TYPING_MS_PER_CHAR));
 }
 
 export class WhatsAppAdapter implements ConversationChannel {
   readonly id = 'whatsapp' as const;
   private client: WahaClient;
+  private sleep: (ms: number) => Promise<void>;
 
   constructor(opts: WhatsAppAdapterOptions) {
     this.client = opts.client;
+    this.sleep =
+      opts.sleepMs ?? ((ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms)));
   }
 
   capabilities(): ChannelCapabilities {
@@ -82,12 +102,20 @@ export class WhatsAppAdapter implements ConversationChannel {
   ): Promise<WahaSendResponse> {
     switch (block.type) {
       case 'text':
-      case 'markdown':
-        return this.client.sendText({
+      case 'markdown': {
+        // Human feel: flash the "typing…" indicator proportionally to the
+        // message length before sending. Entirely best-effort — setTyping
+        // swallows its own errors, and a failed pause must never block a send.
+        await this.client.setTyping(chatId, true);
+        await this.sleep(typingDurationMs(block.text)).catch(() => undefined);
+        const sent = await this.client.sendText({
           chatId,
           text: block.text,
           ...(replyTo ? { replyTo } : {}),
         });
+        void this.client.setTyping(chatId, false);
+        return sent;
+      }
       case 'image':
         return this.client.sendImage({
           chatId,
