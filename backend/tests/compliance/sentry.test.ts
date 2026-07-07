@@ -174,8 +174,9 @@ describe('checkComplianceFor() — LLM outcomes', () => {
     expect(stub.callCount).toBe(1);
   });
 
-  // 9
-  it('test 9: server-clean + LLM block → verdict block with LLM reasons', async () => {
+  // 9 — no severity in the LLM output = 'critical' by default (fail-safe):
+  // an old-format block keeps the pre-send hold.
+  it('test 9: server-clean + LLM block (no severity → critical) → verdict block', async () => {
     stub.nextText = '{"verdict":"block","reasons":["sort du périmètre"]}';
     const out = await checkComplianceFor(noDb, {
       draft: 'Aujourd’hui il fait beau, parlons météo plutôt.',
@@ -186,40 +187,67 @@ describe('checkComplianceFor() — LLM outcomes', () => {
     expect(stub.callCount).toBe(1);
   });
 
-  // 10
-  it('test 10: LLM transport error → fail-closed block, no retry (same outage)', async () => {
+  // 9b — restructure 2026-07-07: a MINOR block is advisory — the message
+  // sends, flagged for after-the-fact review, never a management approval.
+  it('test 9b: LLM block with severity minor → verdict pass + flagged', async () => {
+    stub.nextText = '{"verdict":"block","severity":"minor","reasons":["tournure à revoir"]}';
+    const out = await checkComplianceFor(noDb, {
+      draft: 'Bonjour, je peux vous aider.',
+      ctx,
+    });
+    expect(out.verdict).toBe('pass');
+    expect(out.flagged).toBe(true);
+    expect(out.reasons).toEqual(['tournure à revoir']);
+  });
+
+  // 9c — critical explicitly stated still blocks.
+  it('test 9c: LLM block with severity critical → verdict block', async () => {
+    stub.nextText = '{"verdict":"block","severity":"critical","reasons":["contrat annoncé actif"]}';
+    const out = await checkComplianceFor(noDb, {
+      draft: 'Votre dossier avance bien.',
+      ctx,
+    });
+    expect(out.verdict).toBe('block');
+  });
+
+  // 10 — restructure 2026-07-07: an LLM outage must not silence the sales
+  // conversation (hard server rules already passed) — send + flag.
+  it('test 10: LLM transport error → pass + flagged (send, audit for review)', async () => {
     stub.nextError = new Error('network timeout');
     const out = await checkComplianceFor(noDb, {
       draft: 'Bonjour, je peux vous aider.',
       ctx,
     });
-    expect(out.verdict).toBe('block');
+    expect(out.verdict).toBe('pass');
+    expect(out.flagged).toBe(true);
     expect(out.reasons.join(' ')).toMatch(/unavailable/i);
     expect(out.llmRationale).toBe('network timeout');
     expect(stub.callCount).toBe(1);
   });
 
-  // 11 — 2026-07-06: unparseable output now gets ONE same-prompt retry
-  // before failing closed (two flakes in ~3 min escalated clean drafts).
-  it('test 11: LLM returns garbage (no JSON) twice → fail-closed block after one retry', async () => {
+  // 11 — unparseable ×2 was the "technical glitch" approval noise: now the
+  // message sends, flagged.
+  it('test 11: LLM returns garbage (no JSON) twice → pass + flagged after one retry', async () => {
     stub.nextText = 'pas du tout du JSON, juste du texte libre';
     const out = await checkComplianceFor(noDb, {
       draft: 'Bonjour, je peux vous aider.',
       ctx,
     });
-    expect(out.verdict).toBe('block');
+    expect(out.verdict).toBe('pass');
+    expect(out.flagged).toBe(true);
     expect(out.reasons.join(' ')).toMatch(/not parseable/i);
     expect(stub.callCount).toBe(2);
   });
 
   // 12
-  it('test 12: LLM schema violation twice → fail-closed block after one retry', async () => {
+  it('test 12: LLM schema violation twice → pass + flagged after one retry', async () => {
     stub.nextText = '{"verdict":"maybe"}';
     const out = await checkComplianceFor(noDb, {
       draft: 'Bonjour, je peux vous aider.',
       ctx,
     });
-    expect(out.verdict).toBe('block');
+    expect(out.verdict).toBe('pass');
+    expect(out.flagged).toBe(true);
     expect(out.reasons.join(' ')).toMatch(/schema mismatch/i);
     expect(stub.callCount).toBe(2);
   });
@@ -246,6 +274,17 @@ describe('checkComplianceFor() — LLM outcomes', () => {
     expect(out.verdict).toBe('block');
     expect(out.reasons).toEqual(['sort du périmètre']);
     expect(stub.callCount).toBe(2);
+  });
+
+  // 12d — the closing rules' forbidden "taxe" presentation is now a HARD rule.
+  it('test 12d: presenting frais as a state tax → hard block, no LLM call', async () => {
+    const out = await checkComplianceFor(noDb, {
+      draft: "Ces 50 € sont une taxe imposée par l'État, rien à voir avec nous.",
+      ctx,
+    });
+    expect(out.verdict).toBe('block');
+    expect(out.ruleHits).toContain('frais-as-tax');
+    expect(stub.callCount).toBe(0);
   });
 
   // 13

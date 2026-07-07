@@ -57,6 +57,14 @@ export interface ComplianceCheckOutput {
   ruleHits: string[];
   /** Brief LLM rationale when blocked by the LLM layer. */
   llmRationale?: string;
+  /**
+   * verdict='pass' but the advisory layer had reservations (LLM minor concern,
+   * LLM unavailable/unparseable). The message SENDS; callers should audit-log
+   * it for after-the-fact review. Restructure 2026-07-07 (Ridaa): pre-send
+   * approval is reserved for hard red lines — "I am not here to approve every
+   * message; otherwise it is not an automated business."
+   */
+  flagged?: boolean;
   durationMs: number;
 }
 
@@ -120,6 +128,15 @@ const SERVER_RULES: ServerRule[] = [
     pattern: /(consultez\s+un\s+m[ée]decin|posologie|diagnostic|traitement\s+m[ée]dical)/i,
     reason: 'Donne un conseil médical — interdit.',
   },
+  {
+    name: 'frais-as-tax',
+    hard: true,
+    // The closing rules forbid presenting the frais as a state tax or a legal
+    // obligation — misleading presentation (real red line, was LLM-only).
+    pattern: /taxe\s+(impos[ée]e?(\s+par\s+l.[ÉEé]tat)?|l[ée]gale|obligatoire|d.[ÉEé]tat)/i,
+    reason:
+      'Présente les frais comme une taxe / obligation légale — présentation trompeuse interdite (règles closing).',
+  },
   // Soft warnings — don't auto-block but surface to the LLM as hints.
   {
     name: 'iban-full',
@@ -148,8 +165,13 @@ const SENTRY_SYSTEM = `Tu es le **Compliance Sentry** d'Assuryal. Tu juges si un
 Tu réponds STRICTEMENT par UN JSON :
 {
   "verdict": "pass" | "block",
+  "severity": "critical" | "minor",
   "reasons": ["raison 1 si block", "raison 2", ...]
 }
+
+"severity" ne compte que si verdict=block :
+- "critical" = le message franchit une LIGNE ROUGE de la liste "Bloque ABSOLUMENT" ci-dessous → il sera RETENU avant envoi et la direction devra trancher. Réserve "critical" à ces cas-là UNIQUEMENT.
+- "minor" = réserve, doute, style, contexte flou, prudence — le message PARTIRA quand même et sera simplement journalisé pour revue. Quand tu hésites entre les deux, choisis "minor" : une conversation interrompue coûte plus cher qu'un message imparfait.
 
 Bloque ABSOLUMENT si le message :
 - Affirme que LE CONTRAT DE CE CLIENT est conclu / signé / actif / lié avant validation humaine côté Maxance. (NB : rappeler qu'un type de contrat existe est OK ; promettre que CELUI DU CLIENT est validé n'est pas OK.)
@@ -185,6 +207,9 @@ Tu réponds UNIQUEMENT par le JSON, jamais de préambule ou de markdown.`;
 
 const SentryLLMOutputSchema = z.object({
   verdict: z.enum(['pass', 'block']),
+  // Missing severity on a block = 'critical' (fail-safe: an old-format or
+  // truncated output keeps the pre-send hold rather than silently sending).
+  severity: z.enum(['critical', 'minor']).default('critical'),
   reasons: z.array(z.string()).default([]),
 });
 type SentryLLMOutput = z.infer<typeof SentryLLMOutputSchema>;
@@ -209,7 +234,7 @@ registerPrompt({
  * 2026-07-06 live test, pure noise for management).
  */
 type SentryAttempt =
-  | { status: 'ok'; pass: boolean; reasons: string[] }
+  | { status: 'ok'; pass: boolean; severity: 'critical' | 'minor'; reasons: string[] }
   | { status: 'transport'; reasons: string[]; rationale?: string }
   | { status: 'unparseable'; reasons: string[] };
 
@@ -256,7 +281,12 @@ async function llmSentryAttempt(system: string, userPrompt: string): Promise<Sen
     return { status: 'unparseable', reasons: ['compliance LLM schema mismatch'] };
   }
   const result: SentryLLMOutput = parsed.data;
-  return { status: 'ok', pass: result.verdict === 'pass', reasons: result.reasons };
+  return {
+    status: 'ok',
+    pass: result.verdict === 'pass',
+    severity: result.severity,
+    reasons: result.reasons,
+  };
 }
 
 async function llmSentryCheck(
@@ -264,7 +294,11 @@ async function llmSentryCheck(
   draft: string,
   ctx: ComplianceCheckInput['ctx'],
   serverHits: ServerRule[],
-): Promise<{ pass: boolean; reasons: string[]; rationale?: string }> {
+): Promise<{
+  outcome: 'pass' | 'block' | 'flag';
+  reasons: string[];
+  rationale?: string;
+}> {
   const userPrompt = [
     'Contexte :',
     `- Canal : ${ctx.channel}`,
@@ -292,23 +326,30 @@ async function llmSentryCheck(
 
   const system = await resolvePrompt(db, COMPLIANCE_SENTRY_KEY, () => SENTRY_SYSTEM);
 
-  // Unparseable output gets ONE same-prompt retry before failing closed —
-  // a single Haiku flake must not escalate a clean draft to management.
-  // Transport errors stay immediately fail-closed (same-outage retry is
-  // wasted latency), and everything else keeps fail-closed semantics.
+  // Unparseable output gets ONE same-prompt retry — a single Haiku flake must
+  // not disturb a clean draft. RESTRUCTURE (2026-07-07, Ridaa): the LLM layer
+  // is ADVISORY except for critical red lines —
+  //   - ok + pass            → pass
+  //   - ok + block/critical  → block (pre-send hold + management decision)
+  //   - ok + block/minor     → flag (message SENDS, audit-logged for review)
+  //   - transport error      → flag (hard server rules already passed; an LLM
+  //                            outage must not silence the sales conversation)
+  //   - unparseable ×2       → flag (same reasoning — was the "technical
+  //                            glitch" approval noise management kept getting)
   let attempt = await llmSentryAttempt(system, userPrompt);
   if (attempt.status === 'unparseable') {
-    logger.warn(
-      { reasons: attempt.reasons },
-      'compliance: LLM output unparseable — retrying once before fail-closed',
-    );
+    logger.warn({ reasons: attempt.reasons }, 'compliance: LLM output unparseable — retrying once');
     attempt = await llmSentryAttempt(system, userPrompt);
   }
   if (attempt.status === 'ok') {
-    return { pass: attempt.pass, reasons: attempt.reasons };
+    if (attempt.pass) return { outcome: 'pass', reasons: attempt.reasons };
+    return {
+      outcome: attempt.severity === 'critical' ? 'block' : 'flag',
+      reasons: attempt.reasons,
+    };
   }
   return {
-    pass: false,
+    outcome: 'flag',
     reasons: attempt.reasons,
     ...(attempt.status === 'transport' && attempt.rationale
       ? { rationale: attempt.rationale }
@@ -355,9 +396,11 @@ export async function checkComplianceFor(
     };
   }
 
-  // LLM check — soft hits surface to the LLM as a hint.
+  // LLM check — soft hits surface to the LLM as a hint. Only a CRITICAL
+  // red-line verdict holds the message; minor concerns and LLM availability
+  // problems flag-and-send (see llmSentryCheck).
   const llm = await llmSentryCheck(db, input.draft, input.ctx, softHits);
-  if (!llm.pass) {
+  if (llm.outcome === 'block') {
     return {
       verdict: 'block',
       reasons: llm.reasons.length > 0 ? llm.reasons : ['compliance LLM blocked'],
@@ -369,8 +412,10 @@ export async function checkComplianceFor(
 
   return {
     verdict: 'pass',
-    reasons: [],
+    reasons: llm.outcome === 'flag' ? llm.reasons : [],
     ruleHits: softHits.map((r) => r.name),
+    ...(llm.outcome === 'flag' ? { flagged: true } : {}),
+    ...(llm.rationale ? { llmRationale: llm.rationale } : {}),
     durationMs: Date.now() - t0,
   };
 }

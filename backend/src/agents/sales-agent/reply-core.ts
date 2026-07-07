@@ -29,6 +29,7 @@ import { buildSalesAgentSystemFragments, type SalesAgentTurnContext } from './pr
 import type { ChannelId, ContactRef } from '../../channels/types.js';
 import { checkComplianceFor } from '../../compliance/index.js';
 import { buildQuoteContextLine } from '../../compliance/sentry.js';
+import { appendAudit } from '../../db/repositories/audit-log.js';
 import * as humanActions from '../../db/repositories/human-actions.js';
 import { notifyHumanAction } from '../human-notify.js';
 import { HUMAN_ACTION_DRAFT_MARKER } from '../reporter-agent/humanize.js';
@@ -440,6 +441,29 @@ export async function generateSalesReply(
     }
 
     return { outcome: 'blocked', humanActionId: action.id, reasons: compliance.reasons };
+  }
+
+  // Advisory flag (restructure 2026-07-07): the sentry had minor reservations
+  // or was unavailable — the message SENDS, but leave an audit trail so the
+  // admin can review flagged conversations after the fact. Never reaches the
+  // WA group.
+  if (compliance.flagged) {
+    logger.info(
+      { leadId: lead.id, reasons: compliance.reasons },
+      'sales-agent: compliance flagged (advisory) — sending + audit trail',
+    );
+    try {
+      await appendAudit(db, {
+        actorType: 'agent',
+        actorId: `${agentRole}#${agentInstance}`,
+        action: 'compliance.flagged',
+        targetType: 'lead',
+        targetId: lead.id,
+        meta: { reasons: compliance.reasons, draft: draft.slice(0, 500) },
+      });
+    } catch {
+      // best-effort — the send matters more than the audit row
+    }
   }
 
   return {
