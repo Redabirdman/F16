@@ -373,6 +373,10 @@ export async function generateSalesReply(
           )
           .join('\n');
   const systemTriggered = /^\[CONTINUATION AUTOMATIQUE/.test(content);
+  // Ground "c'est programmé / je transmets" claims: the tools the model
+  // REALLY executed this turn are facts, not promises (the sentry blocked
+  // "un conseiller vous rappelle ce soir" while the call was in flight).
+  const toolsExecuted = llmResult.toolCalls.filter((t) => t.ok).map((t) => t.toolName);
   const complianceCtx = {
     customerId: customer.id,
     channel,
@@ -383,6 +387,7 @@ export async function generateSalesReply(
     ...(sentMenuExcerpt ? { sentMenuExcerpt } : {}),
     ...(conversationExcerpt ? { conversationExcerpt } : {}),
     ...(systemTriggered ? { systemTriggered } : {}),
+    ...(toolsExecuted.length > 0 ? { toolsExecuted } : {}),
   };
   // Voice = live call: rules-only compliance (hard server rules still
   // fail-closed), no LLM sentry round-trip (seconds of dead air per turn).

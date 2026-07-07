@@ -68,6 +68,14 @@ export interface ComplianceCheckInput {
      * is an internal instruction and must not be judged as customer input.
      */
     systemTriggered?: boolean;
+    /**
+     * Tools the agent REALLY executed during this turn (dotted names). When
+     * the draft says "c'est programmé / je transmets à l'équipe" right after
+     * voice.schedule_call ran, that's a FACT — the sentry blocked "un
+     * conseiller vous rappelle ce soir" while the call was literally in
+     * flight (live 2026-07-07 eve).
+     */
+    toolsExecuted?: string[];
   };
 }
 
@@ -195,6 +203,7 @@ Tu réponds STRICTEMENT par UN JSON :
 - "critical" = UNIQUEMENT ces 6 familles : (1) contrat/couverture de CE client affirmé conclu/actif/signé ; (2) prix personnalisé INVENTÉ alors qu'AUCUN devis n'existe dans le contexte ; (3) demande de mot de passe / code / données de paiement ; (4) conseil médical ou juridique personnalisé ; (5) IBAN/carte en clair ; (6) message manifestement NON DESTINÉ au client (monologue interne, raisonnement de l'agent à la 3e personne). → le message sera RETENU et la direction devra trancher.
 - "minor" = TOUT LE RESTE, y compris : promesses de délai (même chiffrées — "deux minutes", "demain") concernant l'ENVOI ou la PRÉPARATION d'un devis/document ; approximations sur l'état du dossier ("vos deux devis" quand un seul est parti, "je vous les envoie maintenant") ; style, doute, contexte flou. Le message PARTIRA et sera journalisé pour revue. Quand tu hésites, choisis "minor" : une conversation interrompue coûte plus cher qu'un message imparfait.
 ⚠️ PRÉSÉANCE ABSOLUE : dès que le contexte contient une ligne « Devis Maxance de CE client » ou « Menu de prix DÉJÀ ENVOYÉ », les familles (1) et (2) ne s'appliquent JAMAIS à des questions de PRIX ni d'ÉTAT D'ENVOI de devis — au pire "minor". Un prix égal à une somme de chiffres du menu (formule + options) N'EST PAS un prix inventé.
+⚠️ RÈGLE DE FERMETURE : si ton motif de blocage ne correspond EXACTEMENT à aucune des 6 familles ci-dessus (par exemple "promesse de rappel", "rendez-vous", "engagement du jour même", "disponibilité de l'équipe"), la severity DOIT être "minor". Tu n'as PAS le droit d'inventer une 7e famille critical.
 
 Bloque ABSOLUMENT si le message :
 - Affirme que LE CONTRAT DE CE CLIENT est conclu / signé / actif / lié avant validation humaine côté Maxance. (NB : rappeler qu'un type de contrat existe est OK ; promettre que CELUI DU CLIENT est validé n'est pas OK.)
@@ -341,6 +350,9 @@ async function llmSentryCheck(
       : null,
     ctx.systemTriggered
       ? `- ⚠️ Ce tour a été déclenché par le SYSTÈME (suite automatique interne) — il n'y a PAS de "dernier message client" ; ne conclus JAMAIS "message non destiné au client" ou "demande inexistante" à cause de ce déclencheur : juge le draft sur l'HISTORIQUE ci-dessus.`
+      : null,
+    ctx.toolsExecuted && ctx.toolsExecuted.length > 0
+      ? `- ACTIONS RÉELLEMENT EXÉCUTÉES par le système PENDANT ce tour : ${ctx.toolsExecuted.join(', ')}. Les affirmations correspondantes du draft ("c'est programmé", "je transmets à l'équipe", "un conseiller vous rappelle", "je lance votre devis") sont des FAITS — ne les bloque JAMAIS comme "promesse sans programmation réelle".`
       : null,
     ctx.lastInboundContent && !ctx.systemTriggered
       ? `- Dernier message client : "${ctx.lastInboundContent.slice(0, 500)}"`
