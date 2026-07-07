@@ -82,6 +82,15 @@ function matchOptionByText(
     (o) => o.label && o.label.trim().length >= 3 && strippedLower.includes(o.label.toLowerCase()),
   );
   if (byLabel) return { option: byLabel, via: 'label' };
+  // Reverse: the reply is a PREFIX of exactly one option's label — Ridaa typed
+  // "Send it" against the "Send it anyway" option and it didn't resolve until
+  // he typed the full phrase (live 2026-07-07). ≥5 chars + unique match only.
+  if (strippedLower.length >= 5) {
+    const byPrefix = options.filter(
+      (o) => o.label && o.label.toLowerCase().startsWith(strippedLower),
+    );
+    if (byPrefix.length === 1 && byPrefix[0]) return { option: byPrefix[0], via: 'label' };
+  }
   for (const alias of KIND_ALIASES) {
     if (alias.words.some((rx) => rx.test(strippedLower))) {
       const chosen = options.find((o) => o.kind === alias.kind);

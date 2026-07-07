@@ -11,7 +11,7 @@ import { logger } from '../../../logger.js';
 import { decryptPII } from '../../../db/crypto.js';
 import { listTurns } from '../../../db/repositories/conversation-turns.js';
 import { sendViaChannel } from '../../../channels/send.js';
-import { coerceSendableChannel } from '../../../channels/registry.js';
+import { preferInboundChannel } from '../../../channels/registry.js';
 import type { ChannelId } from '../../../channels/types.js';
 import * as humanActions from '../../../db/repositories/human-actions.js';
 import { notifyHumanAction } from '../../human-notify.js';
@@ -58,11 +58,9 @@ export async function handleSubscriptionReady(
   const recentTurns = await listTurns(ctx.db, {
     customerId: payload.customerId,
     leadId,
-    limit: 5,
+    limit: 10,
   });
-  const channel: ChannelId = coerceSendableChannel(
-    recentTurns[0]?.channel as ChannelId | undefined,
-  );
+  const channel: ChannelId = preferInboundChannel(recentTurns);
 
   const { customer, lead, contactRef } = await ctx.resolveCustomerAndContact(leadId, channel);
   if (!contactRef) {
@@ -160,11 +158,9 @@ export async function handleSubscriptionFailed(
   const recentTurns = await listTurns(ctx.db, {
     customerId: payload.customerId,
     leadId,
-    limit: 5,
+    limit: 10,
   });
-  const channel: ChannelId = coerceSendableChannel(
-    recentTurns[0]?.channel as ChannelId | undefined,
-  );
+  const channel: ChannelId = preferInboundChannel(recentTurns);
 
   const { customer, lead, contactRef } = await ctx.resolveCustomerAndContact(leadId, channel);
   const fullName = decryptPII(customer.fullName) ?? '';

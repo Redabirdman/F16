@@ -37,7 +37,7 @@ import { customers, leads } from '../../db/schema/index.js';
 import { decryptPII } from '../../db/crypto.js';
 import { listTurns } from '../../db/repositories/conversation-turns.js';
 import { sendViaChannel } from '../../channels/send.js';
-import { coerceSendableChannel } from '../../channels/registry.js';
+import { preferInboundChannel } from '../../channels/registry.js';
 import { followUpTemplate } from '../../channels/email/templates.js';
 import type { ChannelId, ContactRef } from '../../channels/types.js';
 import { sendMessage } from '../../messaging/dispatcher.js';
@@ -206,14 +206,13 @@ export class EngagementAgent extends BaseAgent {
     recentTurnsDesc: Awaited<ReturnType<typeof listTurns>>;
   }): Promise<MessageHandlerResult> {
     const { lead, step, recentTurnsDesc } = args;
-    // Channel selection: mirror the Sales Agent's heuristic — most recent
-    // turn's channel wins, WhatsApp as the default for fresh leads. Coerced
-    // through the registry: a lead whose last turn is a 'voice' call has no
-    // send adapter, and the raw channel made every tick fail forever
-    // (stranded nudge, 2026-07-04 audit).
-    const channel: ChannelId = coerceSendableChannel(
-      recentTurnsDesc[0]?.channel as ChannelId | undefined,
-    );
+    // Channel selection: mirror the Sales Agent's heuristic — the customer's
+    // last INBOUND channel wins (our own multi-channel sends write turns too,
+    // and the latest-turn heuristic flipped nudges to email after a devis
+    // delivery — 2026-07-07), WhatsApp as the default for fresh leads.
+    // Coerced through the registry: 'voice' has no send adapter and the raw
+    // channel made every tick fail forever (stranded nudge, 2026-07-04 audit).
+    const channel: ChannelId = preferInboundChannel(recentTurnsDesc);
     const resolved = await this.resolveCustomerAndContact(lead, channel);
     if (!resolved.contactRef) {
       logger.warn(

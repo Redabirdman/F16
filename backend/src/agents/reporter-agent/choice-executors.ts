@@ -50,7 +50,7 @@ import { setLeadStatus } from '../../db/repositories/leads.js';
 import { listTurns } from '../../db/repositories/conversation-turns.js';
 import { sendMessage } from '../../messaging/dispatcher.js';
 import { sendViaChannel } from '../../channels/send.js';
-import { coerceSendableChannel } from '../../channels/registry.js';
+import { preferInboundChannel } from '../../channels/registry.js';
 import type { ChannelId, ContactRef } from '../../channels/types.js';
 import { msUntilMaxanceOpen } from '../maxance-operator/business-hours.js';
 import { shortRef, splitDraft } from './humanize.js';
@@ -373,9 +373,10 @@ const sendApprovedDraft: ChoiceExecutor = async (ctx) => {
       );
       return { groupNote: 'Already sent.', detail: { sent: false, reason: 'already_sent' } };
     }
-    const channel: ChannelId = coerceSendableChannel(
-      recentTurns[0]?.channel as ChannelId | undefined,
-    );
+    // Customer's channel = last INBOUND (2026-07-07: recentTurns[0] was our
+    // own email turn from a devis delivery → Ridaa's approved draft landed in
+    // Gmail while the conversation lived on WhatsApp).
+    const channel: ChannelId = preferInboundChannel(recentTurns);
 
     // 4. ContactRef — decryptPII at this boundary, mirror resolveSalesContext.
     const address = channel === 'email' ? decryptPII(customer.email) : decryptPII(customer.phone);

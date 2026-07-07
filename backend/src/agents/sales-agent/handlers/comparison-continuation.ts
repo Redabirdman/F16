@@ -27,7 +27,7 @@
 import { getRedis } from '../../../queue/index.js';
 import { listTurns } from '../../../db/repositories/conversation-turns.js';
 import { sendViaChannel } from '../../../channels/send.js';
-import { coerceSendableChannel } from '../../../channels/registry.js';
+import { preferInboundChannel } from '../../../channels/registry.js';
 import { generateSalesReply } from '../reply-core.js';
 import { logger } from '../../../logger.js';
 import type { ChannelId } from '../../../channels/types.js';
@@ -119,16 +119,10 @@ async function pickChannel(
   customerId: string,
   leadId: string,
 ): Promise<ChannelId> {
-  // Prefer the customer's OWN last channel (most recent INBOUND turn) — the
-  // PDF delivery writes outbound turns on BOTH whatsapp + email, and using
-  // recent[0] blindly sent the "je prépare le 2e" ack by email while the
-  // conversation lived on WhatsApp (live 2026-07-07). Fall back to the most
-  // recent turn of any direction, then the WhatsApp default.
+  // Customer's channel = last INBOUND (see preferInboundChannel — the PDF
+  // delivery's own email turn was flipping follow-ups to email, 2026-07-07).
   const recent = await listTurns(ctx.db, { customerId, leadId, limit: 10 });
-  const lastInbound = recent.find((t) => t.direction === 'inbound');
-  return coerceSendableChannel(
-    (lastInbound?.channel ?? recent[0]?.channel) as ChannelId | undefined,
-  );
+  return preferInboundChannel(recent);
 }
 
 /**

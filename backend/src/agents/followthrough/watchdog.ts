@@ -39,7 +39,7 @@ import { createAction } from '../../db/repositories/human-actions.js';
 import { notifyHumanAction } from '../human-notify.js';
 import { isMaxanceOpen, msUntilMaxanceOpen } from '../maxance-operator/business-hours.js';
 import { sendViaChannel } from '../../channels/send.js';
-import { coerceSendableChannel } from '../../channels/registry.js';
+import { preferInboundChannel } from '../../channels/registry.js';
 import type { ChannelId, ContactRef } from '../../channels/types.js';
 import { sendMessage } from '../../messaging/dispatcher.js';
 
@@ -220,7 +220,7 @@ async function checkPreviewStuck(
       );
       counters.previewEscalated += 1;
 
-      const channel = coerceSendableChannel(turns[0]?.channel as ChannelId | undefined);
+      const channel = preferInboundChannel(turns);
       const contactRef = await resolveContact(db, q.customerId, channel);
       if (!contactRef) {
         logger.warn(

@@ -79,6 +79,29 @@ export function coerceSendableChannel(candidate: ChannelId | undefined): Channel
 }
 
 /**
+ * Pick the channel the CUSTOMER actually lives on: their most recent INBOUND
+ * turn's channel, falling back to the most recent turn of any direction.
+ *
+ * Why not just `turns[0].channel`: our own multi-channel sends write turns
+ * too — a devis PDF delivery writes a WhatsApp turn AND an email turn, so the
+ * "latest turn" flips to email and every subsequent message (quote-ready
+ * notice, approved drafts, continuation acks) silently followed to email
+ * while the conversation lived on WhatsApp (live 2026-07-07, Achraf's run —
+ * Ridaa approved a message and it arrived in Gmail). The customer's own last
+ * message is the truth about where they're talking to us.
+ *
+ * `turns` must be most-recent-first (the shape every `listTurns` caller has).
+ */
+export function preferInboundChannel(
+  turns: ReadonlyArray<{ direction: string; channel: string }>,
+): ChannelId {
+  const lastInbound = turns.find((t) => t.direction === 'inbound');
+  return coerceSendableChannel(
+    (lastInbound?.channel ?? turns[0]?.channel) as ChannelId | undefined,
+  );
+}
+
+/**
  * Test-only escape hatch — clears the registry so a test starts from a known
  * empty state. Not part of the public API; production code never calls this.
  */

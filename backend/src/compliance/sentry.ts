@@ -170,8 +170,8 @@ Tu réponds STRICTEMENT par UN JSON :
 }
 
 "severity" ne compte que si verdict=block :
-- "critical" = le message franchit une LIGNE ROUGE de la liste "Bloque ABSOLUMENT" ci-dessous → il sera RETENU avant envoi et la direction devra trancher. Réserve "critical" à ces cas-là UNIQUEMENT.
-- "minor" = réserve, doute, style, contexte flou, prudence — le message PARTIRA quand même et sera simplement journalisé pour revue. Quand tu hésites entre les deux, choisis "minor" : une conversation interrompue coûte plus cher qu'un message imparfait.
+- "critical" = UNIQUEMENT ces 5 familles : (1) contrat/couverture de CE client affirmé conclu/actif/signé ; (2) prix personnalisé INVENTÉ alors qu'AUCUN devis n'existe dans le contexte ; (3) demande de mot de passe / code / données de paiement ; (4) conseil médical ou juridique personnalisé ; (5) IBAN/carte en clair. → le message sera RETENU et la direction devra trancher.
+- "minor" = TOUT LE RESTE, y compris : promesses de délai (même chiffrées — "deux minutes", "demain") concernant l'ENVOI ou la PRÉPARATION d'un devis/document ; approximations sur l'état du dossier ("vos deux devis" quand un seul est parti) ; style, doute, contexte flou. Le message PARTIRA et sera journalisé pour revue. Quand tu hésites, choisis "minor" : une conversation interrompue coûte plus cher qu'un message imparfait.
 
 Bloque ABSOLUMENT si le message :
 - Affirme que LE CONTRAT DE CE CLIENT est conclu / signé / actif / lié avant validation humaine côté Maxance. (NB : rappeler qu'un type de contrat existe est OK ; promettre que CELUI DU CLIENT est validé n'est pas OK.)

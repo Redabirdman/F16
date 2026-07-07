@@ -16,7 +16,7 @@ import { decryptPII } from '../../../db/crypto.js';
 import { listTurns } from '../../../db/repositories/conversation-turns.js';
 import { getQuoteByDevisNumber } from '../../../db/repositories/quotes.js';
 import { sendViaChannel } from '../../../channels/send.js';
-import { coerceSendableChannel } from '../../../channels/registry.js';
+import { preferInboundChannel } from '../../../channels/registry.js';
 import type { ChannelId } from '../../../channels/types.js';
 import * as humanActions from '../../../db/repositories/human-actions.js';
 import { notifyHumanAction } from '../../human-notify.js';
@@ -90,11 +90,9 @@ export async function handleQuotePreviewReady(
   const recentTurns = await listTurns(ctx.db, {
     customerId: payload.customerId,
     leadId,
-    limit: 5,
+    limit: 10,
   });
-  const channel: ChannelId = coerceSendableChannel(
-    recentTurns[0]?.channel as ChannelId | undefined,
-  );
+  const channel: ChannelId = preferInboundChannel(recentTurns);
 
   const { customer, lead, contactRef } = await ctx.resolveCustomerAndContact(leadId, channel);
   if (!contactRef) {
@@ -218,11 +216,9 @@ export async function handleQuoteReady(
   const recentTurns = await listTurns(ctx.db, {
     customerId: payload.customerId,
     leadId,
-    limit: 5,
+    limit: 10,
   });
-  const channel: ChannelId = coerceSendableChannel(
-    recentTurns[0]?.channel as ChannelId | undefined,
-  );
+  const channel: ChannelId = preferInboundChannel(recentTurns);
 
   const { customer, lead, contactRef } = await ctx.resolveCustomerAndContact(leadId, channel);
   if (!contactRef) {
@@ -337,15 +333,13 @@ export async function handleQuoteFailed(
   const leadId = payload.leadId ?? ctx.leadIdFromEnvelope(envelope);
   if (!leadId) return { ok: false, error: 'no leadId available' };
 
-  // Pick the customer's most-recent channel, same heuristic as PREVIEW_READY.
+  // Pick the customer's channel, same heuristic as PREVIEW_READY.
   const recentTurns = await listTurns(ctx.db, {
     customerId: payload.customerId,
     leadId,
-    limit: 5,
+    limit: 10,
   });
-  const channel: ChannelId = coerceSendableChannel(
-    recentTurns[0]?.channel as ChannelId | undefined,
-  );
+  const channel: ChannelId = preferInboundChannel(recentTurns);
 
   const { customer, lead, contactRef } = await ctx.resolveCustomerAndContact(leadId, channel);
   const fullName = decryptPII(customer.fullName) ?? '';
