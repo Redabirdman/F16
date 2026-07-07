@@ -60,11 +60,22 @@ export interface HumanActionResolvedEvent {
   timestamp: Date;
 }
 
+/** A customer asked to be called (now or at a chosen time) — CRM paper trail
+ *  for the commitment (2026-07-07: bookings were invisible in HubSpot). */
+export interface CallbackBookedEvent {
+  kind: 'callback-booked';
+  customerId: string;
+  leadId?: string;
+  body: string;
+  timestamp: Date;
+}
+
 export type F16ActivityEvent =
   | VoiceCallEndedEvent
   | WhatsAppTurnEvent
   | EngagementFollowupEvent
-  | HumanActionResolvedEvent;
+  | HumanActionResolvedEvent
+  | CallbackBookedEvent;
 
 // ---------------------------------------------------------------------------
 // Output spec union (one variant per HubSpot engagement type)
@@ -128,6 +139,14 @@ export function mapActivityToEngagement(event: F16ActivityEvent): EngagementSpec
         kind: 'communication',
         channel: 'WHATS_APP',
         body: prefix + event.body,
+        timestamp: event.timestamp,
+      };
+    }
+
+    case 'callback-booked': {
+      return {
+        kind: 'note',
+        body: event.body,
         timestamp: event.timestamp,
       };
     }

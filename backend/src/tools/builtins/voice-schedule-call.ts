@@ -1,41 +1,72 @@
 /**
- * Tool: `voice.schedule_call` — schedule an outbound voice call.
+ * Tool: `voice.schedule_call` — schedule an outbound voice call, NOW or at a
+ * customer-chosen time.
  *
  * The Sales Agent calls this when a customer asks to be phoned ("vous pouvez
- * m'appeler ?", "rappelez-moi"). It emits VOICE.CALL_SCHEDULED → the
- * voice-operator picks it up off the `voice` queue and originates the call via
- * the OpenAI native-SIP bridge. The voice-operator re-resolves the customer's
- * verified DB phone, so the toNumber here is only a hint.
+ * m'appeler ?", "rappelez-moi demain à 10h").
  *
- * Returns `{ callId, queued: true }` so the agent can tell the customer
- * "c'est noté, on vous rappelle" and keep the thread alive.
+ *   - No `scheduledAt` (or a past/near time) → emits VOICE.CALL_SCHEDULED
+ *     immediately; the voice-operator dials via the OpenAI native-SIP bridge.
+ *   - Future `scheduledAt` → writes the lead's callback_due_at/'pending' and
+ *     the M12 callback scheduler dials AT that time (restart-proof: a due row
+ *     is simply re-found on the next tick). Live 2026-07-07: Khalid said
+ *     "à partir de 19h" and the tool had no time concept — it could only
+ *     dial immediately.
+ *
+ * Both paths leave a paper trail: an audit row (admin audit log) + a
+ * best-effort HubSpot note (contact/deal timeline) so the commitment is
+ * visible to management. Completed calls already land in HubSpot separately
+ * as call engagements (voice-call-ended → CallSpec).
  *
  * PII: customerId/leadId are UUIDs; the resolved phone is never logged.
  */
 import { z } from 'zod';
 import { randomUUID } from 'node:crypto';
+import { eq } from 'drizzle-orm';
 import { registerTool } from '../registry.js';
 import { getCustomerById } from '../../db/repositories/customers.js';
 import { sendMessage } from '../../messaging/dispatcher.js';
+import { leads } from '../../db/schema/index.js';
+import { appendAudit } from '../../db/repositories/audit-log.js';
+import { emitHubSpotActivity } from '../../integrations/hubspot/activity-worker.js';
+import { logger } from '../../logger.js';
 
 export const voiceScheduleCallToolName = 'voice.schedule_call';
+
+/** Furthest ahead a customer can book a callback (guards LLM date mistakes). */
+const MAX_AHEAD_MS = 7 * 24 * 60 * 60_000;
+/** Anything due within this window just dials now (scheduler tick is 60s). */
+const IMMEDIATE_WINDOW_MS = 2 * 60_000;
 
 const inputSchema = z.object({
   customerId: z.string().uuid(),
   leadId: z.string().uuid().optional(),
   /** Short FR reason surfaced in the audit/voice context (optional). */
   reason: z.string().optional(),
+  /**
+   * When the customer wants the call, ISO 8601 WITH offset (e.g.
+   * "2026-07-08T19:00:00+02:00"). Omit for "call now".
+   */
+  scheduledAt: z.string().datetime({ offset: true }).optional(),
 });
 
 const outputSchema = z.object({
   callId: z.string().uuid(),
   queued: z.literal(true),
+  /** Set when the call was booked for later — French human-readable time. */
+  scheduledFor: z.string().optional(),
 });
 
 registerTool({
   name: voiceScheduleCallToolName,
   description:
-    "Programmer un appel téléphonique sortant vers le client (par ex. quand il demande à être rappelé). L'appel est passé en arrière-plan par le système ; dis simplement au client qu'on va le rappeler.",
+    'Programmer un appel téléphonique sortant vers le client. Sans scheduledAt : appel ' +
+    'IMMÉDIAT. Avec scheduledAt (ISO 8601 avec fuseau, ex. "2026-07-08T19:00:00+02:00") : ' +
+    "l'appel partira À CE MOMENT-LÀ — calcule à partir de la Date du jour du contexte " +
+    '(ex. "demain à partir de 19h" → demain 19:00 heure française). Si le créneau demandé ' +
+    "est déjà atteignable aujourd'hui (il est 19h20 et le client dit «à partir de 19h»), " +
+    "appelle MAINTENANT (omets scheduledAt). Dis au client qu'on l'appelle (maintenant ou " +
+    'au créneau convenu — le résultat contient scheduledFor quand il est programmé).',
   inputSchema,
   outputSchema,
   handler: async (ctx, input) => {
@@ -43,25 +74,106 @@ registerTool({
     if (!customer) throw new Error('voice.schedule_call: customer not found');
 
     const callId = randomUUID();
-    await sendMessage(
-      { db: ctx.db },
-      {
-        fromRole: ctx.agentRole,
-        fromInstance: ctx.agentInstance,
-        toRole: 'voice-operator',
-        intent: 'VOICE.CALL_SCHEDULED',
-        payload: {
-          callId,
-          customerId: input.customerId,
-          toNumber: customer.phone ?? '',
-          scheduledAt: new Date().toISOString(),
-        },
-        ...((input.leadId ?? ctx.correlationId)
-          ? { correlationId: input.leadId ?? ctx.correlationId }
-          : {}),
-      },
-    );
+    const leadId = input.leadId ?? ctx.correlationId ?? null;
+    const now = Date.now();
+    const target = input.scheduledAt ? new Date(input.scheduledAt) : null;
+    const wantsLater =
+      target !== null &&
+      Number.isFinite(target.getTime()) &&
+      target.getTime() - now > IMMEDIATE_WINDOW_MS;
 
-    return { callId, queued: true as const };
+    if (wantsLater && target.getTime() - now > MAX_AHEAD_MS) {
+      throw new Error(
+        'voice.schedule_call: scheduledAt est à plus de 7 jours — vérifie la date ' +
+          '(utilise la Date du jour du contexte) ou propose un créneau plus proche.',
+      );
+    }
+
+    const scheduledForFr =
+      wantsLater && target
+        ? target.toLocaleString('fr-FR', {
+            weekday: 'long',
+            day: 'numeric',
+            month: 'long',
+            hour: '2-digit',
+            minute: '2-digit',
+            timeZone: 'Europe/Paris',
+          })
+        : null;
+
+    if (wantsLater && target && leadId) {
+      // Timed callback: hand off to the M12 callback scheduler (single
+      // idempotent dial path, survives restarts). It claims the row when
+      // callback_due_at arrives and emits VOICE.CALL_SCHEDULED itself.
+      await ctx.db
+        .update(leads)
+        .set({ callbackDueAt: target, callbackState: 'pending' })
+        .where(eq(leads.id, leadId));
+      logger.info(
+        { leadId, callId, dueAt: target.toISOString() },
+        'voice.schedule_call: callback booked — the callback scheduler will dial at the time',
+      );
+    } else {
+      // Call now (also the fallback when no leadId exists to hang the timed
+      // callback on — better an early call than none).
+      await sendMessage(
+        { db: ctx.db },
+        {
+          fromRole: ctx.agentRole,
+          fromInstance: ctx.agentInstance,
+          toRole: 'voice-operator',
+          intent: 'VOICE.CALL_SCHEDULED',
+          payload: {
+            callId,
+            customerId: input.customerId,
+            toNumber: customer.phone ?? '',
+            scheduledAt: new Date().toISOString(),
+          },
+          ...(leadId ? { correlationId: leadId } : {}),
+        },
+      );
+    }
+
+    // Paper trail — audit row (admin audit log) + HubSpot note on the
+    // contact/deal timeline. Both best-effort, never block the booking.
+    try {
+      await appendAudit(ctx.db, {
+        actorType: 'agent',
+        actorId: `${ctx.agentRole}#${ctx.agentInstance}`,
+        action: wantsLater ? 'voice.callback.booked' : 'voice.call.requested',
+        targetType: 'lead',
+        targetId: leadId ?? input.customerId,
+        meta: {
+          callId,
+          ...(wantsLater && target ? { dueAt: target.toISOString() } : {}),
+          ...(input.reason ? { reason: input.reason.slice(0, 120) } : {}),
+        },
+      });
+    } catch {
+      // non-blocking
+    }
+    try {
+      await emitHubSpotActivity(ctx.db, {
+        customerId: input.customerId,
+        ...(leadId ? { leadId } : {}),
+        activity: {
+          kind: 'callback-booked',
+          customerId: input.customerId,
+          ...(leadId ? { leadId } : {}),
+          body: scheduledForFr
+            ? `📞 Rappel téléphonique programmé (demande client) : ${scheduledForFr}.`
+            : `📞 Appel sortant lancé à la demande du client.`,
+          timestamp: new Date(),
+        },
+      });
+    } catch {
+      // best-effort
+    }
+
+    return {
+      callId,
+      queued: true as const,
+      ...(scheduledForFr ? { scheduledFor: scheduledForFr } : {}),
+    };
   },
 });
