@@ -480,10 +480,26 @@ export async function handleDevisPdfReceived(
     filename: `Devis-Assuryal-${payload.devisNumber}.pdf`,
     mimeType: 'application/pdf',
   };
+  // Vary the delivery text for a comparison's subsequent devis — Achraf's
+  // 07-07 run delivered devis #2 with the exact same sentence as #1, which
+  // reads like a glitch. Count DISTINCT devis refs already delivered in the
+  // conversation (each delivery = 2 turns, whatsapp+email — dedupe by DR).
+  const priorDevis = new Set<string>();
+  for (const t of recentTurns) {
+    if (t.direction !== 'outbound') continue;
+    for (const m of (t.content ?? '').matchAll(/Réf\.\s*(DR\d+)/gi)) {
+      const dr = m[1]?.toUpperCase();
+      if (dr && dr !== payload.devisNumber.toUpperCase()) priorDevis.add(dr);
+    }
+  }
   const messageText =
-    `Voici votre devis Assuryal en pièce jointe (${marker}). ` +
-    `N'hésitez pas à revenir vers nous pour toute question — et si le devis vous convient, ` +
-    `nous pouvons finaliser la souscription ensemble.`;
+    priorDevis.size === 0
+      ? `Voici votre devis Assuryal en pièce jointe (${marker}). ` +
+        `N'hésitez pas à revenir vers nous pour toute question — et si le devis vous convient, ` +
+        `nous pouvons finaliser la souscription ensemble.`
+      : `Et voici votre ${priorDevis.size === 1 ? 'second' : 'nouveau'} devis (${marker}). ` +
+        `Vous avez maintenant ${priorDevis.size === 1 ? 'les deux versions' : 'toutes les versions'} en main ` +
+        `pour comparer tranquillement — dites-nous celle qui vous convient et on finalise ensemble.`;
 
   const deliveries: Record<string, string> = {};
   const failures: Record<string, string> = {};
