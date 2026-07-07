@@ -374,6 +374,14 @@ export async function generateSalesReply(
       'sales-agent: compliance blocked draft, escalating to human',
     );
 
+    // WA-group throttle (2026-07-07, Ridaa): several blocks on the same lead
+    // within minutes each posted an "ACTION NEEDED" — one pending decision per
+    // lead is enough. Check BEFORE inserting the new row; the admin still gets
+    // every action, only the duplicate group post is suppressed.
+    const alreadyEscalated = await humanActions
+      .hasPendingAction(db, { correlationId: lead.id, intent: 'COMPLIANCE_BLOCKED' })
+      .catch(() => false);
+
     // Persist the human action — severity 2 = standard (yellow).
     const action = await humanActions.createAction(db, {
       createdByAgent: `${agentRole}#${agentInstance}`,
@@ -411,12 +419,20 @@ export async function generateSalesReply(
 
     // The supervisor emit is audit-only; the WA group needs the HUMAN_ACTION
     // emit (2026-07-04 audit, H1) — a blocked reply means the customer is
-    // waiting on a human decision right now.
-    await notifyHumanAction(
-      db,
-      { id: action.id, severity: 2, summary: action.summary },
-      { role: agentRole, instanceId: agentInstance, correlationId: lead.id },
-    );
+    // waiting on a human decision right now. Skipped when a COMPLIANCE_BLOCKED
+    // for this lead is already pending in the group (see throttle above).
+    if (!alreadyEscalated) {
+      await notifyHumanAction(
+        db,
+        { id: action.id, severity: 2, summary: action.summary },
+        { role: agentRole, instanceId: agentInstance, correlationId: lead.id },
+      );
+    } else {
+      logger.info(
+        { leadId: lead.id, humanActionId: action.id },
+        'sales-agent: compliance block escalated in admin only — a pending block for this lead is already in the WA group',
+      );
+    }
 
     return { outcome: 'blocked', humanActionId: action.id, reasons: compliance.reasons };
   }

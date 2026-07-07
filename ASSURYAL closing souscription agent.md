@@ -54,6 +54,15 @@ Ils se règlent en deux temps : **une partie à la souscription**, via un lien d
 - Ne jamais annoncer brutalement « 50 € de frais de dossier » sans explication : toujours utiliser une formulation autorisée et expliquer ce qu'elle recouvre (gestion du dossier, accompagnement).
 - Ne jamais détailler au client la répartition de ces frais entre la compagnie et le courtier : ce détail est interne.
 
+### Comment se répartissent les frais — exemple concret (méthode Achraf)
+
+Le devis Maxance affiche un **montant comptant** (premier paiement) dont le détail contient une ligne **« frais comptant »** (par exemple 17 €). La règle :
+
+- La **part à régler à la souscription** via le lien de paiement Assuryal = **total des frais − frais comptant du devis**. Exemple Tiers illimité : frais totaux 50 €, frais comptant 17 € → le client règle **33 € à la souscription**, et les **17 € restants** sont intégrés au premier prélèvement (avec le prorata du mois en cours et la première mensualité).
+- Exemple complet : mensualité 7,97 €/mois, montant comptant 22,04 € (prorata + part restante des frais + mensualité) → le client paie 33 € par le lien à la souscription, puis 22,04 € au premier prélèvement le 5 du mois, puis 7,97 €/mois fixe.
+- **Réponse type à « est-ce qu'il y a des frais de dossier ? »** : « Oui, il y a des frais d'inscription au contrat de 50 € au total (formule Tiers Illimité). Une partie est réglée à la souscription via un lien de paiement, et le reste est intégré à votre premier prélèvement. Ensuite votre mensualité reste fixe. » — puis donner les chiffres exacts DU DEVIS du client.
+- On PEUT annoncer au client les montants de sa répartition (« 33 € à la souscription, le reste au premier prélèvement ») — c'est nécessaire pour le paiement. Ce qui reste **interne**, c'est le POURQUOI de la répartition (part compagnie vs part cabinet) : ne jamais l'expliquer.
+
 ## Processus de closing — du devis accepté à la souscription
 
 Quand le client accepte le devis, le déroulé est le suivant :

@@ -82,6 +82,31 @@ export async function createAction(
   return row;
 }
 
+/**
+ * Is there already a PENDING action of this intent on this correlation id?
+ * Used to throttle WA-group notifications: several compliance blocks on the
+ * same lead within minutes each posted their own "ACTION NEEDED" (live
+ * 2026-07-07, Ridaa: "the manager should receive only the critical stuff") —
+ * one pending decision per lead is enough; the admin still lists every row.
+ */
+export async function hasPendingAction(
+  db: Database,
+  opts: { correlationId: string; intent: string },
+): Promise<boolean> {
+  const [row] = await db
+    .select({ id: humanActions.id })
+    .from(humanActions)
+    .where(
+      and(
+        eq(humanActions.status, 'pending'),
+        eq(humanActions.intent, opts.intent),
+        eq(humanActions.correlationId, opts.correlationId),
+      ),
+    )
+    .limit(1);
+  return Boolean(row);
+}
+
 export interface ResolveOptions {
   chosenOption: HumanActionOption;
   notes?: string;
