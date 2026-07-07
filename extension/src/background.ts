@@ -76,17 +76,41 @@ function extensionVersion(): string {
 }
 
 /**
+ * The tab id we last drove a command against. Kept so the driven tab stays
+ * "sticky" through TRANSIENT off-maxance.com navigations — chiefly the SSO
+ * bounce the phase-2j reset triggers (accueil.do → Auth0/IdP → back). During
+ * that bounce a pure URL query finds no maxance.com tab, which used to fail
+ * the next request with `no_active_tab` (old build) or spawn a duplicate tab
+ * (07-06 auto-create). Reusing the known tab id rides the bounce out. Cleared
+ * implicitly: chrome.tabs.get rejects for a closed tab and we fall through.
+ */
+let lastDrivenTabId: number | null = null;
+
+/**
  * Find the Maxance tab to drive. Strategy:
- *   1. If there's exactly one Maxance tab → use it.
- *   2. If there are several → prefer the active one in any window.
- *   3. If none → return null and let the caller surface no_active_tab.
+ *   1. If there's a maxance.com/extranet tab → prefer the active one.
+ *   2. Else, if the last-driven tab still exists → reuse it even if its URL is
+ *      momentarily off-domain (mid-SSO-bounce). Avoids no_active_tab + dup tabs.
+ *   3. If none → return null and let the caller create one / surface the error.
  */
 async function findMaxanceTab(): Promise<chrome.tabs.Tab | null> {
   const tabs = await chrome.tabs.query({
     url: ['https://www.maxance.com/*', 'https://extranet.maxance.com/*'],
   });
-  if (tabs.length === 0) return null;
-  return tabs.find((t) => t.active) ?? tabs[0] ?? null;
+  const byUrl = tabs.find((t) => t.active) ?? tabs[0] ?? null;
+  if (byUrl) return byUrl;
+  // No tab currently ON maxance.com — reuse the last-driven one if it survives
+  // (it may be transiting SSO right now; the flow's own screen detection +
+  // SSO-transient handling will settle it).
+  if (lastDrivenTabId !== null) {
+    try {
+      const t = await chrome.tabs.get(lastDrivenTabId);
+      if (t && t.id !== undefined) return t;
+    } catch {
+      lastDrivenTabId = null; // tab was closed — forget it
+    }
+  }
+  return null;
 }
 
 /** Send a wire frame on the open WS. No-ops silently if not OPEN. */
@@ -184,6 +208,14 @@ async function createMaxanceTab(commandId: string): Promise<chrome.tabs.Tab> {
  */
 async function forwardToContent(command: Command): Promise<Response> {
   let tab = await findMaxanceTab();
+  // Short grace retry before creating a tab: a phase-2j reset SSO bounce can
+  // briefly leave NO maxance.com tab AND a not-yet-resolved last-driven id.
+  // One 1.5s re-check rides that out so we don't spawn a duplicate tab (or,
+  // on the old build, fail with no_active_tab) mid-bounce.
+  if (!tab || tab.id === undefined) {
+    await sleep(1_500);
+    tab = await findMaxanceTab();
+  }
   if (!tab || tab.id === undefined) {
     try {
       tab = await createMaxanceTab(command.id);
@@ -206,6 +238,9 @@ async function forwardToContent(command: Command): Promise<Response> {
       detail: 'maxance tab has no id — cannot forward',
     });
   }
+  // Remember it so the NEXT command reuses this exact tab through any transient
+  // SSO bounce (see findMaxanceTab / lastDrivenTabId).
+  lastDrivenTabId = tabId;
 
   let resp = await dispatchToTab(tabId, command);
 
