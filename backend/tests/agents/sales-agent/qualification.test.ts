@@ -23,6 +23,27 @@ function stub(text: string): typeof callClaude {
 }
 
 describe('qualification extractor', () => {
+  it("hands the extractor today's date + the agent's last message (2026-07-08 fix)", async () => {
+    // Live failures without these: "il y a 5 jours" resolved to a
+    // hallucinated year, and « oui c'est ça » confirming the agent's
+    // corrected date updated nothing.
+    let seenPrompt = '';
+    const capture = (async (input: { userPrompt: string }) => {
+      seenPrompt = input.userPrompt;
+      return '{}';
+    }) as unknown as typeof callClaude;
+    await extractQualification({
+      current: {},
+      message: 'Oui oui c sa',
+      lastAgentMessage: "La date d'achat, c'est bien le 3 juillet 2026 alors ?",
+      callImpl: capture,
+    });
+    expect(seenPrompt).toContain('DATE DU JOUR');
+    expect(seenPrompt).toMatch(/\d{4}-\d{2}-\d{2}/); // ISO today for relative-date math
+    expect(seenPrompt).toContain("DERNIER MESSAGE DE L'AGENT");
+    expect(seenPrompt).toContain('3 juillet 2026');
+  });
+
   it('merges a newly-provided field into the current state', async () => {
     const out = await extractQualification({
       current: {},

@@ -72,10 +72,16 @@ export function isQualificationComplete(state: QualificationState): boolean {
 const QUAL_EXTRACT_KEY = 'sales-agent.qualification-extractor';
 const QUAL_EXTRACT_SYSTEM =
   "Tu extrais des champs structurés d'un message client pour un devis d'assurance trottinette " +
-  "électrique. On te donne l'état DÉJÀ collecté et le NOUVEAU message. Renvoie UNIQUEMENT les " +
-  "champs que le NOUVEAU message fournit ou corrige (un objet JSON partiel), rien d'autre. " +
+  "électrique. On te donne la DATE DU JOUR, l'état DÉJÀ collecté, le DERNIER MESSAGE DE L'AGENT " +
+  'et le NOUVEAU message du client. Renvoie UNIQUEMENT les champs que le NOUVEAU message fournit ' +
+  "ou corrige (un objet JSON partiel), rien d'autre. " +
   'Comprends le français familier, les abréviations et les fautes ("ça vaut 600", "10 fev 1999", ' +
-  '"box"). Normalise : dates au format YYYY-MM-DD ; prix en nombre (euros) ; code postal = 5 ' +
+  '"box"). Dates RELATIVES ("il y a 5 jours", "le mois dernier", "avant-hier") : calcule-les à ' +
+  "partir de la DATE DU JOUR fournie — n'invente JAMAIS une date d'une autre année. " +
+  'CONFIRMATIONS : si le client confirme ("oui", "oui c\'est ça", "exact") une valeur précise ' +
+  "proposée dans le DERNIER MESSAGE DE L'AGENT (ex. « c'est bien le 3 juillet 2026 ? »), renvoie " +
+  'cette valeur confirmée comme champ corrigé. ' +
+  'Normalise : dates au format YYYY-MM-DD ; prix en nombre (euros) ; code postal = 5 ' +
   'chiffres. Mappe le stationnement sur EXACTEMENT une valeur : "garage_box" (garage/box), ' +
   '"parking_prive_clos" (parking privé fermé), "parking_prive_non_clos" (parking privé ouvert), ' +
   '"rue" (dans la rue). Champs possibles : purchasePriceEur (nombre), purchaseDate (string), ' +
@@ -118,6 +124,14 @@ function parseJsonLoose(text: string): Record<string, unknown> | null {
 export async function extractQualification(args: {
   current: QualificationState;
   message: string;
+  /**
+   * The agent's most recent outbound message (2026-07-08 fix). Two live
+   * failures without it: "il y a 5 jours" resolved to a hallucinated year
+   * (the extractor had no today-date), and the customer's « oui c'est ça »
+   * confirming the agent's corrected date updated NOTHING (the value only
+   * existed in the agent's message the extractor never saw).
+   */
+  lastAgentMessage?: string;
   callImpl?: typeof callClaude;
   /** Resolves the (admin-editable) extractor prompt override when provided. */
   db?: Database;
@@ -128,8 +142,21 @@ export async function extractQualification(args: {
   const systemPrompt = args.db
     ? await resolvePrompt(args.db, QUAL_EXTRACT_KEY, () => QUAL_EXTRACT_SYSTEM)
     : QUAL_EXTRACT_SYSTEM;
+  const today = new Date();
+  const todayFr = today.toLocaleDateString('fr-FR', {
+    weekday: 'long',
+    day: 'numeric',
+    month: 'long',
+    year: 'numeric',
+    timeZone: 'Europe/Paris',
+  });
+  const todayIso = today.toISOString().slice(0, 10);
   const userPrompt =
+    `DATE DU JOUR : ${todayFr} (${todayIso})\n\n` +
     `ÉTAT DÉJÀ COLLECTÉ (JSON):\n${JSON.stringify(current)}\n\n` +
+    (args.lastAgentMessage
+      ? `DERNIER MESSAGE DE L'AGENT (le client peut y répondre / le confirmer):\n"${args.lastAgentMessage.slice(0, 400)}"\n\n`
+      : '') +
     `NOUVEAU MESSAGE DU CLIENT:\n"${message}"\n\n` +
     'Renvoie UNIQUEMENT les champs fournis/corrigés par ce message, en JSON strict (objet partiel, {} si aucun).';
 
