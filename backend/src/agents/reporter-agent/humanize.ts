@@ -152,7 +152,7 @@ export function explainErrorCode(code: string): string {
  * "Quote <uuid> failed (login_failed:maxance_extension_no_active_tab)."
  * Returns null when no slug-shaped code is present.
  */
-function extractErrorCode(summary: string): string | null {
+export function extractErrorCode(summary: string): string | null {
   const m = /\(([a-z][a-z0-9_:.-]*)\)/.exec(summary);
   return m?.[1] ?? null;
 }
@@ -170,6 +170,8 @@ export interface ActionContext {
   productLine?: string;
   /** attribution.f16_simulation === 'true' → /sim test lead, not a customer. */
   simulation?: boolean;
+  /** Resolved lead id — the admin queue links "voir le dossier" with it. */
+  leadId?: string;
 }
 
 const SOURCE_LABELS_EN: Record<string, string> = {
@@ -228,6 +230,7 @@ export async function resolveActionContext(
       if (lead) {
         ctx.source = lead.source;
         ctx.productLine = lead.productLine;
+        ctx.leadId = leadId ?? undefined;
         const attr = (lead.attribution ?? null) as Record<string, unknown> | null;
         if (attr?.['f16_simulation'] === 'true') ctx.simulation = true;
         customerId = customerId ?? lead.customerId;

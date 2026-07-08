@@ -38,6 +38,12 @@ import { sendMessage } from '../messaging/dispatcher.js';
 import { appendAudit } from '../db/repositories/audit-log.js';
 import { logger } from '../logger.js';
 import { emitHubSpotActivity } from '../integrations/hubspot/activity-worker.js';
+import {
+  resolveActionContext,
+  extractErrorCode,
+  splitDraft,
+  stripUuids,
+} from '../agents/reporter-agent/humanize.js';
 
 export interface AdminHumanActionsRouterOptions {
   db: Database;
@@ -58,7 +64,85 @@ export interface HumanActionRow {
   resolvedBy: string | null;
   resolvedSource: string | null;
   resolution: HumanAction['resolution'];
+  // ----- Redesign 2026-07-08 (Ridaa: "not some numbers I don't understand") -
+  /** French intent title, e.g. "Devis échoué". */
+  titleFr: string;
+  /** Plain-French problem explanation (from the machine error code). */
+  problemFr: string | null;
+  /** UUID-free version of the summary (short #refs instead). */
+  summaryClean: string;
+  /** Blocked message draft (compliance holds) — shown verbatim. */
+  draft: string | null;
+  /** Who this is about, resolved from correlationId → quote → lead. */
+  customer: {
+    name: string | null;
+    sourceFr: string | null;
+    productFr: string | null;
+    simulation: boolean;
+    leadId: string | null;
+  } | null;
 }
+
+const INTENT_TITLES_FR: Record<string, string> = {
+  QUOTE_FAILED: 'Devis échoué',
+  QUOTE_STUCK: 'Devis bloqué',
+  COMPLIANCE_BLOCKED: 'Message retenu (conformité)',
+  DEVIS_DELIVERY_FAILED: 'Envoi du devis échoué',
+  DEVIS_DELIVERY_PARTIAL: 'Devis envoyé partiellement',
+  DEVIS_RELAY_STUCK: 'Relai du devis bloqué',
+  SUBSCRIPTION_FAILED: 'Souscription échouée',
+  PAYMENT_PENDING_HUMAN: 'Paiement — relais humain',
+  CONTRACT_PENDING_HUMAN: 'Contrat — relais humain',
+  AGENT_LOOP_DETECTED: "Boucle d'agents détectée",
+  MAXANCE_LOGIN_REQUIRED: 'Connexion Maxance requise',
+};
+
+/** French twin of humanize.ts explainErrorCode (EN stays for the WA group). */
+function explainErrorCodeFr(code: string): string {
+  const c = code.toLowerCase();
+  if (c.includes('maxance_invalid_postal_code')) {
+    return "Le code postal donné par le client ne correspond à aucune commune — l'agent lui demande de le vérifier.";
+  }
+  if (c.includes('maxance_maintenance')) {
+    return 'Maxance affiche sa page de maintenance — nouvelle tentative automatique à la réouverture.';
+  }
+  if (c.includes('maxance_login_required')) {
+    return 'La session Maxance a expiré — connectez-vous dans Chrome ; les devis en attente repartiront tout seuls.';
+  }
+  if (c.startsWith('login_failed') || c.includes('no_active_tab')) {
+    return 'Portail Maxance injoignable — fermé la nuit (20h-08h) et le week-end, ou onglet déconnecté.';
+  }
+  if (
+    c.includes('extension_disconnected') ||
+    c.includes('extension_not_connected') ||
+    c.includes('extension_forward_failed')
+  ) {
+    return "L'extension Chrome qui pilote Maxance s'est déconnectée (rechargement ou Chrome fermé).";
+  }
+  if (c.includes('hard_timeout') || c.includes('flow_timeout')) {
+    return 'Le formulaire Maxance a tourné en boucle sans aboutir (4 min) — souvent une donnée que Maxance refuse (ex. code postal) ou une page bloquée.';
+  }
+  if (c.includes('maxance_garanties')) {
+    return "Le formulaire Maxance a changé ou s'est mal comporté à l'étape des garanties.";
+  }
+  if (c.includes('rib_rejected')) {
+    return 'Maxance a refusé les coordonnées bancaires (RIB) du client.';
+  }
+  return `Erreur technique (${code}).`;
+}
+
+const SOURCE_LABELS_FR: Record<string, string> = {
+  website: 'Site web',
+  meta: 'Pub Facebook/Instagram',
+  organic: 'Organique',
+  referral: 'Parrainage',
+  other: 'Autre',
+};
+
+const PRODUCT_LABELS_FR: Record<string, string> = {
+  scooter: 'Trottinette',
+  car: 'Auto',
+};
 
 const ListQuerySchema = z.object({
   severity: z
@@ -89,7 +173,8 @@ export function buildAdminHumanActionsRouter(opts: AdminHumanActionsRouterOption
     const listOpts: Parameters<typeof listPending>[1] = { limit: parse.data.limit };
     if (parse.data.severity !== undefined) listOpts.severity = parse.data.severity;
     const rows = await listPending(opts.db, listOpts);
-    return c.json({ rows: rows.map(toRow) }, 200);
+    const enriched = await Promise.all(rows.map((r) => toRow(opts.db, r)));
+    return c.json({ rows: enriched }, 200);
   });
 
   app.post('/v1/admin/human-actions/:id/resolve', async (c) => {
@@ -233,7 +318,7 @@ export function buildAdminHumanActionsRouter(opts: AdminHumanActionsRouterOption
     const status = wasResolved ? 409 : 200;
     return c.json(
       {
-        row: toRow(updated),
+        row: await toRow(opts.db, updated),
         alreadyResolved: wasResolved,
       },
       status,
@@ -243,7 +328,32 @@ export function buildAdminHumanActionsRouter(opts: AdminHumanActionsRouterOption
   return app;
 }
 
-function toRow(r: HumanAction): HumanActionRow {
+/**
+ * Wire row + plain-French enrichment (2026-07-08 — Ridaa: the queue showed
+ * "some numbers I don't understand"). Resolves who the action is about via
+ * the same correlation→quote→lead→customer walk the WA-group formatter uses,
+ * translates the machine error code to French, strips UUIDs from the summary
+ * and splits out a blocked draft. All best-effort: enrichment failure still
+ * returns the base row.
+ */
+async function toRow(db: Database, r: HumanAction): Promise<HumanActionRow> {
+  const { summary, draft } = splitDraft(r.summary);
+  const errorCode = extractErrorCode(summary);
+  let customer: HumanActionRow['customer'] = null;
+  try {
+    const ctx = await resolveActionContext(db, r);
+    if (ctx.customerName || ctx.source || ctx.productLine || ctx.leadId) {
+      customer = {
+        name: ctx.customerName ?? null,
+        sourceFr: ctx.source ? (SOURCE_LABELS_FR[ctx.source] ?? ctx.source) : null,
+        productFr: ctx.productLine ? (PRODUCT_LABELS_FR[ctx.productLine] ?? ctx.productLine) : null,
+        simulation: ctx.simulation === true,
+        leadId: ctx.leadId ?? null,
+      };
+    }
+  } catch {
+    // enrichment is cosmetic — never fail the endpoint on it
+  }
   return {
     id: r.id,
     createdByAgent: r.createdByAgent,
@@ -258,5 +368,10 @@ function toRow(r: HumanAction): HumanActionRow {
     resolvedBy: r.resolvedBy ?? null,
     resolvedSource: r.resolvedSource ?? null,
     resolution: r.resolution,
+    titleFr: INTENT_TITLES_FR[r.intent] ?? r.intent,
+    problemFr: errorCode ? explainErrorCodeFr(errorCode) : null,
+    summaryClean: stripUuids(summary),
+    draft,
+    customer,
   };
 }

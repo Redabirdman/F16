@@ -200,6 +200,17 @@ export interface HumanActionRow {
   resolvedBy: string | null;
   resolvedSource: string | null;
   resolution: Record<string, unknown> | null;
+  titleFr: string;
+  problemFr: string | null;
+  summaryClean: string;
+  draft: string | null;
+  customer: {
+    name: string | null;
+    sourceFr: string | null;
+    productFr: string | null;
+    simulation: boolean;
+    leadId: string | null;
+  } | null;
 }
 
 export interface ListHumanActionsResponse {
