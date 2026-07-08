@@ -121,10 +121,44 @@ export function formatQuotePreviewMessage(opts: {
       );
     }
 
-    // First payment for the requested formule (bigger than the mensualité).
+    // Payment structure (2026-07-08, Achraf's method v2 — mirrors the
+    // closing-knowledge frais model): honoraires de gestion = 50/60/65 €
+    // (formule-dependent), FIRST YEAR ONLY, paid in two parts — one via the
+    // payment link at souscription, the rest inside the first prélèvement
+    // (comptant = frais part + 1st mensualité). Both parts are computable
+    // from the preview: fraisPart = comptant − mensualité; linkPart =
+    // totalHonoraires − fraisPart. Falls back to the simple line when the
+    // arithmetic doesn't hold (unexpected Maxance pricing shape).
+    const HONORAIRES_TOTAL: Record<Formule, number> = {
+      tiers_illimite: 50,
+      vol_incendie: 60,
+      dommages_tous_accidents: 65,
+    };
     const requested = byFormule.get(opts.formule) ?? tiers;
     if (requested?.comptantEur !== undefined) {
-      lines.push('', `Premier paiement : ${formatEur(requested.comptantEur)}, puis mensualités.`);
+      const totalHonoraires = HONORAIRES_TOTAL[requested.formule] ?? 50;
+      const fraisPart =
+        requested.termeSuivantEur !== undefined
+          ? requested.comptantEur - requested.termeSuivantEur
+          : undefined;
+      const linkPart = fraisPart !== undefined ? totalHonoraires - fraisPart : undefined;
+      if (
+        fraisPart !== undefined &&
+        linkPart !== undefined &&
+        fraisPart > 0 &&
+        linkPart > 0 &&
+        fraisPart < totalHonoraires
+      ) {
+        lines.push(
+          '',
+          'Côté paiement :',
+          `• À la souscription, par lien de paiement : ${formatEur(linkPart)} — 1re partie des honoraires de gestion du dossier`,
+          `• 1er prélèvement le 5 du mois suivant : ${formatEur(requested.comptantEur)} (le reste des honoraires + votre 1re mensualité), puis mensualités normales`,
+          `Pour faire simple : les honoraires de gestion s'élèvent à ${formatEur(totalHonoraires)} la première année — ensuite c'est gratuit — payés en deux parties.`,
+        );
+      } else {
+        lines.push('', `Premier paiement : ${formatEur(requested.comptantEur)}, puis mensualités.`);
+      }
     }
 
     lines.push(

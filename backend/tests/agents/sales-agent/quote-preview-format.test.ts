@@ -124,8 +124,18 @@ describe('formatQuotePreviewMessage', () => {
     expect(out).toContain('💡 Notre conseil : Tiers Illimité + les 2 options');
     // 6.51 + 13.04/12 + 17.72/12 = 9.0733… → formatted 9,07 (unrounded sum).
     expect(out).toContain('9,07 €/mois');
-    // First payment (comptant) of the requested formule.
-    expect(out).toContain('Premier paiement : 22,45 €, puis mensualités.');
+    // Payment structure (Achraf's method v2, 2026-07-08): honoraires de
+    // gestion 50 € (tiers) split into link part (50 − (comptant − mensualité)
+    // = 50 − 15,94 = 34,06) + the comptant on the 1st prélèvement.
+    expect(out).toContain(
+      'À la souscription, par lien de paiement : 34,06 € — 1re partie des honoraires de gestion du dossier',
+    );
+    expect(out).toContain(
+      '1er prélèvement le 5 du mois suivant : 22,45 € (le reste des honoraires + votre 1re mensualité), puis mensualités normales',
+    );
+    expect(out).toContain(
+      "les honoraires de gestion s'élèvent à 50,00 € la première année — ensuite c'est gratuit",
+    );
     expect(out).toContain('(réf #abc12345)');
   });
 
@@ -151,7 +161,9 @@ describe('formatQuotePreviewMessage', () => {
     expect(out).toContain('• Tiers Illimité : 6,51 €/mois');
     expect(out).not.toContain('Options ajoutables');
     expect(out).not.toContain('💡');
-    expect(out).toContain('Premier paiement : 22,45 €');
+    // Same payment-structure block (fraisPart 15,94 → link part 34,06).
+    expect(out).toContain('À la souscription, par lien de paiement : 34,06 €');
+    expect(out).toContain('1er prélèvement le 5 du mois suivant : 22,45 €');
   });
 
   it('uses French decimal comma + two decimals consistently', () => {
