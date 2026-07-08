@@ -382,7 +382,15 @@ export async function generateSalesReply(
               `${t.direction === 'inbound' ? 'CLIENT' : 'AGENT'}: ${(t.content ?? '').slice(0, 180)}`,
           )
           .join('\n');
-  const systemTriggered = /^\[CONTINUATION AUTOMATIQUE/.test(content);
+  // System-initiated turns all share the « message système interne » marker
+  // in their bracketed prefix ([CONTINUATION AUTOMATIQUE …], [RELANCE
+  // PROGRAMMÉE …], [ERREUR DONNÉES …], and any future self-wake). Live
+  // 2026-07-08: matching ONLY the continuation prefix left the invalid-CP
+  // turn unflagged, so the sentry read the internal instruction as the
+  // customer's message and blocked the (perfectly normal) draft as a
+  // "reformulated internal monologue".
+  const systemTriggered =
+    content.startsWith('[') && /message système interne/i.test(content.slice(0, 160));
   // Ground "c'est programmé / je transmets" claims: the tools the model
   // REALLY executed this turn are facts, not promises (the sentry blocked
   // "un conseiller vous rappelle ce soir" while the call was in flight).
