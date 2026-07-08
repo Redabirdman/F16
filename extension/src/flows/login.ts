@@ -125,6 +125,27 @@ export async function runLoginEnsure(cmd: LoginEnsureCommand): Promise<Response>
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
+    // Re-classify BEFORE reporting (2026-07-08, Achraf's run: the tab sat on
+    // the public maxance.com homepage with a dead Auth0 session — the SSO
+    // bounce timed out and surfaced as an opaque maxance_login_unknown).
+    // If we ended up on the login form, any password page, or we're STILL
+    // on the public site after attempting the SSO entry, the session is
+    // dead and only Ridaa can fix it → surface the STRUCTURED
+    // login-required code so the backend PARKS the quote (short retry,
+    // auto-resume after login) and pings the group exactly once.
+    const here = new URL(location.href);
+    const stuckLoggedOut =
+      classifyCurrentUrl(location.href) === 'login' ||
+      document.querySelector('input[type="password"]') !== null ||
+      (here.hostname === 'www.maxance.com' && !here.pathname.startsWith('/Proximeo/'));
+    if (stuckLoggedOut) {
+      return ErrorResponseSchema.parse({
+        id: cmd.id,
+        kind: 'error',
+        errorCode: 'maxance_login_required_human_action',
+        detail: `session dead — landed on ${here.hostname}${here.pathname.slice(0, 60)} (${msg.slice(0, 120)})`,
+      });
+    }
     return ErrorResponseSchema.parse({
       id: cmd.id,
       kind: 'error',
