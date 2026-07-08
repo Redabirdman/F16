@@ -143,7 +143,7 @@ export const VOICE_TOOLS = [
     type: 'function',
     name: 'transferer_conseiller',
     description:
-      'Transférer la demande à un conseiller humain (Ridaa ou Achraf). OBLIGATOIRE si le client demande un remboursement, conteste un contrat, parle de litige/avocat/ACPR/plainte, veut résilier, demande un humain, finalise un paiement/contrat, ou situation hors-cadre.',
+      'Transférer la demande à un conseiller humain Assuryal (ne JAMAIS citer de prénom interne au client). OBLIGATOIRE si le client demande un remboursement, conteste un contrat, parle de litige/avocat/ACPR/plainte, veut résilier, demande un humain, finalise un paiement/contrat, ou situation hors-cadre.',
     parameters: {
       type: 'object',
       properties: {

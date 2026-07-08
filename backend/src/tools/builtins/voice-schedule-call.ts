@@ -48,7 +48,26 @@ const inputSchema = z.object({
    * "2026-07-08T19:00:00+02:00"). Omit for "call now".
    */
   scheduledAt: z.string().datetime({ offset: true }).optional(),
+  /**
+   * A DIFFERENT number the customer explicitly gave for this call (live
+   * 2026-07-08: « voilà mon numéro … » — the profile number belonged to
+   * their kid). Accepts 06/07…, +33…, 00… formats; normalized to E.164.
+   * Omit to call the profile number.
+   */
+  phoneNumber: z.string().min(6).max(24).optional(),
 });
+
+/**
+ * Normalize a customer-typed phone number to E.164 for the SIP dialer.
+ * Returns null when the input can't be a dialable number.
+ */
+export function normalizeDialNumber(raw: string): string | null {
+  const digits = raw.replace(/[\s.\-()]/g, '');
+  if (/^\+\d{8,15}$/.test(digits)) return digits;
+  if (/^0\d{9}$/.test(digits)) return `+33${digits.slice(1)}`;
+  if (/^00\d{8,14}$/.test(digits)) return `+${digits.slice(2)}`;
+  return null;
+}
 
 const outputSchema = z.object({
   callId: z.string().uuid(),
@@ -65,13 +84,24 @@ registerTool({
     "l'appel partira À CE MOMENT-LÀ — calcule à partir de la Date du jour du contexte " +
     '(ex. "demain à partir de 19h" → demain 19:00 heure française). Si le créneau demandé ' +
     "est déjà atteignable aujourd'hui (il est 19h20 et le client dit «à partir de 19h»), " +
-    "appelle MAINTENANT (omets scheduledAt). Dis au client qu'on l'appelle (maintenant ou " +
-    'au créneau convenu — le résultat contient scheduledFor quand il est programmé).',
+    'appelle MAINTENANT (omets scheduledAt). ⚠️ Si le client donne un AUTRE numéro pour ' +
+    "l'appel (« appelez-moi plutôt sur … »), passe-le dans phoneNumber — sinon l'appel part " +
+    "sur le numéro de la fiche. Dis au client qu'on l'appelle (maintenant ou au créneau " +
+    'convenu — le résultat contient scheduledFor quand il est programmé).',
   inputSchema,
   outputSchema,
   handler: async (ctx, input) => {
     const customer = await getCustomerById(ctx.db, input.customerId);
     if (!customer) throw new Error('voice.schedule_call: customer not found');
+
+    // Customer-provided alternative number (never logged raw — PII).
+    const overrideNumber = input.phoneNumber ? normalizeDialNumber(input.phoneNumber) : null;
+    if (input.phoneNumber && !overrideNumber) {
+      throw new Error(
+        'voice.schedule_call: le numéro fourni est invalide — redemande-le au client ' +
+          '(format 06/07 xx xx xx xx ou +33...).',
+      );
+    }
 
     const callId = randomUUID();
     const leadId = input.leadId ?? ctx.correlationId ?? null;
@@ -101,10 +131,12 @@ registerTool({
           })
         : null;
 
-    if (wantsLater && target && leadId) {
+    if (wantsLater && target && leadId && !overrideNumber) {
       // Timed callback: hand off to the M12 callback scheduler (single
       // idempotent dial path, survives restarts). It claims the row when
       // callback_due_at arrives and emits VOICE.CALL_SCHEDULED itself.
+      // (The scheduler dials the PROFILE phone — an override number can't
+      // ride this path, see the delayed-emit branch below.)
       await ctx.db
         .update(leads)
         .set({ callbackDueAt: target, callbackState: 'pending' })
@@ -112,6 +144,32 @@ registerTool({
       logger.info(
         { leadId, callId, dueAt: target.toISOString() },
         'voice.schedule_call: callback booked — the callback scheduler will dial at the time',
+      );
+    } else if (wantsLater && target && overrideNumber) {
+      // Timed callback on a customer-provided number: the callback scheduler
+      // only knows the profile phone, so park a delayed VOICE.CALL_SCHEDULED
+      // carrying the override directly (BullMQ delayed job — survives
+      // restarts via Redis persistence).
+      await sendMessage(
+        { db: ctx.db },
+        {
+          fromRole: ctx.agentRole,
+          fromInstance: ctx.agentInstance,
+          toRole: 'voice-operator',
+          intent: 'VOICE.CALL_SCHEDULED',
+          payload: {
+            callId,
+            customerId: input.customerId,
+            toNumber: overrideNumber,
+            scheduledAt: target.toISOString(),
+          },
+          ...(leadId ? { correlationId: leadId } : {}),
+          delayMs: target.getTime() - now,
+        },
+      );
+      logger.info(
+        { leadId, callId, dueAt: target.toISOString(), altNumber: true },
+        'voice.schedule_call: timed call parked on the customer-provided number',
       );
     } else {
       // Call now (also the fallback when no leadId exists to hang the timed
@@ -126,7 +184,7 @@ registerTool({
           payload: {
             callId,
             customerId: input.customerId,
-            toNumber: customer.phone ?? '',
+            toNumber: overrideNumber ?? customer.phone ?? '',
             scheduledAt: new Date().toISOString(),
           },
           ...(leadId ? { correlationId: leadId } : {}),
@@ -147,6 +205,8 @@ registerTool({
           callId,
           ...(wantsLater && target ? { dueAt: target.toISOString() } : {}),
           ...(input.reason ? { reason: input.reason.slice(0, 120) } : {}),
+          // Flag only — the raw number never lands in the audit trail (PII).
+          ...(overrideNumber ? { altNumber: true } : {}),
         },
       });
     } catch {

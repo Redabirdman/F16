@@ -28,7 +28,7 @@
  * into an audit/intent payload. We log only callId + sessionId + the Asterisk
  * channelId; the audit row records the customerId, not the number.
  */
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { BaseAgent, type BaseAgentConfig } from '../base.js';
 import type { AgentMessageEnvelope, MessageHandlerResult } from '../../messaging/dispatcher.js';
 import { logger } from '../../logger.js';
@@ -99,11 +99,18 @@ export class VoiceOperatorAgent extends BaseAgent {
 
     // Duplicate-call guard (2026-07-07 live: two retried LLM turns each
     // scheduled a call → the customer's phone rang TWICE a second apart).
-    // One outbound call per customer per 5 minutes; best-effort — if Redis is
-    // down we'd rather risk a duplicate than block a legitimate call.
+    // One outbound call per customer PER NUMBER per 5 minutes (2026-07-08:
+    // the customer gave a DIFFERENT number after we dialed the wrong one —
+    // the corrective call must not be swallowed by the guard). The number
+    // is hashed so no raw phone lands in Redis keys. Best-effort — if Redis
+    // is down we'd rather risk a duplicate than block a legitimate call.
+    const numHash = createHash('sha256')
+      .update(payload.toNumber ?? '')
+      .digest('hex')
+      .slice(0, 12);
     try {
       const first = await getRedis().set(
-        `f16:voice-call-inflight:${customerId}`,
+        `f16:voice-call-inflight:${customerId}:${numHash}`,
         callId,
         'EX',
         300,

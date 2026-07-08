@@ -91,9 +91,12 @@ describe('buildSalesAgentSystemPrompt()', () => {
     // rejections — no product for street/open parking (ask for a secured
     // spot BEFORE quoting) and no quote.request before the parent's details
     // are stored on a minor dossier.
+    // Same evening again, 13.5 kB: never name internal team members to
+    // customers (« un conseiller Assuryal », jamais un prénom — live: the
+    // agent said "Ridaa ou Achraf vous appelle").
     const frags = buildSalesAgentSystemPrompt(minimalCtx);
     const totalBytes = frags.reduce((sum, f) => sum + Buffer.byteLength(f.text, 'utf8'), 0);
-    expect(totalBytes).toBeLessThan(13300);
+    expect(totalBytes).toBeLessThan(13500);
   });
 
   it('playbook closing phase carries the compliant frais framing and collection list', () => {
