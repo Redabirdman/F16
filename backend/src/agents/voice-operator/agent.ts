@@ -53,6 +53,8 @@ interface CallScheduledPayload {
   customerId: string;
   toNumber: string;
   scheduledAt: string;
+  /** toNumber is a customer-provided alternative — dial it, don't re-resolve. */
+  altNumber?: boolean;
 }
 
 export class VoiceOperatorAgent extends BaseAgent {
@@ -139,10 +141,13 @@ export class VoiceOperatorAgent extends BaseAgent {
 
     // Resolve the phone. Prefer the verified DB phone; fall back to the
     // intent's toNumber. Both are PII — never logged.
+    // EXCEPTION (live 2026-07-08): altNumber=true means the customer gave a
+    // DIFFERENT number for this call in conversation — this stale-number
+    // safeguard was clobbering it and dialing the profile phone instead.
     let toNumber = payload.toNumber;
     try {
       const customer = await getCustomerById(this.db, customerId);
-      if (customer?.phone) {
+      if (customer?.phone && !(payload.altNumber && toNumber)) {
         toNumber = customer.phone;
       } else if (!toNumber) {
         return this.fail({ callId, customerId, reason: 'no_phone_for_customer' });

@@ -8,6 +8,9 @@ export const VoiceCallScheduledPayload = registerIntent(
     customerId: z.string().uuid(),
     toNumber: z.string(),
     scheduledAt: z.string().datetime(),
+    // 2026-07-08: toNumber is a CUSTOMER-PROVIDED alternative — the
+    // voice-operator must dial IT and not re-resolve the profile phone.
+    altNumber: z.boolean().optional(),
   }),
 );
 
