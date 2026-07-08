@@ -201,6 +201,14 @@ export interface ExtensionClientConfig {
    * service-worker suspend/reconnect cycle. Tests pass 0.
    */
   reconnectGraceMs?: number;
+  /**
+   * Backend-driven MV3 keepalive (2026-07-08): ping the extension every
+   * this-many ms while connected. Chrome ≥116 resets the service worker's
+   * ~30s idle timer on ANY WebSocket message activity, so a sub-30s ping
+   * keeps the SW alive indefinitely — no more connect/disconnect flap and
+   * no more forward_failed bursts mid-quote. 0 disables (tests).
+   */
+  keepaliveMs?: number;
 }
 
 type PendingEntry = {
@@ -220,11 +228,14 @@ export class ExtensionClient {
   private wss: WebSocketServer | null = null;
   private socket: WsClient | null = null;
   private readonly pending = new Map<string, PendingEntry>();
+  private readonly keepaliveMs: number;
+  private keepaliveTimer: NodeJS.Timeout | null = null;
 
   constructor(cfg: ExtensionClientConfig = {}) {
     this.port = cfg.port ?? DEFAULT_WS_PORT;
     this.timeoutMs = cfg.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.reconnectGraceMs = cfg.reconnectGraceMs ?? 60_000;
+    this.keepaliveMs = cfg.keepaliveMs ?? 20_000;
   }
 
   /** Start the WS server. Idempotent. */
@@ -264,10 +275,36 @@ export class ExtensionClient {
       });
       this.wss = null;
     }
+    this.stopKeepalive();
   }
 
   isConnected(): boolean {
     return this.socket?.readyState === WsClient.OPEN;
+  }
+
+  /**
+   * MV3 keepalive: ping the connected extension every `keepaliveMs` so the
+   * Chrome service worker never idles out (WS activity resets its ~30s
+   * timer). Failures are logged by health() and otherwise ignored — the
+   * extension's own alarm-driven reconnect loop handles a truly dead SW.
+   */
+  private startKeepalive(): void {
+    if (this.keepaliveMs <= 0 || this.keepaliveTimer) return;
+    this.keepaliveTimer = setInterval(() => {
+      if (!this.isConnected()) return;
+      void this.health().catch(() => {
+        /* logged inside health(); reconnect is the extension's job */
+      });
+    }, this.keepaliveMs);
+    // Never keep the process alive just for the keepalive.
+    this.keepaliveTimer.unref?.();
+  }
+
+  private stopKeepalive(): void {
+    if (this.keepaliveTimer) {
+      clearInterval(this.keepaliveTimer);
+      this.keepaliveTimer = null;
+    }
   }
 
   private onConnection(sock: WsClient): void {
@@ -283,10 +320,12 @@ export class ExtensionClient {
     }
     this.socket = sock;
     logger.info('extension-client: extension connected');
+    this.startKeepalive();
     sock.on('message', (data) => this.onMessage(typeof data === 'string' ? data : data.toString()));
     sock.on('close', () => {
       logger.warn('extension-client: extension disconnected');
       if (this.socket === sock) this.socket = null;
+      this.stopKeepalive();
       this.rejectPending('extension_disconnected');
     });
     sock.on('error', (err: Error) => {

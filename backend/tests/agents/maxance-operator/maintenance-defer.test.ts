@@ -25,6 +25,17 @@ vi.mock('../../../src/db/repositories/quotes.js', () => ({
 vi.mock('../../../src/db/repositories/leads.js', () => ({
   setLeadStatus: vi.fn(async () => ({})),
 }));
+// Logged-out park (2026-07-08): the one-time WA alert path.
+const hasPendingActionMock = vi.fn(async () => false);
+const createActionMock = vi.fn(async () => ({ id: 'action-login', summary: 's' }));
+vi.mock('../../../src/db/repositories/human-actions.js', () => ({
+  hasPendingAction: (...a: unknown[]) => hasPendingActionMock(...(a as [])),
+  createAction: (...a: unknown[]) => createActionMock(...(a as [])),
+}));
+const notifyHumanActionMock = vi.fn(async () => undefined);
+vi.mock('../../../src/agents/human-notify.js', () => ({
+  notifyHumanAction: (...a: unknown[]) => notifyHumanActionMock(...(a as [])),
+}));
 
 import { MaxanceOperatorAgent } from '../../../src/agents/maxance-operator/agent.js';
 import type { MaxanceDriverClient } from '../../../src/agents/maxance-operator/driver-client.js';
@@ -273,6 +284,73 @@ describe('maxance-operator maintenance defer', () => {
       result: { deferred: 'maintenance', deferCount: 1 },
     });
     expect(sentInputs().some((i) => i.intent === 'QUOTE.FAILED')).toBe(false);
+  });
+
+  it('logged-out portal → parks 3 min + ONE wa alert, NO QUOTE.FAILED', async () => {
+    hasPendingActionMock.mockClear().mockResolvedValue(false);
+    createActionMock.mockClear();
+    notifyHumanActionMock.mockClear();
+    const client = makeClient({
+      ensureLoggedIn: vi.fn(async () => {
+        throw new ExtensionClientError(
+          'session dead — landed on www.maxance.com/ (sso bounce timeout)',
+          'maxance_login_required_human_action',
+        );
+      }),
+    });
+    const agent = newAgent(client);
+    const result = await agent.handle(quoteRequestedEnvelope());
+
+    expect(result).toMatchObject({
+      ok: true,
+      result: { deferred: 'logged_out', deferCount: 1 },
+    });
+    expect(createActionMock).toHaveBeenCalledTimes(1);
+    expect(notifyHumanActionMock).toHaveBeenCalledTimes(1);
+    const inputs = sentInputs();
+    expect(inputs).toHaveLength(1);
+    expect(inputs[0]).toMatchObject({
+      toRole: 'maxance-operator',
+      intent: 'QUOTE.REQUESTED',
+      delayMs: 3 * 60_000,
+    });
+    expect(inputs.some((i) => i.intent === 'QUOTE.FAILED')).toBe(false);
+  });
+
+  it('logged-out with a pending alert → parks silently (no second wa ping)', async () => {
+    hasPendingActionMock.mockClear().mockResolvedValue(true);
+    createActionMock.mockClear();
+    notifyHumanActionMock.mockClear();
+    const client = makeClient({
+      ensureLoggedIn: vi.fn(async () => {
+        throw new ExtensionClientError('still logged out', 'maxance_login_required_human_action');
+      }),
+    });
+    const agent = newAgent(client);
+    const result = await agent.handle(quoteRequestedEnvelope(3));
+
+    expect(result).toMatchObject({
+      ok: true,
+      result: { deferred: 'logged_out', deferCount: 4 },
+    });
+    expect(createActionMock).not.toHaveBeenCalled();
+    expect(notifyHumanActionMock).not.toHaveBeenCalled();
+  });
+
+  it('logged-out defer budget exhausted (10) → falls through to QUOTE.FAILED', async () => {
+    hasPendingActionMock.mockClear().mockResolvedValue(true);
+    const client = makeClient({
+      ensureLoggedIn: vi.fn(async () => {
+        throw new ExtensionClientError('still logged out', 'maxance_login_required_human_action');
+      }),
+    });
+    const agent = newAgent(client);
+    const result = await agent.handle(quoteRequestedEnvelope(10));
+
+    expect(result.ok).toBe(false);
+    const inputs = sentInputs();
+    expect(inputs).toHaveLength(1);
+    expect(inputs[0]).toMatchObject({ toRole: 'sales-agent', intent: 'QUOTE.FAILED' });
   });
 
   it('parks until the next opening when the portal window is closed', async () => {

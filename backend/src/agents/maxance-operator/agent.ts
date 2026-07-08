@@ -68,6 +68,8 @@ import {
   type InspectorScreenshotSender,
 } from './subscription-handler.js';
 import { WahaClient } from '../../channels/whatsapp/waha-client.js';
+import { createAction, hasPendingAction } from '../../db/repositories/human-actions.js';
+import { notifyHumanAction } from '../human-notify.js';
 
 /** Recognised MAXANCE_DRIVER values. Anything else → driver disabled. */
 type MaxanceDriver = 'chrome_extension' | 'stagehand_legacy_DO_NOT_USE_IN_PROD';
@@ -275,6 +277,11 @@ export class MaxanceOperatorAgent extends BaseAgent {
   /** Max maintenance re-parks per quote job before failing for real. */
   private static readonly MAINTENANCE_MAX_DEFERS = 4;
 
+  /** Logged-out park (2026-07-08): retry every 3 min, up to 10 tries (~30
+   *  min) so quotes auto-resume shortly after Ridaa signs back in. */
+  private static readonly LOGIN_MAX_DEFERS = 10;
+  private static readonly LOGIN_RETRY_DELAY_MS = 3 * 60_000;
+
   /** Retry delay when the portal is nominally OPEN but Maxance still shows
    *  its maintenance page (unscheduled downtime): probe again in 30 min. */
   private static readonly MAINTENANCE_RETRY_DELAY_MS = 30 * 60_000;
@@ -329,6 +336,87 @@ export class MaxanceOperatorAgent extends BaseAgent {
     return {
       ok: true,
       result: { deferred: 'maintenance', deferCount: n + 1, retryInMs: delayMs },
+    };
+  }
+
+  /**
+   * Portal LOGGED OUT (2026-07-08 — the Auth0 session died; only Ridaa can
+   * sign back in, SMS 2FA). Park the job with a SHORT retry so it
+   * AUTO-RESUMES within minutes of him logging in, and alert the WA group
+   * exactly ONCE across all parked quotes (deduped on the pending
+   * MAXANCE_LOGIN_REQUIRED action — resolving it re-arms the alert).
+   */
+  private async deferForLogin(
+    envelope: AgentMessageEnvelope,
+    deferCount: number | undefined,
+  ): Promise<MessageHandlerResult | null> {
+    const n = deferCount ?? 0;
+    if (n >= MaxanceOperatorAgent.LOGIN_MAX_DEFERS) {
+      logger.warn(
+        { intent: envelope.intent, deferCount: n, instanceId: this.instanceId },
+        'maxance-operator: logged-out defer budget exhausted — failing the job for real',
+      );
+      return null;
+    }
+
+    // One WA alert for the whole logged-out episode (any number of quotes).
+    try {
+      const already = await hasPendingAction(this.db, {
+        correlationId: 'maxance-login',
+        intent: 'MAXANCE_LOGIN_REQUIRED',
+      });
+      if (!already) {
+        const action = await createAction(this.db, {
+          createdByAgent: `${this.role}#${this.instanceId}`,
+          correlationId: 'maxance-login',
+          intent: 'MAXANCE_LOGIN_REQUIRED',
+          severity: 2,
+          summary:
+            'Maxance portal is logged out — Chrome lost the session. ' +
+            'Please open Maxance in the F16 Chrome profile and sign in ' +
+            '(SMS code if asked). Parked quotes resume automatically within ' +
+            'a few minutes after login.',
+          options: [
+            { id: 'done', label: 'I logged in', kind: 'approve' },
+            { id: 'ignore', label: 'Ignore', kind: 'reject' },
+          ],
+        });
+        await notifyHumanAction(
+          this.db,
+          { id: action.id, severity: 2, summary: action.summary },
+          { role: this.role, instanceId: this.instanceId, correlationId: 'maxance-login' },
+        );
+      }
+    } catch (err) {
+      logger.warn(
+        { err: err instanceof Error ? err.message : String(err) },
+        'maxance-operator: logged-out alert failed (park continues)',
+      );
+    }
+
+    await sendMessage(
+      { db: this.db },
+      {
+        fromRole: this.role,
+        fromInstance: this.instanceId,
+        toRole: this.role,
+        toInstance: 'singleton',
+        intent: envelope.intent,
+        // ⚠️ deferCount is part of the intent schema (intents/quote.ts) —
+        // the registry STRIPS unknown keys, so keep them in sync.
+        payload: { ...(envelope.payload as Record<string, unknown>), deferCount: n + 1 },
+        ...(envelope.correlationId ? { correlationId: envelope.correlationId } : {}),
+        priority: envelope.priority,
+        delayMs: MaxanceOperatorAgent.LOGIN_RETRY_DELAY_MS,
+      },
+    );
+    logger.info(
+      { intent: envelope.intent, instanceId: this.instanceId },
+      `maxance-operator: portal logged out — re-parked (${n + 1}/${MaxanceOperatorAgent.LOGIN_MAX_DEFERS})`,
+    );
+    return {
+      ok: true,
+      result: { deferred: 'logged_out', deferCount: n + 1 },
     };
   }
 
@@ -492,6 +580,11 @@ export class MaxanceOperatorAgent extends BaseAgent {
         const parked = await this.deferForMaintenance(envelope, payload.deferCount);
         if (parked) return parked;
       }
+      // Logged-out portal (2026-07-08): park + short retry + one WA alert.
+      if (code.includes('maxance_login_required')) {
+        const parked = await this.deferForLogin(envelope, payload.deferCount);
+        if (parked) return parked;
+      }
       await this.emitFailed(
         payload.quoteId,
         payload.customerId,
@@ -523,6 +616,11 @@ export class MaxanceOperatorAgent extends BaseAgent {
       // Maintenance page (2026-07-06): park + retry, don't fail the customer.
       if (code.includes('maxance_maintenance')) {
         const parked = await this.deferForMaintenance(envelope, payload.deferCount);
+        if (parked) return parked;
+      }
+      // Logged-out portal (2026-07-08): park + short retry + one WA alert.
+      if (code.includes('maxance_login_required')) {
+        const parked = await this.deferForLogin(envelope, payload.deferCount);
         if (parked) return parked;
       }
       logger.error(
@@ -735,6 +833,11 @@ export class MaxanceOperatorAgent extends BaseAgent {
         const parked = await this.deferForMaintenance(envelope, payload.deferCount);
         if (parked) return parked;
       }
+      // Logged-out portal (2026-07-08): park + short retry + one WA alert.
+      if (code.includes('maxance_login_required')) {
+        const parked = await this.deferForLogin(envelope, payload.deferCount);
+        if (parked) return parked;
+      }
       logger.error({ quoteId: payload.quoteId, code, err: msg }, 'maxance-operator: login failed');
       await this.emitFailed(
         payload.quoteId,
@@ -755,6 +858,11 @@ export class MaxanceOperatorAgent extends BaseAgent {
       // Maintenance page (2026-07-06): park + retry, don't fail the customer.
       if (code.includes('maxance_maintenance')) {
         const parked = await this.deferForMaintenance(envelope, payload.deferCount);
+        if (parked) return parked;
+      }
+      // Logged-out portal (2026-07-08): park + short retry + one WA alert.
+      if (code.includes('maxance_login_required')) {
+        const parked = await this.deferForLogin(envelope, payload.deferCount);
         if (parked) return parked;
       }
       logger.error(
