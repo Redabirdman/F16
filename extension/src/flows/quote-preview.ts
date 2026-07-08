@@ -313,12 +313,11 @@ async function fillVehiculeTab(cmd: QuotePreviewCommand): Promise<void> {
   // INVALID postal code (Achraf live 2026-07-08: CP 75091 — matches no
   // French commune, so the zonier NEVER populates and every iteration
   // re-raises "La valeur du champ 'Ville' est obligatoire" until the 240s
-  // hard timeout, spamming management with generic QUOTE_FAILED alerts.
-  // Fail FAST with a structured code instead: no commune available AND the
-  // Ville ALERTE is on screen (i.e. this is a re-entry after a bounced
-  // Suivant, not merely a slow AJAX). The backend classifies
-  // `maxance_invalid_postal_code` as CUSTOMER DATA → the agent asks the
-  // customer to double-check their CP; management is not pinged.
+  // hard timeout, spamming management with generic QUOTE_FAILED alerts).
+  // Pre-click probe: catches a still-visible ALERTE from the previous
+  // iteration. (The post-click probe below is the reliable one — live
+  // 2026-07-08 run 2 showed the popin dismissed/hidden by the time the
+  // NEXT iteration reaches this point, so this alone never fired.)
   {
     const alerte = visibleAlerteText();
     if (isInvalidCpSituation(zonierStatus, alerte)) {
@@ -364,6 +363,24 @@ async function fillVehiculeTab(cmd: QuotePreviewCommand): Promise<void> {
   // dedicated helper that dispatches mousedown+mouseup+click on the right
   // child. Verified live 2026-05-25 phase 2e.
   await clickMaxanceButton('validerVehicule', { label: 'suivant_vehicule' });
+
+  // Post-click invalid-CP probe (2026-07-08 run 2): when the commune lookup
+  // came up empty, the Suivant click raises the "Ville obligatoire" ALERTE
+  // *now* (no navigation happens — the SW would otherwise just re-invoke us
+  // until the 240s hard timeout). Give the popin a beat to render, then
+  // fail fast with the structured code. When the CP is fine, navigation
+  // usually tears this content script down before/while we sleep — the
+  // probe then simply never reports.
+  if (zonierStatus === 'timeout' || zonierStatus === 'no_options') {
+    await sleep(1_500);
+    const alerte = visibleAlerteText();
+    if (isInvalidCpSituation(zonierStatus, alerte)) {
+      await reportProgress(cmd.id, 'invalid_cp_detected', alerte.slice(0, 120));
+      throw new Error(
+        `maxance_invalid_postal_code:cp=${params.postalCode} — aucune commune trouvée (${alerte.slice(0, 80)})`,
+      );
+    }
+  }
 }
 
 async function fillConducteurTab(cmd: QuotePreviewCommand): Promise<void> {
