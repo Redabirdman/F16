@@ -18,6 +18,7 @@ import './quote-request.js';
 import './quote-confirm.js';
 import './subscription-request.js';
 import './voice-schedule-call.js';
+import './conversation-schedule-followup.js';
 
 export { customerReadProfileToolName } from './customer-read-profile.js';
 export { customerUpdateProfileToolName } from './customer-update-profile.js';
@@ -28,3 +29,4 @@ export { quoteRequestToolName } from './quote-request.js';
 export { quoteConfirmToolName } from './quote-confirm.js';
 export { subscriptionRequestToolName } from './subscription-request.js';
 export { voiceScheduleCallToolName } from './voice-schedule-call.js';
+export { conversationScheduleFollowupToolName } from './conversation-schedule-followup.js';

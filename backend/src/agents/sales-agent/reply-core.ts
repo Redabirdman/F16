@@ -66,6 +66,7 @@ const SALES_AGENT_TOOL_NAMES = [
   'quote.confirm',
   'subscription.request',
   'voice.schedule_call',
+  'conversation.schedule_followup',
 ] as const;
 
 /** Cosine-distance ceiling for recalled facts (see agent.ts notes). */

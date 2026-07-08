@@ -100,6 +100,7 @@ export const FEED_ACTIONS = [
   'voice.call.ended',
   'voice.callback.booked',
   'voice.call.requested',
+  'conversation.followup.booked',
   'compliance.flagged',
   'compliance.self-corrected',
   'human_action.create',
@@ -140,6 +141,17 @@ export function feedLabel(
     }
     case 'voice.call.requested':
       return `📞 Appel demandé par le client (${who})`;
+    case 'conversation.followup.booked': {
+      const due = meta?.['dueAt'] as string | undefined;
+      const dueFr = due
+        ? new Date(due).toLocaleString('fr-FR', {
+            hour: '2-digit',
+            minute: '2-digit',
+            timeZone: 'Europe/Paris',
+          })
+        : '?';
+      return `💬 Reprise de conversation programmée à ${dueFr} (${who})`;
+    }
     case 'compliance.flagged':
       return `⚠️ Message envoyé avec réserve conformité (${who})`;
     case 'compliance.self-corrected':

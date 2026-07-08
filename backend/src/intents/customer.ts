@@ -53,6 +53,13 @@ export const CustomerFollowupDuePayload = registerIntent(
     customerId: z.string().uuid(),
     cascadeName: z.string(),
     stepIndex: z.number().int().min(0),
+    // Timed message follow-up (2026-07-08, cascadeName='timed-followup'):
+    // the followup tick wakes the sales agent to keep an in-conversation
+    // promise (« je vous retrouve dans 10 minutes »). The validator STRIPS
+    // unknown keys, so these must live in the schema, not just the emit.
+    leadId: z.string().uuid().optional(),
+    topic: z.string().optional(),
+    dueAt: z.string().datetime().optional(),
   }),
 );
 

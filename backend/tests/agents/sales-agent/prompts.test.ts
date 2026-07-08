@@ -80,10 +80,13 @@ describe('buildSalesAgentSystemPrompt()', () => {
     // caching as before. 2026-07-07 bumped to 12.3 kB: human mini-reactions
     // (Ridaa's human-touch mandate), the ask-WHEN follow-up rule (hot lead
     // cools in 24h), and the real "Date du jour" line (the model told a
-    // customer "19 décembre 2024" in July 2026 without it).
+    // customer "19 décembre 2024" in July 2026 without it). 2026-07-08 bumped
+    // to 12.6 kB: the conversation.schedule_followup cadence rule — the agent
+    // promised « je vous retrouve dans 10 minutes » with no mechanism behind
+    // it (Achraf live test); the rule makes the promise system-backed.
     const frags = buildSalesAgentSystemPrompt(minimalCtx);
     const totalBytes = frags.reduce((sum, f) => sum + Buffer.byteLength(f.text, 'utf8'), 0);
-    expect(totalBytes).toBeLessThan(12300);
+    expect(totalBytes).toBeLessThan(12600);
   });
 
   it('playbook closing phase carries the compliant frais framing and collection list', () => {

@@ -154,9 +154,111 @@ export async function runCallbackTick(db: Database): Promise<CallbackTickResult>
   return { emitted, cancelled, failed };
 }
 
+/**
+ * Timed MESSAGE follow-up pass (2026-07-08 — « reparlez-moi dans 10 min »).
+ *
+ * Same claim-by-UPDATE idempotency as the call callbacks, but the outcome is
+ * a CUSTOMER.FOLLOWUP_DUE envelope to the sales agent (cascadeName
+ * 'timed-followup'), which runs a system-initiated LLM turn and messages the
+ * customer on their last inbound channel. No phone decryption needed here —
+ * channel resolution happens in the sales-agent handler.
+ */
+export async function runFollowupTick(db: Database): Promise<CallbackTickResult> {
+  const now = new Date();
+  let emitted = 0;
+  let cancelled = 0;
+  let failed = 0;
+  try {
+    const claimed = await db
+      .update(leads)
+      .set({ followupState: 'dispatched', updatedAt: now })
+      .where(
+        and(
+          eq(leads.followupState, 'pending'),
+          isNotNull(leads.followupDueAt),
+          lte(leads.followupDueAt, now),
+        ),
+      )
+      .returning({
+        id: leads.id,
+        customerId: leads.customerId,
+        dueAt: leads.followupDueAt,
+        topic: leads.followupTopic,
+      });
+
+    for (const row of claimed) {
+      try {
+        if (!row.customerId) {
+          await db
+            .update(leads)
+            .set({ followupState: 'cancelled', updatedAt: new Date() })
+            .where(eq(leads.id, row.id));
+          cancelled += 1;
+          continue;
+        }
+        await sendMessage(
+          { db },
+          {
+            fromRole: 'callback-scheduler',
+            toRole: 'sales-agent',
+            intent: 'CUSTOMER.FOLLOWUP_DUE',
+            payload: {
+              customerId: row.customerId,
+              cascadeName: 'timed-followup',
+              stepIndex: 0,
+              leadId: row.id,
+              ...(row.topic ? { topic: row.topic } : {}),
+              ...(row.dueAt ? { dueAt: row.dueAt.toISOString() } : {}),
+            },
+            correlationId: row.id,
+            priority: 3,
+          },
+        );
+        logger.info({ leadId: row.id }, 'followup-tick: timed follow-up dispatched');
+        emitted += 1;
+      } catch (err) {
+        failed += 1;
+        await db
+          .update(leads)
+          .set({ followupState: 'pending', updatedAt: new Date() })
+          .where(eq(leads.id, row.id))
+          .catch(() => {
+            /* best-effort revert; next boot re-scans anyway */
+          });
+        logger.warn(
+          { leadId: row.id, err: err instanceof Error ? err.message : String(err) },
+          'followup-tick: dispatch failed, reverted to pending',
+        );
+      }
+    }
+
+    if (claimed.length > 0) {
+      logger.info(
+        { claimed: claimed.length, emitted, cancelled, failed },
+        'followup-tick: tick complete',
+      );
+    }
+  } catch (err) {
+    logger.error(
+      { err: err instanceof Error ? err.message : String(err) },
+      'followup-tick: tick failed',
+    );
+  }
+  return { emitted, cancelled, failed };
+}
+
 export function startCallbackScheduler(opts: CallbackSchedulerOptions): CallbackSchedulerHandle {
   const intervalMs = opts.intervalMs ?? DEFAULT_INTERVAL_MS;
-  const tick = (): Promise<CallbackTickResult> => runCallbackTick(opts.db);
+  const tick = async (): Promise<CallbackTickResult> => {
+    // Voice callbacks first (time-critical dials), then message follow-ups.
+    const calls = await runCallbackTick(opts.db);
+    const followups = await runFollowupTick(opts.db);
+    return {
+      emitted: calls.emitted + followups.emitted,
+      cancelled: calls.cancelled + followups.cancelled,
+      failed: calls.failed + followups.failed,
+    };
+  };
 
   void tick();
   const scheduler = setInterval(() => {

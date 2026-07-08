@@ -79,6 +79,16 @@ export const leads = pgTable(
     callbackDueAt: timestamp('callback_due_at', { withTimezone: true }),
     callbackState: leadCallbackStateEnum('callback_state'),
 
+    // Timed MESSAGE follow-up (2026-07-08, Achraf live test: « reparlez-moi
+    // dans 10 minutes » — the agent promised and forgot). Booked by the
+    // conversation.schedule_followup tool; the followup tick scans
+    // (followup_state='pending', followup_due_at<=now) and wakes the sales
+    // agent with CUSTOMER.FOLLOWUP_DUE. Plain-text state (pending/dispatched/
+    // cancelled) — deliberately no enum so extending never needs a migration.
+    followupDueAt: timestamp('followup_due_at', { withTimezone: true }),
+    followupState: text('followup_state'),
+    followupTopic: text('followup_topic'),
+
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
     scoredAt: timestamp('scored_at', { withTimezone: true }),
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
@@ -94,6 +104,8 @@ export const leads = pgTable(
     uniqueIndex('leads_meta_leadgen_id_uniq').on(t.metaLeadgenId),
     // Callback scheduler scan — find due 'pending' callbacks, oldest first.
     index('leads_callback_due_idx').on(t.callbackState, t.callbackDueAt),
+    // Followup tick scan — due 'pending' message follow-ups.
+    index('leads_followup_due_idx').on(t.followupState, t.followupDueAt),
   ],
 );
 

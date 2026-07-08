@@ -11,7 +11,7 @@ import { createDb, type Database } from '../../src/db/index.js';
 import { agentMessages, leads } from '../../src/db/schema/index.js';
 import { insertCustomer } from '../../src/db/repositories/customers.js';
 import { __resetForTests, shutdownQueues } from '../../src/queue/index.js';
-import { runCallbackTick } from '../../src/leads/callback-scheduler.js';
+import { runCallbackTick, runFollowupTick } from '../../src/leads/callback-scheduler.js';
 
 const pgUrl = process.env.TEST_DATABASE_URL;
 const redisUrl = process.env.TEST_REDIS_URL;
@@ -135,6 +135,78 @@ d('runCallbackTick (live)', () => {
     await seedLead({ phone: '0612345678', dueAt: new Date(Date.now() - 60_000), state: 'pending' });
     await runCallbackTick(db);
     const second = await runCallbackTick(db);
+    expect(second.emitted).toBe(0);
+  });
+
+  // ----- timed MESSAGE follow-ups (2026-07-08, « reparlez-moi dans 10 min ») -
+
+  let followupPhoneSeq = 0;
+  async function seedFollowupLead(opts: {
+    dueAt: Date;
+    topic?: string;
+  }): Promise<{ leadId: string; customerId: string }> {
+    // Unique phone per seeded customer — customers_phone_hash_uniq.
+    followupPhoneSeq += 1;
+    const customer = await insertCustomer(db, {
+      fullName: 'Prospect Followup',
+      phone: `+3369876${String(4000 + followupPhoneSeq)}`,
+    });
+    const [lead] = await db
+      .insert(leads)
+      .values({
+        customerId: customer.id,
+        source: 'meta',
+        productLine: 'scooter',
+        status: 'qualifying',
+        followupDueAt: opts.dueAt,
+        followupState: 'pending',
+        followupTopic: opts.topic ?? null,
+      })
+      .returning();
+    return { leadId: lead!.id, customerId: customer.id };
+  }
+
+  it('dispatches a due follow-up → CUSTOMER.FOLLOWUP_DUE to the sales agent', async () => {
+    const { leadId, customerId } = await seedFollowupLead({
+      dueAt: new Date(Date.now() - 30_000),
+      topic: 'reprendre la qualification',
+    });
+
+    const res = await runFollowupTick(db);
+    expect(res.emitted).toBe(1);
+
+    const [lead] = await db.select().from(leads).where(eq(leads.id, leadId));
+    expect(lead!.followupState).toBe('dispatched');
+
+    const msgs = await db
+      .select()
+      .from(agentMessages)
+      .where(eq(agentMessages.correlationId, leadId));
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0]!.intent).toBe('CUSTOMER.FOLLOWUP_DUE');
+    expect(msgs[0]!.toRole).toBe('sales-agent');
+    const payload = msgs[0]!.payload as {
+      customerId: string;
+      cascadeName: string;
+      leadId: string;
+      topic?: string;
+    };
+    expect(payload.customerId).toBe(customerId);
+    expect(payload.cascadeName).toBe('timed-followup');
+    expect(payload.leadId).toBe(leadId);
+    expect(payload.topic).toBe('reprendre la qualification');
+  });
+
+  it('leaves a not-yet-due follow-up pending and is idempotent when due', async () => {
+    const { leadId } = await seedFollowupLead({ dueAt: new Date(Date.now() + 3600_000) });
+    const res = await runFollowupTick(db);
+    expect(res.emitted).toBe(0);
+    const [lead] = await db.select().from(leads).where(eq(leads.id, leadId));
+    expect(lead!.followupState).toBe('pending');
+
+    await seedFollowupLead({ dueAt: new Date(Date.now() - 30_000) });
+    await runFollowupTick(db);
+    const second = await runFollowupTick(db);
     expect(second.emitted).toBe(0);
   });
 });
