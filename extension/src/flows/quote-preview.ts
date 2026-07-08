@@ -314,12 +314,40 @@ async function fillVehiculeTab(cmd: QuotePreviewCommand): Promise<void> {
   // French commune, so the zonier NEVER populates and every iteration
   // re-raises "La valeur du champ 'Ville' est obligatoire" until the 240s
   // hard timeout, spamming management with generic QUOTE_FAILED alerts).
-  // Pre-click probe: catches a still-visible ALERTE from the previous
-  // iteration. (The post-click probe below is the reliable one — live
-  // 2026-07-08 run 2 showed the popin dismissed/hidden by the time the
-  // NEXT iteration reaches this point, so this alone never fired.)
-  {
+  //
+  // v3 — EVIDENCE-BASED fail-fast (the two ALERTE-DOM probes of v1/v2 never
+  // fired live; popin visibility timing is not dependable). The hard
+  // evidence is the commune <select> itself: it stayed EMPTY after the full
+  // 8s AJAX wait. Once could be slow network — but twice within the SAME
+  // quote command (sessionStorage counter keyed on cmd.id survives content-
+  // script re-invocations on this page, and a fresh quote gets a fresh id)
+  // means Maxance cannot resolve this CP. Fail with the structured code the
+  // backend classifies as CUSTOMER DATA (agent asks the customer, no
+  // management ping).
+  if (zonierStatus === 'timeout' || zonierStatus === 'no_options') {
+    const zonierEl = document.querySelector<HTMLSelectElement>(
+      'select[name="circulationZonier.key"]',
+    );
+    const optCount = zonierEl ? zonierEl.options.length : -1;
+    let attempt = 1;
+    try {
+      const key = `f16-zonier-empty:${cmd.id}`;
+      attempt = Number(sessionStorage.getItem(key) ?? '0') + 1;
+      sessionStorage.setItem(key, String(attempt));
+    } catch {
+      // sessionStorage unavailable — stay conservative (no fail-fast).
+    }
     const alerte = visibleAlerteText();
+    await reportProgress(
+      cmd.id,
+      'zonier_empty_probe',
+      `attempt=${attempt} options=${optCount} alerte=${alerte ? alerte.slice(0, 60) : 'none'}`,
+    );
+    if (attempt >= 2 && optCount <= 1) {
+      throw new Error(
+        `maxance_invalid_postal_code:cp=${params.postalCode} — commune introuvable après ${attempt} tentatives (options=${optCount})`,
+      );
+    }
     if (isInvalidCpSituation(zonierStatus, alerte)) {
       throw new Error(
         `maxance_invalid_postal_code:cp=${params.postalCode} — aucune commune trouvée (${alerte.slice(0, 80)})`,
