@@ -83,10 +83,13 @@ describe('buildSalesAgentSystemPrompt()', () => {
     // customer "19 décembre 2024" in July 2026 without it). 2026-07-08 bumped
     // to 12.6 kB: the conversation.schedule_followup cadence rule — the agent
     // promised « je vous retrouve dans 10 minutes » with no mechanism behind
-    // it (Achraf live test); the rule makes the promise system-backed.
+    // it (Achraf live test); the rule makes the promise system-backed. Later
+    // same day, 12.9 kB: the minor-customer rule (inform + continue with a
+    // parent, NO management approval — Ridaa's calibration mandate; the Jean
+    // Bidet run escalated a perfectly correct message).
     const frags = buildSalesAgentSystemPrompt(minimalCtx);
     const totalBytes = frags.reduce((sum, f) => sum + Buffer.byteLength(f.text, 'utf8'), 0);
-    expect(totalBytes).toBeLessThan(12600);
+    expect(totalBytes).toBeLessThan(12900);
   });
 
   it('playbook closing phase carries the compliant frais framing and collection list', () => {
