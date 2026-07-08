@@ -290,7 +290,14 @@ export interface DashboardKpis {
     pendingBySeverity: { critical: number; standard: number; info: number };
   };
   conversation: { inboundLast24h: number; outboundLast24h: number };
-  quotes: { totalLast24h: number; byStatusAllTime: Record<string, number> };
+  quotes: {
+    totalLast24h: number;
+    byStatusAllTime: Record<string, number>;
+    devisDeliveredLast24h: number;
+  };
+  calls: { placedLast24h: number; scheduledUpcoming: number };
+  upcomingCallbacks: Array<{ leadId: string; customerName: string; dueAt: string }>;
+  recentActivity: Array<{ at: string; label: string; leadId?: string }>;
 }
 
 export function getDashboardKpis(): Promise<DashboardKpis> {
