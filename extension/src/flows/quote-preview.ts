@@ -808,6 +808,18 @@ export async function runQuotePreview(cmd: QuotePreviewCommand): Promise<Respons
           screenshots,
         });
       }
+      if (/pas de produit propos/i.test(alerte)) {
+        // « Stationnement en Voie Publique / Parking Ouvert : Pas de produit
+        // proposé » (live 2026-07-08) — no Maxance product for street/open
+        // parking. Backend asks the customer for a secured parking spot.
+        return ErrorResponseSchema.parse({
+          id: cmd.id,
+          kind: 'error',
+          errorCode: 'maxance_no_product_for_parking',
+          detail: `Maxance ne propose aucun produit pour ce stationnement (${alerte.slice(0, 120)})`,
+          screenshots,
+        });
+      }
       return ErrorResponseSchema.parse({
         id: cmd.id,
         kind: 'error',

@@ -86,10 +86,14 @@ describe('buildSalesAgentSystemPrompt()', () => {
     // it (Achraf live test); the rule makes the promise system-backed. Later
     // same day, 12.9 kB: the minor-customer rule (inform + continue with a
     // parent, NO management approval — Ridaa's calibration mandate; the Jean
-    // Bidet run escalated a perfectly correct message).
+    // Bidet run escalated a perfectly correct message). Same evening,
+    // 13.3 kB: PRE-validation rules Ridaa asked for after live Maxance
+    // rejections — no product for street/open parking (ask for a secured
+    // spot BEFORE quoting) and no quote.request before the parent's details
+    // are stored on a minor dossier.
     const frags = buildSalesAgentSystemPrompt(minimalCtx);
     const totalBytes = frags.reduce((sum, f) => sum + Buffer.byteLength(f.text, 'utf8'), 0);
-    expect(totalBytes).toBeLessThan(12900);
+    expect(totalBytes).toBeLessThan(13300);
   });
 
   it('playbook closing phase carries the compliant frais framing and collection list', () => {

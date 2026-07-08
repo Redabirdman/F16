@@ -375,8 +375,20 @@ export async function handleQuoteFailed(
     dossierIsMinor ||
     combined.includes('maxance_subscriber_underage') ||
     /moins de 18/i.test(combined);
+  // Street / open parking: Maxance offers NO product (live 2026-07-08:
+  // ALERTE « Stationnement en Voie Publique / Parking Ouvert : Pas de
+  // produit proposé »). Same evidence-first logic as the minor case — a
+  // dossier parked 'rue' or 'parking_prive_non_clos' fails every run.
+  const dossierParking = (lead.qualification as { stationnement?: string } | null)?.stationnement;
+  const isParkingError =
+    !isUnderageError &&
+    (dossierParking === 'rue' ||
+      dossierParking === 'parking_prive_non_clos' ||
+      /pas de produit propos/i.test(combined) ||
+      combined.includes('maxance_no_product_for_parking'));
   const isCustomerDataError =
     isUnderageError ||
+    isParkingError ||
     combined.includes('maxance_invalid_postal_code') ||
     (/ville/i.test(combined) && /obligatoire/i.test(combined));
   if (isCustomerDataError) {
@@ -401,12 +413,20 @@ export async function handleQuoteFailed(
         `nom via customer.update_profile (fullName) — sa date de naissance devient LA date de ` +
         `naissance du dossier — puis relance quote.request avec ces données. Ne mentionne AUCUN ` +
         `détail technique.`
-      : `[ERREUR DONNÉES — message système interne, ce n'est PAS le client qui parle] ` +
-        `La tarification a échoué : le CODE POSTAL fourni ne correspond à aucune commune ` +
-        `française (${payload.errorCode}). Regarde le code postal dans la conversation et ` +
-        `demande gentiment au client de le vérifier / le corriger (il manque peut-être un ` +
-        `chiffre ou c'est une faute de frappe). Dès qu'il donne un code postal valide, tu ` +
-        `relanceras le devis. Ne mentionne AUCUN détail technique.`;
+      : isParkingError
+        ? `[ERREUR DONNÉES — message système interne, ce n'est PAS le client qui parle] ` +
+          `La tarification a échoué : AUCUNE formule n'existe pour une trottinette stationnée ` +
+          `la nuit en voie publique ou dans un parking ouvert. Explique-le simplement au ` +
+          `client et demande s'il peut la garer la nuit dans un lieu sécurisé (garage/box, à ` +
+          `domicile, parking privé fermé). Quand il confirme un lieu couvert, relance ` +
+          `quote.request avec ce stationnement. S'il ne peut vraiment pas, dis-lui honnêtement ` +
+          `qu'on ne pourra pas l'assurer pour l'instant. Ne mentionne AUCUN détail technique.`
+        : `[ERREUR DONNÉES — message système interne, ce n'est PAS le client qui parle] ` +
+          `La tarification a échoué : le CODE POSTAL fourni ne correspond à aucune commune ` +
+          `française (${payload.errorCode}). Regarde le code postal dans la conversation et ` +
+          `demande gentiment au client de le vérifier / le corriger (il manque peut-être un ` +
+          `chiffre ou c'est une faute de frappe). Dès qu'il donne un code postal valide, tu ` +
+          `relanceras le devis. Ne mentionne AUCUN détail technique.`;
     const reply = await generateSalesReply({
       db: ctx.db,
       leadId,

@@ -157,6 +157,19 @@ describe('handleQuoteFailed — customer-data self-heal', () => {
     expect(llmArg.content).toContain('prénom, nom et date de naissance');
   });
 
+  it('street-parked dossier → asks for a secured parking spot, no escalation', async () => {
+    const res = await handleQuoteFailed(
+      ctx({ clientDateOfBirth: '1990-05-10', stationnement: 'rue' }),
+      envelope('maxance_quote_unknown_screen', 'advance loop exhausted on screen=unknown'),
+    );
+    expect(res.ok).toBe(true);
+    expect(createActionMock).not.toHaveBeenCalled();
+    expect(notifyHumanActionMock).not.toHaveBeenCalled();
+    const llmArg = generateSalesReplyMock.mock.calls[0]![0] as { content: string };
+    expect(llmArg.content).toContain('voie publique');
+    expect(llmArg.content).toContain('lieu sécurisé');
+  });
+
   it('adult DOB + opaque error → still the normal technical escalation', async () => {
     const res = await handleQuoteFailed(
       ctx({ clientDateOfBirth: '1990-05-10' }),
