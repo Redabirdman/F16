@@ -35,6 +35,8 @@ import {
   continueComparisonAfterPreview,
   consumeComparisonPending,
 } from './comparison-continuation.js';
+import { appendAudit } from '../../../db/repositories/audit-log.js';
+import { generateSalesReply } from '../reply-core.js';
 
 /**
  * Maxance Operator (M8.T4) produced a price preview. Format a deterministic
@@ -345,6 +347,95 @@ export async function handleQuoteFailed(
   const fullName = decryptPII(customer.fullName) ?? '';
   const firstName = (fullName.split(' ')[0] ?? '').trim();
   const draft = formatQuoteFailedMessage({ firstName, quoteId: payload.quoteId });
+
+  // ----- CUSTOMER-DATA failures self-heal (2026-07-08, Achraf's CP 75091) ---
+  // An invalid postal code is not an incident — it's a question for the
+  // CUSTOMER. The extension fails fast with `maxance_invalid_postal_code`
+  // (and older builds surface the raw "Ville obligatoire" ALERTE in detail).
+  // Ask the customer to double-check instead of pinging management: Ridaa's
+  // robustness mandate — self-heal → audit → escalate only on persistence.
+  const combined = `${payload.errorCode} ${payload.detail ?? ''}`;
+  const isCustomerDataError =
+    combined.includes('maxance_invalid_postal_code') ||
+    (/ville/i.test(combined) && /obligatoire/i.test(combined));
+  if (isCustomerDataError) {
+    try {
+      await appendAudit(ctx.db, {
+        actorType: 'agent',
+        actorId: `${ctx.role}#${ctx.instanceId}`,
+        action: 'quote.failed.customer-data',
+        targetType: 'lead',
+        targetId: leadId,
+        meta: { quoteId: payload.quoteId, errorCode: payload.errorCode },
+      });
+    } catch {
+      // best-effort
+    }
+    const reply = await generateSalesReply({
+      db: ctx.db,
+      leadId,
+      channel,
+      content:
+        `[ERREUR DONNÉES — message système interne, ce n'est PAS le client qui parle] ` +
+        `La tarification a échoué : le CODE POSTAL fourni ne correspond à aucune commune ` +
+        `française (${payload.errorCode}). Regarde le code postal dans la conversation et ` +
+        `demande gentiment au client de le vérifier / le corriger (il manque peut-être un ` +
+        `chiffre ou c'est une faute de frappe). Dès qu'il donne un code postal valide, tu ` +
+        `relanceras le devis. Ne mentionne AUCUN détail technique.`,
+      agentRole: ctx.role,
+      agentInstance: ctx.instanceId,
+    });
+    if (reply.outcome === 'reply' && contactRef) {
+      await sendViaChannel({
+        db: ctx.db,
+        customerId: customer.id,
+        leadId: lead.id,
+        to: contactRef,
+        body: [{ type: 'text', text: reply.replyText }],
+        agentRole: ctx.role,
+        agentInstance: ctx.instanceId,
+        correlationId: payload.quoteId,
+      });
+    }
+    logger.info(
+      { leadId, quoteId: payload.quoteId, errorCode: payload.errorCode },
+      'sales-agent: quote failed on customer data — asked the customer, no escalation',
+    );
+    return { ok: true, result: { selfHealed: 'customer-data', quoteId: payload.quoteId } };
+  }
+
+  // ----- Alert dedup (2026-07-08: 7 WA pings in 15 min for one lead) --------
+  // One PENDING QUOTE_FAILED action per lead: while it stands, further
+  // failures only append audit rows. Resolving the action re-arms alerts.
+  const pendingSame = (await humanActions.listPending(ctx.db, { limit: 100 })).find(
+    (a) => a.intent === 'QUOTE_FAILED' && a.summary.includes(leadId),
+  );
+  if (pendingSame) {
+    try {
+      await appendAudit(ctx.db, {
+        actorType: 'agent',
+        actorId: `${ctx.role}#${ctx.instanceId}`,
+        action: 'quote.failed.duplicate-suppressed',
+        targetType: 'lead',
+        targetId: leadId,
+        meta: {
+          quoteId: payload.quoteId,
+          errorCode: payload.errorCode,
+          pendingActionId: pendingSame.id,
+        },
+      });
+    } catch {
+      // best-effort
+    }
+    logger.warn(
+      { leadId, quoteId: payload.quoteId, errorCode: payload.errorCode },
+      'sales-agent: quote failed again — pending escalation exists, alert suppressed',
+    );
+    return {
+      ok: true,
+      result: { suppressed: true, pendingActionId: pendingSame.id, quoteId: payload.quoteId },
+    };
+  }
 
   // Always escalate — even if we can't reach the customer on the channel,
   // Ridaa/Achraf must know the quote failed.
