@@ -791,13 +791,33 @@ export async function runQuotePreview(cmd: QuotePreviewCommand): Promise<Respons
       await sleep(SETTLE_MS);
     }
 
-    return ErrorResponseSchema.parse({
-      id: cmd.id,
-      kind: 'error',
-      errorCode: 'maxance_quote_unknown_screen',
-      detail: `advance loop exhausted on screen=${detectCurrentScreen()} url=${location.href}`,
-      screenshots,
-    });
+    // Unknown screen — before giving up generically, read any visible ALERTE:
+    // several Maxance rejections land on a bare page the classifier can't
+    // name (live 2026-07-08: « Le souscripteur ne peut pas être âgé de moins
+    // de 18 ans » on souscriptionNaviguerOngletVehicule.do). A structured
+    // code lets the backend SELF-HEAL (ask the parent's details) instead of
+    // pinging management with an opaque unknown-screen error.
+    {
+      const alerte = visibleAlerteText();
+      if (/moins de 18|souscripteur.+\bâg/i.test(alerte)) {
+        return ErrorResponseSchema.parse({
+          id: cmd.id,
+          kind: 'error',
+          errorCode: 'maxance_subscriber_underage',
+          detail: `Maxance a refusé le souscripteur mineur (${alerte.slice(0, 120)})`,
+          screenshots,
+        });
+      }
+      return ErrorResponseSchema.parse({
+        id: cmd.id,
+        kind: 'error',
+        errorCode: 'maxance_quote_unknown_screen',
+        detail:
+          `advance loop exhausted on screen=${detectCurrentScreen()} url=${location.href}` +
+          (alerte ? ` alerte="${alerte.slice(0, 100)}"` : ''),
+        screenshots,
+      });
+    }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return ErrorResponseSchema.parse({

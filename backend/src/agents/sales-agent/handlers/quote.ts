@@ -355,7 +355,10 @@ export async function handleQuoteFailed(
   // Ask the customer to double-check instead of pinging management: Ridaa's
   // robustness mandate — self-heal → audit → escalate only on persistence.
   const combined = `${payload.errorCode} ${payload.detail ?? ''}`;
+  const isUnderageError =
+    combined.includes('maxance_subscriber_underage') || /moins de 18/i.test(combined);
   const isCustomerDataError =
+    isUnderageError ||
     combined.includes('maxance_invalid_postal_code') ||
     (/ville/i.test(combined) && /obligatoire/i.test(combined));
   if (isCustomerDataError) {
@@ -371,17 +374,26 @@ export async function handleQuoteFailed(
     } catch {
       // best-effort
     }
-    const reply = await generateSalesReply({
-      db: ctx.db,
-      leadId,
-      channel,
-      content:
-        `[ERREUR DONNÉES — message système interne, ce n'est PAS le client qui parle] ` +
+    const instruction = isUnderageError
+      ? `[ERREUR DONNÉES — message système interne, ce n'est PAS le client qui parle] ` +
+        `La tarification a échoué : Maxance refuse un SOUSCRIPTEUR de moins de 18 ans — le ` +
+        `devis est parti avec la date de naissance du mineur. Le contrat doit être au nom du ` +
+        `parent / tuteur légal (l'enfant reste l'utilisateur assuré). Demande au parent, EN UN ` +
+        `SEUL message, ses prénom, nom et date de naissance. Quand il les donne : enregistre le ` +
+        `nom via customer.update_profile (fullName) — sa date de naissance devient LA date de ` +
+        `naissance du dossier — puis relance quote.request avec ces données. Ne mentionne AUCUN ` +
+        `détail technique.`
+      : `[ERREUR DONNÉES — message système interne, ce n'est PAS le client qui parle] ` +
         `La tarification a échoué : le CODE POSTAL fourni ne correspond à aucune commune ` +
         `française (${payload.errorCode}). Regarde le code postal dans la conversation et ` +
         `demande gentiment au client de le vérifier / le corriger (il manque peut-être un ` +
         `chiffre ou c'est une faute de frappe). Dès qu'il donne un code postal valide, tu ` +
-        `relanceras le devis. Ne mentionne AUCUN détail technique.`,
+        `relanceras le devis. Ne mentionne AUCUN détail technique.`;
+    const reply = await generateSalesReply({
+      db: ctx.db,
+      leadId,
+      channel,
+      content: instruction,
       agentRole: ctx.role,
       agentInstance: ctx.instanceId,
     });

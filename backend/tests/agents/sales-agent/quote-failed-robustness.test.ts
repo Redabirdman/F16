@@ -128,6 +128,20 @@ describe('handleQuoteFailed — customer-data self-heal', () => {
     expect(audit.action).toBe('quote.failed.customer-data');
   });
 
+  it("underage subscriber → asks for the PARENT's details, no escalation", async () => {
+    const res = await handleQuoteFailed(
+      ctx(),
+      envelope('maxance_subscriber_underage:Maxance a refusé le souscripteur mineur'),
+    );
+    expect(res.ok).toBe(true);
+    expect(createActionMock).not.toHaveBeenCalled();
+    expect(notifyHumanActionMock).not.toHaveBeenCalled();
+    expect(sendViaChannelMock).toHaveBeenCalledTimes(1);
+    const llmArg = generateSalesReplyMock.mock.calls[0]![0] as { content: string };
+    expect(llmArg.content).toContain('moins de 18 ans');
+    expect(llmArg.content).toContain('prénom, nom et date de naissance');
+  });
+
   it('legacy "Ville obligatoire" detail classifies the same way', async () => {
     const res = await handleQuoteFailed(
       ctx(),
