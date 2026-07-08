@@ -23,6 +23,7 @@ import {
 } from './layout';
 import type { ZoneDef } from './layout';
 import { ENV_TEXTURES, PLACEHOLDER_MODE, roleColor, textureUrl } from './assets';
+import { personaFor } from '@/lib/personas';
 import type { OfficeAgent, OfficeEffect, OfficeState } from './types';
 
 export interface OfficeSceneOptions {
@@ -292,6 +293,20 @@ export class OfficeScene {
       spriteState: agent.spriteState,
       bobPhase: (agent.key.length % 10) * 0.6,
     });
+
+    // Name tag (redesign 2026-07-08): every agent wears their persona name —
+    // "a real company". Added first so body/badge z-order stays on top.
+    const tagStyle = new TextStyle({
+      fill: 0xf1f5f9,
+      fontSize: 10,
+      fontWeight: '700',
+      stroke: { color: 0x0f172a, width: 3 },
+    });
+    const tag = new Text({ text: personaFor(agent.role).name, style: tagStyle });
+    tag.label = 'nametag';
+    tag.anchor.set(0.5, 0);
+    tag.position.set(0, 4);
+    node.addChild(tag);
 
     if (!PLACEHOLDER_MODE) {
       const tex = Texture.from(textureUrl(agent.role));

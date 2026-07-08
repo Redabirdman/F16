@@ -73,6 +73,7 @@ export function reconcileAgents(
     const key = `${r.role}#${r.instanceId}`;
     const prevAgent = prev.agents.get(key);
     const lastActiveAt = prevAgent?.lastActiveAt ?? 0;
+    const lastIntent = prevAgent?.lastIntent ?? null;
 
     let zone: OfficeAgent['zone'];
     let deskId: string;
@@ -103,6 +104,7 @@ export function reconcileAgents(
       deskId,
       spriteState: restingState(r.status, r.error, lastActiveAt, now),
       lastActiveAt,
+      lastIntent,
     });
   }
 
@@ -131,7 +133,12 @@ export function reduceEvent(
     const agents = new Map(state.agents);
     for (const [key, a] of agents) {
       if (a.role === evt.toRole) {
-        agents.set(key, { ...a, spriteState: 'talking', lastActiveAt: now });
+        agents.set(key, {
+          ...a,
+          spriteState: 'talking',
+          lastActiveAt: now,
+          lastIntent: evt.intent,
+        });
       }
     }
     return { state: { agents, generatedAt: now }, effects };

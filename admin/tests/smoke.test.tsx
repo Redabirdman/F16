@@ -7,6 +7,18 @@ import { existsSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+// Mock the API module so the shell + dashboard never hit the network.
+vi.mock('@/lib/api', () => ({
+  getAdminToken: (): string | null => null,
+  listPendingHumanActions: vi.fn(async () => ({ rows: [] })),
+  getDashboardKpis: vi.fn(
+    async () =>
+      new Promise(() => {
+        /* keep the dashboard in its loading state for the smoke test */
+      }),
+  ),
+}));
+
 import App from '../src/App';
 import { RootErrorFallback } from '../src/components/error-fallback';
 
@@ -32,22 +44,23 @@ function renderApp(): void {
 }
 
 describe('App (smoke)', () => {
-  it('renders the "F16 admin" heading on /', () => {
+  it('redirects / to the dashboard and renders its heading', () => {
     renderApp();
-    const heading = screen.getByRole('heading', { level: 1, name: /f16 admin/i });
+    const heading = screen.getByRole('heading', { level: 1, name: /tableau de bord/i });
     expect(heading).toBeInTheDocument();
   });
 
-  it('renders the subtitle', () => {
+  it('renders the sidebar brand + primary nav (redesign 2026-07-08)', () => {
     renderApp();
-    expect(
-      screen.getByText(/autonomous ai organization for assuryal conseil/i),
-    ).toBeInTheDocument();
+    expect(screen.getAllByText(/assuryal/i).length).toBeGreaterThan(0);
+    expect(screen.getByRole('link', { name: /leads/i })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /coûts/i })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /actions humaines/i })).toBeInTheDocument();
   });
 
   it('renders a shadcn Button (proves shadcn is wired)', () => {
     renderApp();
-    const button = screen.getByRole('button', { name: /get started/i });
+    const button = screen.getByRole('button', { name: /rafraîch/i });
     expect(button).toBeInTheDocument();
     // shadcn Button applies bg-primary class via cva variants
     expect(button.className).toMatch(/bg-primary/);
@@ -97,7 +110,7 @@ describe('build artifact (shape)', () => {
       const files = readdirSync(assetsDir);
 
       // The ENTRY chunk (referenced directly by index.html) must stay lean:
-      // pixi/recharts must NOT be bundled into it.
+      // pixi must NOT be bundled into it.
       const entryMatch = html.match(/<script[^>]+src="\/assets\/([^"]+\.js)"/);
       expect(entryMatch).not.toBeNull();
       const entryFile = entryMatch?.[1] ?? '';

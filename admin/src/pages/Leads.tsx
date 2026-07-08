@@ -1,33 +1,20 @@
 /**
- * Leads board page (option D).
+ * Leads page (redesign 2026-07-08) — master-detail.
  *
- * Read-only V0: lists the latest 50 leads newest-first with status,
- * source, product line, score, and the matched customer name (decrypted
- * server-side). Refreshes every 30s via React Query's default staleTime;
- * a manual "Refresh" button forces an immediate refetch.
- *
- * Mutations + filtering + search land in V1 of D. The point of V0 is
- * that the operator (Ridaa) can see at a glance what's in the funnel
- * without SSHing into the dev PC to `psql` the leads table.
+ * Left: searchable, filterable lead list (avatars + stage chips + relative
+ * time). Right (xl screens): the selected lead's full at-a-glance view +
+ * unified timeline, inline. On smaller screens a row click navigates to
+ * the dedicated /leads/:id page instead.
  */
-import type { ReactElement } from 'react';
+import { useMemo, useState, type ReactElement } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
+import { Search } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
-import { listLeads, type LeadRow } from '@/lib/api';
-
-function statusTone(status: string): string {
-  // Tailwind classes — green for live conversations, amber for paused,
-  // red for terminal-lost, grey for fresh-but-untouched.
-  if (status === 'new' || status === 'scored') return 'bg-slate-100 text-slate-700';
-  if (status === 'qualifying' || status === 'quoting' || status === 'negotiating') {
-    return 'bg-emerald-100 text-emerald-800';
-  }
-  if (status === 'closed_won') return 'bg-emerald-200 text-emerald-900';
-  if (status === 'closed_lost' || status === 'dormant') return 'bg-rose-100 text-rose-800';
-  return 'bg-amber-100 text-amber-800';
-}
+import { getLeadDetail, listLeads, type LeadRow } from '@/lib/api';
+import { LeadDetailView } from '@/components/lead-detail-view';
+import { initialsOf, STAGE_LABEL_FR, statusTone } from '@/lib/lead-format';
 
 function relativeTime(iso: string): string {
   const ms = Date.now() - new Date(iso).getTime();
@@ -40,97 +27,180 @@ function relativeTime(iso: string): string {
   return `il y a ${d} j`;
 }
 
+const FILTERS: Array<{ id: string; label: string; statuses: string[] | null }> = [
+  { id: 'all', label: 'Tous', statuses: null },
+  {
+    id: 'active',
+    label: 'En cours',
+    statuses: ['new', 'scored', 'qualifying', 'quoting', 'negotiating', 'awaiting_payment'],
+  },
+  { id: 'won', label: 'Gagnés', statuses: ['closed_won'] },
+  { id: 'lost', label: 'Perdus / dormants', statuses: ['closed_lost', 'dormant'] },
+];
+
 export default function LeadsPage(): ReactElement {
   const navigate = useNavigate();
+  const [search, setSearch] = useState('');
+  const [filter, setFilter] = useState('all');
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+
   const { data, error, isLoading, isFetching, refetch } = useQuery({
     queryKey: ['admin', 'leads'],
-    queryFn: () => listLeads({ limit: 50 }),
+    queryFn: () => listLeads({ limit: 100 }),
     refetchInterval: 30_000,
   });
 
+  const rows = useMemo(() => {
+    let out = data?.rows ?? [];
+    const f = FILTERS.find((x) => x.id === filter);
+    const statuses = f?.statuses;
+    if (statuses) out = out.filter((r) => statuses.includes(r.status));
+    const q = search.trim().toLowerCase();
+    if (q.length > 0) {
+      out = out.filter(
+        (r) =>
+          (r.customerName ?? '').toLowerCase().includes(q) ||
+          r.source.toLowerCase().includes(q) ||
+          r.status.toLowerCase().includes(q),
+      );
+    }
+    return out;
+  }, [data, filter, search]);
+
+  // Default selection: newest lead (xl split view only).
+  const effectiveSelected = selectedId ?? rows[0]?.leadId ?? null;
+
+  const detail = useQuery({
+    queryKey: ['admin', 'lead-detail', effectiveSelected],
+    queryFn: () => getLeadDetail(effectiveSelected ?? ''),
+    enabled: effectiveSelected !== null,
+    refetchInterval: 15_000,
+  });
+
+  const onRowClick = (r: LeadRow): void => {
+    // xl screens keep the split view; smaller screens go to the full page.
+    if (globalThis.matchMedia?.('(min-width: 1280px)').matches) {
+      setSelectedId(r.leadId);
+    } else {
+      navigate(`/leads/${r.leadId}`);
+    }
+  };
+
   return (
-    <div className="mx-auto flex w-full max-w-6xl flex-col gap-6 p-6">
+    <div className="mx-auto flex w-full max-w-[1500px] flex-col gap-4 p-4 lg:p-6">
       <header className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Leads</h1>
+          <h1 className="text-2xl font-bold tracking-tight text-slate-900">Leads</h1>
           <p className="text-sm text-muted-foreground">
-            Les 50 leads les plus récents — rafraîchi toutes les 30 s.
+            {rows.length} lead{rows.length > 1 ? 's' : ''} affiché{rows.length > 1 ? 's' : ''} —
+            clic pour ouvrir le dossier.
           </p>
         </div>
-        <Button onClick={() => void refetch()} disabled={isFetching} variant="default">
+        <Button onClick={() => void refetch()} disabled={isFetching}>
           {isFetching ? 'Rafraîchissement…' : 'Rafraîchir'}
         </Button>
       </header>
 
       {error && (
-        <div className="rounded-md border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800">
+        <div className="rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800">
           Erreur de chargement : {(error as Error).message}
         </div>
       )}
 
-      {isLoading && !data && <div className="text-sm text-muted-foreground">Chargement…</div>}
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-[380px_1fr]">
+        {/* Master list */}
+        <section className="flex flex-col gap-3">
+          <div className="relative">
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Rechercher un client…"
+              className="w-full rounded-xl border border-border bg-white py-2 pl-9 pr-3 text-sm shadow-sm outline-none ring-ring placeholder:text-slate-400 focus:ring-2"
+            />
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {FILTERS.map((f) => (
+              <button
+                key={f.id}
+                onClick={() => setFilter(f.id)}
+                className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
+                  filter === f.id
+                    ? 'bg-primary text-primary-foreground'
+                    : 'bg-white text-slate-600 ring-1 ring-border hover:bg-accent'
+                }`}
+              >
+                {f.label}
+              </button>
+            ))}
+          </div>
 
-      {data && data.rows.length === 0 && (
-        <div className="rounded-md border border-slate-200 bg-slate-50 p-6 text-center text-sm text-slate-700">
-          Aucun lead pour le moment. Les soumissions du formulaire web et les inbounds WhatsApp
-          apparaîtront ici.
-        </div>
-      )}
+          {isLoading && !data && <div className="text-sm text-muted-foreground">Chargement…</div>}
 
-      {data && data.rows.length > 0 && (
-        <div className="overflow-hidden rounded-md border border-slate-200">
-          <table className="w-full text-left text-sm">
-            <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
-              <tr>
-                <th className="px-3 py-2">Client</th>
-                <th className="px-3 py-2">Source</th>
-                <th className="px-3 py-2">Produit</th>
-                <th className="px-3 py-2">Statut</th>
-                <th className="px-3 py-2">Score</th>
-                <th className="px-3 py-2">HubSpot</th>
-                <th className="px-3 py-2">Créé</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100">
-              {data.rows.map((r: LeadRow) => (
-                <tr
-                  key={r.leadId}
-                  className="cursor-pointer hover:bg-slate-50"
-                  onClick={() => navigate(`/leads/${r.leadId}`)}
-                >
-                  <td className="px-3 py-2 font-medium text-slate-900">
-                    {r.customerName ?? <span className="text-slate-400">(sans nom)</span>}
-                  </td>
-                  <td className="px-3 py-2 text-slate-600">{r.source}</td>
-                  <td className="px-3 py-2 text-slate-600">{r.productLine}</td>
-                  <td className="px-3 py-2">
+          {data && rows.length === 0 && (
+            <div className="rounded-xl border border-border bg-white p-6 text-center text-sm text-slate-600">
+              Aucun lead ne correspond.
+            </div>
+          )}
+
+          <ul className="flex max-h-[calc(100vh-260px)] flex-col gap-1.5 overflow-y-auto pr-1">
+            {rows.map((r) => {
+              const active = r.leadId === effectiveSelected;
+              return (
+                <li key={r.leadId}>
+                  <button
+                    onClick={() => onRowClick(r)}
+                    className={`flex w-full items-center gap-3 rounded-xl border p-3 text-left transition-colors ${
+                      active
+                        ? 'border-indigo-200 bg-indigo-50/70 shadow-sm'
+                        : 'border-border bg-white hover:bg-accent'
+                    }`}
+                  >
                     <span
-                      className={`rounded-full px-2 py-0.5 text-xs font-medium ${statusTone(r.status)}`}
+                      className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-xs font-bold ${
+                        active ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-600'
+                      }`}
                     >
-                      {r.status}
+                      {initialsOf(r.customerName)}
                     </span>
-                  </td>
-                  <td className="px-3 py-2 text-slate-600">
-                    {r.score ?? <span className="text-slate-300">—</span>}
-                  </td>
-                  <td className="px-3 py-2 text-slate-600">
-                    {r.hubspotDealId ? (
-                      <span className="rounded bg-emerald-50 px-1.5 py-0.5 text-xs text-emerald-700">
-                        sync
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-sm font-semibold text-slate-900">
+                        {r.customerName ?? '(sans nom)'}
                       </span>
-                    ) : (
-                      <span className="text-slate-300">—</span>
-                    )}
-                  </td>
-                  <td className="px-3 py-2 text-slate-500" title={r.createdAt}>
-                    {relativeTime(r.createdAt)}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
+                      <span className="block text-[11px] text-slate-500">
+                        {r.source} · {relativeTime(r.createdAt)}
+                      </span>
+                    </span>
+                    <span
+                      className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ${statusTone(r.status)}`}
+                    >
+                      {STAGE_LABEL_FR[r.status] ?? r.status}
+                    </span>
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        </section>
+
+        {/* Detail panel — xl only (smaller screens navigate to /leads/:id). */}
+        <section className="hidden xl:block">
+          {effectiveSelected === null && (
+            <div className="rounded-xl border border-dashed border-border bg-white/60 p-10 text-center text-sm text-muted-foreground">
+              Sélectionnez un lead pour voir son dossier.
+            </div>
+          )}
+          {detail.isLoading && effectiveSelected !== null && (
+            <div className="text-sm text-muted-foreground">Chargement du dossier…</div>
+          )}
+          {detail.error && (
+            <div className="rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800">
+              {(detail.error as Error).message}
+            </div>
+          )}
+          {detail.data && <LeadDetailView data={detail.data} />}
+        </section>
+      </div>
     </div>
   );
 }

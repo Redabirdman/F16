@@ -123,6 +123,8 @@ export interface LeadDetail {
     createdAt: string;
     scoredAt: string | null;
     updatedAt: string;
+    callbackDueAt: string | null;
+    callbackState: string | null;
   };
   customer: {
     id: string;
@@ -163,6 +165,12 @@ export interface LeadDetail {
     summary: string;
     createdAt: string;
     resolvedAt: string | null;
+  }>;
+  events: Array<{
+    id: string;
+    at: string;
+    action: string;
+    label: string;
   }>;
 }
 
@@ -298,10 +306,56 @@ export interface DashboardKpis {
   calls: { placedLast24h: number; scheduledUpcoming: number };
   upcomingCallbacks: Array<{ leadId: string; customerName: string; dueAt: string }>;
   recentActivity: Array<{ at: string; label: string; leadId?: string }>;
+  timeseries: Array<{
+    day: string;
+    inbound: number;
+    outbound: number;
+    quotesRequested: number;
+    devisDelivered: number;
+    callsPlaced: number;
+  }>;
+  agentActivity: Array<{ role: string; count: number }>;
 }
 
 export function getDashboardKpis(): Promise<DashboardKpis> {
   return apiGet<DashboardKpis>('/v1/admin/dashboard/kpis');
+}
+
+// ----- Admin redesign 2026-07-08: system costs -------------------------------
+
+export interface CostsResponse {
+  generatedAt: string;
+  usdEurRate: number;
+  months: Array<{
+    month: string;
+    llmEur: number;
+    voiceEur: number;
+    fixedEur: number;
+    totalEur: number;
+  }>;
+  currentMonth: {
+    month: string;
+    llm: {
+      totalEur: number;
+      byModel: Array<{
+        model: string;
+        tier: string;
+        calls: number;
+        inputTokens: number;
+        outputTokens: number;
+        cacheReadTokens: number;
+        cacheCreationTokens: number;
+        costEur: number;
+      }>;
+    };
+    voice: { totalEur: number; calls: number; minutes: number };
+    fixed: { totalEur: number; items: Array<{ label: string; monthlyEur: number }> };
+    totalEur: number;
+  };
+}
+
+export function getCosts(months = 6): Promise<CostsResponse> {
+  return apiGet<CostsResponse>(`/v1/admin/costs?months=${months}`);
 }
 
 // ----- M14.T7: integrations health -----------------------------------------

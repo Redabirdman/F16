@@ -31,6 +31,9 @@ export interface OfficeAgent {
   spriteState: SpriteState;
   /** epoch ms of the last activity that promoted this agent to `working`. */
   lastActiveAt: number;
+  /** Last bus intent addressed to this agent's role — drives the panel's
+   *  "tâche en cours" line (redesign 2026-07-08). */
+  lastIntent: string | null;
 }
 
 /** Reconciled, renderable snapshot. */

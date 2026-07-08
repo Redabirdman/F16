@@ -13,7 +13,7 @@ vi.mock('@/lib/api', () => ({
   })),
 }));
 
-import SimulationPage from './Simulation';
+import SimulationPage from '@/pages/Simulation';
 
 afterEach(() => {
   cleanup();

@@ -69,7 +69,7 @@ export const ZONES: Record<ZoneId, ZoneDef> = {
   },
   'sales-floor': {
     id: 'sales-floor',
-    label: 'Open Sales Floor',
+    label: 'Plateau de vente',
     rect: { col0: 4, row0: 3, col1: 8, row1: 9 },
     accent: 0x38bdf8,
   },
