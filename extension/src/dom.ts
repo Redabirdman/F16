@@ -600,3 +600,26 @@ export function parseEurPrice(text: string | null | undefined): number | null {
   const decimal = m[2] ?? '0';
   return Number.parseFloat(`${whole}.${decimal}`);
 }
+
+/**
+ * Read the text of any VISIBLE Maxance ALERTE popin (ConstructAlertInfo
+ * renders them all at the same fixed-position container). Diagnostic only —
+ * never clicks anything. Added 2026-07-03 (quote-confirm) after the "Format
+ * du téléphone incorrect." popin blocked a devis silently; promoted to the
+ * shared DOM helpers 2026-07-08 so quote-preview can classify the
+ * "Ville obligatoire" invalid-postal-code ALERTE too.
+ */
+export function visibleAlerteText(): string {
+  const containers = Array.from(
+    document.querySelectorAll<HTMLElement>(
+      '#alertDiv, .alertInfo, .alerte, .popin, .popup, [id*="alert" i], [class*="alert" i], [role="dialog"]',
+    ),
+  );
+  for (const c of containers) {
+    const r = c.getBoundingClientRect();
+    if (r.width === 0 || r.height === 0) continue;
+    const txt = (c.innerText || '').replace(/\s+/g, ' ').trim();
+    if (txt) return txt.slice(0, 200);
+  }
+  return '';
+}

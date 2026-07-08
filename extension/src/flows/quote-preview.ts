@@ -48,6 +48,7 @@ import {
   setSelectByLabel,
   setSelectValue,
   sleep,
+  visibleAlerteText,
   waitFor,
 } from '../dom.js';
 import {
@@ -217,6 +218,17 @@ async function triggerNavigationToVehicule(cmd: QuotePreviewCommand): Promise<vo
   // Do NOT await navigation here — the SW orchestrator owns that.
 }
 
+/**
+ * Pure classifier (unit-tested, no DOM): the postal code is INVALID when the
+ * commune lookup produced nothing usable AND Maxance's "Ville obligatoire"
+ * ALERTE is on screen. Both conditions required: an empty zonier alone can
+ * be slow AJAX; the ALERTE alone can be a different mandatory field.
+ */
+export function isInvalidCpSituation(zonierStatus: string, alerteText: string): boolean {
+  if (zonierStatus !== 'no_options' && zonierStatus !== 'timeout') return false;
+  return /ville/i.test(alerteText) && /obligatoire/i.test(alerteText);
+}
+
 async function fillVehiculeTab(cmd: QuotePreviewCommand): Promise<void> {
   const { params } = cmd;
   const purchaseDateFr = formatIsoDateFr(params.purchaseDate);
@@ -295,6 +307,24 @@ async function fillVehiculeTab(cmd: QuotePreviewCommand): Promise<void> {
       zonierStatus = `selected:${match.value}`;
     } else {
       zonierStatus = 'no_options';
+    }
+  }
+
+  // INVALID postal code (Achraf live 2026-07-08: CP 75091 — matches no
+  // French commune, so the zonier NEVER populates and every iteration
+  // re-raises "La valeur du champ 'Ville' est obligatoire" until the 240s
+  // hard timeout, spamming management with generic QUOTE_FAILED alerts.
+  // Fail FAST with a structured code instead: no commune available AND the
+  // Ville ALERTE is on screen (i.e. this is a re-entry after a bounced
+  // Suivant, not merely a slow AJAX). The backend classifies
+  // `maxance_invalid_postal_code` as CUSTOMER DATA → the agent asks the
+  // customer to double-check their CP; management is not pinged.
+  {
+    const alerte = visibleAlerteText();
+    if (isInvalidCpSituation(zonierStatus, alerte)) {
+      throw new Error(
+        `maxance_invalid_postal_code:cp=${params.postalCode} — aucune commune trouvée (${alerte.slice(0, 80)})`,
+      );
     }
   }
 

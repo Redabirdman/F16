@@ -49,6 +49,7 @@ import {
   setSelectByLabel,
   setSelectValue,
   sleep,
+  visibleAlerteText,
   waitFor,
 } from '../dom.js';
 import { openMdiWindowMainWorld } from '../iframe.js';
@@ -256,28 +257,8 @@ function detectConfirmScreen():
   return 'unknown';
 }
 
-/**
- * Read the text of any VISIBLE Maxance ALERTE popin (ConstructAlertInfo
- * renders them all at the same fixed-position container). Diagnostic only —
- * never clicks anything. Added 2026-07-03 after the "Format du téléphone
- * incorrect." popin blocked a devis silently: the flows only *detected*
- * popins they were taught (NVEI, duplicate) and generic ALERTE content never
- * reached the backend logs, so failures read as mystery bounces.
- */
-function visibleAlerteText(): string {
-  const containers = Array.from(
-    document.querySelectorAll<HTMLElement>(
-      '#alertDiv, .alertInfo, .alerte, .popin, .popup, [id*="alert" i], [class*="alert" i], [role="dialog"]',
-    ),
-  );
-  for (const c of containers) {
-    const r = c.getBoundingClientRect();
-    if (r.width === 0 || r.height === 0) continue;
-    const txt = (c.innerText || '').replace(/\s+/g, ' ').trim();
-    if (txt) return txt.slice(0, 200);
-  }
-  return '';
-}
+// visibleAlerteText moved to ../dom.js (2026-07-08) — shared with
+// quote-preview's invalid-postal-code classifier.
 
 /**
  * Ensure the Devis form's Ville (commune) select carries a selection.
