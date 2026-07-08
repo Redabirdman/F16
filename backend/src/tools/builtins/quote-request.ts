@@ -45,6 +45,7 @@ import { registerTool } from '../registry.js';
 import { customers, leads, quotes } from '../../db/schema/index.js';
 import { insertQuote } from '../../db/repositories/quotes.js';
 import { setLeadStatus } from '../../db/repositories/leads.js';
+import { checkFrenchPostalCode } from '../../leads/postal-codes.js';
 import { sendMessage } from '../../messaging/dispatcher.js';
 import {
   isMaxanceOpen,
@@ -161,6 +162,32 @@ registerTool({
   inputSchema,
   outputSchema,
   handler: async (ctx, input) => {
+    // 0. Postal code must exist in France (2026-07-08, Ridaa: CP 75091
+    //    burned 4 minutes of Maxance wizard + 7 management pings). Checked
+    //    against La Poste's official base — an invalid code never reaches
+    //    Maxance; the LLM sees this error and asks the customer to verify.
+    if (checkFrenchPostalCode(input.formData.postalCode) === 'invalid') {
+      throw new Error(
+        `Le code postal ${input.formData.postalCode} ne correspond à aucune commune française ` +
+          `(base officielle La Poste). Demande au client de le vérifier / corriger — il manque ` +
+          `peut-être un chiffre — puis rappelle quote.request avec le bon code. NE relance PAS ` +
+          `avec le même code.`,
+      );
+    }
+    // Same pre-flight for uninsurable parking — no Maxance product exists
+    // for street / open parking (live 2026-07-08): don't start the run.
+    if (
+      input.formData.stationnement === 'rue' ||
+      input.formData.stationnement === 'parking_prive_non_clos'
+    ) {
+      throw new Error(
+        `Aucune formule n'existe pour une trottinette stationnée la nuit en voie publique ou ` +
+          `parking ouvert (stationnement=${input.formData.stationnement}). Demande au client ` +
+          `s'il peut la garer dans un lieu sécurisé (garage/box, domicile, parking privé fermé) ` +
+          `et rappelle quote.request avec ce stationnement.`,
+      );
+    }
+
     // 1. Sanity-check customer + lead exist. This protects against an LLM
     //    that hallucinates IDs by stitching together fragments from earlier
     //    context. Cheap (~1-2ms with the primary-key indexes).
