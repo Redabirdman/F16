@@ -31,6 +31,7 @@ import type { ModelTier } from '../agents/base.js';
 import { modelIdForTier } from './router.js';
 import { buildSystemPrompt, type SystemFragment } from './cache.js';
 import { maybeAlertLlmBillingError } from './billing-alert.js';
+import { recordLlmUsage, usageTagsFromLogContext } from './usage-log.js';
 import { logger } from '../logger.js';
 
 export interface ClaudeCallInput {
@@ -243,6 +244,20 @@ export async function callClaude(
     },
     'claude.call.ok',
   );
+
+  // Persist token usage for the admin costs page — fire-and-forget, no-op
+  // when no sink is registered (tests / scripts).
+  recordLlmUsage({
+    model: modelId,
+    tier: input.tier,
+    ...usageTagsFromLogContext(input.logContext),
+    inputTokens,
+    outputTokens,
+    cacheReadTokens: cacheReadInputTokens,
+    cacheCreationTokens: cacheCreationInputTokens,
+    durationMs,
+    iterations: 1,
+  });
 
   if (input.structured) {
     return {

@@ -58,6 +58,13 @@ d('GET /v1/admin/dashboard/kpis', () => {
     expect(body.conversation.inboundLast24h).toBe(0);
     expect(body.conversation.outboundLast24h).toBe(0);
     expect(body.quotes.totalLast24h).toBe(0);
+    // Redesign 2026-07-08: continuous 14-day series even when empty.
+    const extended = body as unknown as {
+      timeseries: Array<{ day: string; inbound: number }>;
+      agentActivity: Array<{ role: string; count: number }>;
+    };
+    expect(extended.timeseries).toHaveLength(14);
+    expect(extended.timeseries.every((t) => /^\d{4}-\d{2}-\d{2}$/.test(t.day))).toBe(true);
   });
 
   it('aggregates counts correctly across all dimensions', async () => {
@@ -146,5 +153,24 @@ d('GET /v1/admin/dashboard/kpis', () => {
     expect(body.conversation.outboundLast24h).toBe(1);
     expect(body.quotes.totalLast24h).toBe(1);
     expect(body.quotes.byStatusAllTime.requested).toBe(1);
+
+    // Redesign 2026-07-08: today's bucket carries the seeded traffic and the
+    // agents donut sees the outbound sales-agent turn.
+    const extended = body as unknown as {
+      timeseries: Array<{
+        day: string;
+        inbound: number;
+        outbound: number;
+        quotesRequested: number;
+      }>;
+      agentActivity: Array<{ role: string; count: number }>;
+    };
+    expect(extended.timeseries).toHaveLength(14);
+    const today = extended.timeseries[extended.timeseries.length - 1]!;
+    expect(today.inbound).toBe(2);
+    expect(today.outbound).toBe(1);
+    expect(today.quotesRequested).toBe(1);
+    const sales = extended.agentActivity.find((a) => a.role === 'sales-agent');
+    expect(sales?.count).toBe(1);
   });
 });

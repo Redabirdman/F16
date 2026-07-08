@@ -10,6 +10,7 @@ import { sql } from 'drizzle-orm';
 import { createDb, type Database } from '../../src/db/index.js';
 import { insertCustomer } from '../../src/db/repositories/customers.js';
 import { createAction } from '../../src/db/repositories/human-actions.js';
+import { appendAudit } from '../../src/db/repositories/audit-log.js';
 import { conversationTurns, leads } from '../../src/db/schema/index.js';
 import { buildAdminLeadDetailRouter } from '../../src/admin/lead-detail.js';
 
@@ -116,5 +117,61 @@ d('GET /v1/admin/leads/:id', () => {
     // Human action correlated to this lead.
     expect(body.humanActions).toHaveLength(1);
     expect(body.humanActions[0]?.intent).toBe('COMPLIANCE_BLOCKED');
+  });
+
+  it('returns audit events + callback fields for the unified timeline', async () => {
+    const cust = await insertCustomer(db, { fullName: 'Khalid Test', phone: '+33622222222' });
+    const dueAt = new Date(Date.now() + 24 * 3600_000);
+    const [lead] = await db
+      .insert(leads)
+      .values({
+        customerId: cust.id,
+        source: 'meta',
+        productLine: 'scooter',
+        status: 'quoting',
+        callbackDueAt: dueAt,
+        callbackState: 'pending',
+      })
+      .returning();
+    await appendAudit(db, {
+      actorType: 'agent',
+      actorId: 'sales-agent#x',
+      action: 'lead.status.change',
+      targetType: 'lead',
+      targetId: lead!.id,
+      after: { status: 'quoting' },
+    });
+    await appendAudit(db, {
+      actorType: 'system',
+      actorId: 'openai-sip',
+      action: 'voice.call.ended',
+      targetType: 'customer',
+      targetId: cust.id,
+      meta: { durationMs: 90_000 },
+    });
+    // Non-allowlisted action must NOT appear in the timeline.
+    await appendAudit(db, {
+      actorType: 'system',
+      actorId: 'system',
+      action: 'some.internal.noise',
+      targetType: 'lead',
+      targetId: lead!.id,
+    });
+
+    const res = await app.request(`/v1/admin/leads/${lead!.id}`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      lead: { callbackDueAt: string | null; callbackState: string | null };
+      events: Array<{ action: string; label: string; at: string }>;
+    };
+    expect(body.lead.callbackState).toBe('pending');
+    expect(body.lead.callbackDueAt).toBe(dueAt.toISOString());
+    expect(body.events).toHaveLength(2);
+    expect(body.events.map((e) => e.action).sort()).toEqual([
+      'lead.status.change',
+      'voice.call.ended',
+    ]);
+    const call = body.events.find((e) => e.action === 'voice.call.ended');
+    expect(call?.label).toContain('Appel terminé');
   });
 });

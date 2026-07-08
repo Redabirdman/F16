@@ -19,11 +19,19 @@
  * has no turns / quotes / actions yet.
  */
 import { Hono } from 'hono';
-import { and, asc, desc, eq } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, or } from 'drizzle-orm';
 import type { Database } from '../db/index.js';
-import { conversationTurns, customers, humanActions, leads, quotes } from '../db/schema/index.js';
+import {
+  auditLog,
+  conversationTurns,
+  customers,
+  humanActions,
+  leads,
+  quotes,
+} from '../db/schema/index.js';
 import { decryptPII } from '../db/crypto.js';
 import { logger } from '../logger.js';
+import { FEED_ACTIONS, feedLabel } from './dashboard.js';
 
 export interface AdminLeadDetailRouterOptions {
   db: Database;
@@ -43,6 +51,9 @@ export interface LeadDetailResponse {
     createdAt: string;
     scoredAt: string | null;
     updatedAt: string;
+    /** Booked phone callback still pending (redesign 2026-07-08). */
+    callbackDueAt: string | null;
+    callbackState: string | null;
   };
   customer: {
     id: string;
@@ -83,6 +94,17 @@ export interface LeadDetailResponse {
     summary: string;
     createdAt: string;
     resolvedAt: string | null;
+  }>;
+  /**
+   * Plain-French audit events about this lead (status changes, calls,
+   * callbacks, compliance) — merged client-side with turns + quotes into
+   * the unified timeline (redesign 2026-07-08).
+   */
+  events: Array<{
+    id: string;
+    at: string;
+    action: string;
+    label: string;
   }>;
 }
 
@@ -168,6 +190,28 @@ export function buildAdminLeadDetailRouter(opts: AdminLeadDetailRouterOptions): 
       .where(eq(humanActions.correlationId, lead.id))
       .orderBy(desc(humanActions.createdAt));
 
+    // Audit events about this lead (or its customer) — the timeline's
+    // "what the system did" entries: status changes, calls, callbacks,
+    // compliance flags. Same allowlist + FR labels as the dashboard feed.
+    const eventTargets = [
+      and(eq(auditLog.targetType, 'lead'), eq(auditLog.targetId, lead.id)),
+      ...(lead.customerId
+        ? [and(eq(auditLog.targetType, 'customer'), eq(auditLog.targetId, lead.customerId))]
+        : []),
+    ];
+    const eventRows = await opts.db
+      .select({
+        id: auditLog.id,
+        at: auditLog.occurredAt,
+        action: auditLog.action,
+        meta: auditLog.meta,
+        after: auditLog.after,
+      })
+      .from(auditLog)
+      .where(and(inArray(auditLog.action, [...FEED_ACTIONS]), or(...eventTargets)))
+      .orderBy(asc(auditLog.occurredAt))
+      .limit(200);
+
     const body: LeadDetailResponse = {
       lead: {
         id: lead.id,
@@ -180,6 +224,8 @@ export function buildAdminLeadDetailRouter(opts: AdminLeadDetailRouterOptions): 
         createdAt: lead.createdAt.toISOString(),
         scoredAt: lead.scoredAt ? lead.scoredAt.toISOString() : null,
         updatedAt: lead.updatedAt.toISOString(),
+        callbackDueAt: lead.callbackDueAt ? lead.callbackDueAt.toISOString() : null,
+        callbackState: lead.callbackState ?? null,
       },
       customer,
       turns: turnRows.map((t) => ({
@@ -211,6 +257,19 @@ export function buildAdminLeadDetailRouter(opts: AdminLeadDetailRouterOptions): 
         summary: a.summary,
         createdAt: a.createdAt.toISOString(),
         resolvedAt: a.resolvedAt ? a.resolvedAt.toISOString() : null,
+      })),
+      events: eventRows.map((e) => ({
+        id: e.id,
+        at: e.at.toISOString(),
+        action: e.action,
+        // Name intentionally omitted — the page already shows the customer;
+        // "client" reads fine inside their own timeline.
+        label: feedLabel(
+          e.action,
+          null,
+          (e.meta ?? null) as Record<string, unknown> | null,
+          (e.after ?? null) as Record<string, unknown> | null,
+        ),
       })),
     };
 

@@ -510,6 +510,23 @@ async function persistTranscripts(db: Database, ctx: CallContext): Promise<void>
   } catch {
     // never block transcript persistence on HubSpot emit
   }
+
+  // Admin costs: audit the call end with its duration so voice minutes are
+  // queryable server-side (the HubSpot engagement is not). Best-effort.
+  try {
+    const durationMs = Date.now() - ctx.connectedAt;
+    await appendAudit(db, {
+      actorType: 'system',
+      actorId: 'openai-sip',
+      action: 'voice.call.ended',
+      ...(ctx.leadId !== undefined
+        ? { targetType: 'lead', targetId: ctx.leadId }
+        : { targetType: 'customer', targetId: ctx.customerId }),
+      meta: { durationMs, turns: ctx.transcripts.length },
+    });
+  } catch {
+    // never block transcript persistence on an audit blip
+  }
 }
 
 /**

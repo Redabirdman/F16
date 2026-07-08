@@ -74,12 +74,30 @@ export interface DashboardKpis {
     label: string;
     leadId?: string;
   }>;
+  /**
+   * Daily activity, last 14 days oldest-first — feeds the dashboard charts
+   * (admin redesign 2026-07-08). Days with zero activity are filled in so
+   * the x-axis is continuous.
+   */
+  timeseries: Array<{
+    /** 'YYYY-MM-DD' (UTC). */
+    day: string;
+    inbound: number;
+    outbound: number;
+    quotesRequested: number;
+    devisDelivered: number;
+    callsPlaced: number;
+  }>;
+  /** Outbound conversation turns by agent role, last 7 days — agents donut. */
+  agentActivity: Array<{ role: string; count: number }>;
 }
 
-/** Audit actions surfaced in the human feed, with FR label builders. */
-const FEED_ACTIONS = [
+/** Audit actions surfaced in the human feed, with FR label builders.
+ *  Exported: the lead-detail timeline reuses the same allowlist + labels. */
+export const FEED_ACTIONS = [
   'lead.status.change',
   'voice.call.originated',
+  'voice.call.ended',
   'voice.callback.booked',
   'voice.call.requested',
   'compliance.flagged',
@@ -87,7 +105,7 @@ const FEED_ACTIONS = [
   'human_action.create',
 ] as const;
 
-function feedLabel(
+export function feedLabel(
   action: string,
   name: string | null,
   meta: Record<string, unknown> | null,
@@ -101,6 +119,11 @@ function feedLabel(
     }
     case 'voice.call.originated':
       return `📞 Appel sortant passé (${who})`;
+    case 'voice.call.ended': {
+      const ms = meta?.['durationMs'];
+      const dur = typeof ms === 'number' ? ` — ${Math.max(1, Math.round(ms / 60_000))} min` : '';
+      return `📞 Appel terminé${dur} (${who})`;
+    }
     case 'voice.callback.booked': {
       const due = meta?.['dueAt'] as string | undefined;
       const dueFr = due
@@ -133,6 +156,10 @@ export function buildAdminDashboardRouter(opts: AdminDashboardRouterOptions): Ho
 
   app.get('/v1/admin/dashboard/kpis', async (c) => {
     const since24h = new Date(Date.now() - 24 * 3600_000);
+    const since14d = new Date(Date.now() - 14 * 24 * 3600_000);
+    const since7d = new Date(Date.now() - 7 * 24 * 3600_000);
+    const dayExpr = (col: unknown): ReturnType<typeof sql<string>> =>
+      sql<string>`to_char(${col} at time zone 'UTC', 'YYYY-MM-DD')`;
 
     // Run all aggregates in parallel — they're independent reads.
     const [
@@ -147,6 +174,11 @@ export function buildAdminDashboardRouter(opts: AdminDashboardRouterOptions): Ho
       callsPlacedRow,
       upcomingCallbackRows,
       feedRows,
+      turnsByDayRows,
+      quotesByDayRows,
+      devisByDayRows,
+      callsByDayRows,
+      agentActivityRows,
     ] = await Promise.all([
       opts.db
         .select({ n: sql<number>`count(*)::int` })
@@ -234,6 +266,56 @@ export function buildAdminDashboardRouter(opts: AdminDashboardRouterOptions): Ho
         .where(inArray(auditLog.action, [...FEED_ACTIONS]))
         .orderBy(desc(auditLog.occurredAt))
         .limit(25),
+      // ----- redesign 2026-07-08: 14-day chart series + agents donut -----
+      opts.db
+        .select({
+          day: dayExpr(conversationTurns.occurredAt),
+          direction: conversationTurns.direction,
+          n: sql<number>`count(*)::int`,
+        })
+        .from(conversationTurns)
+        .where(gte(conversationTurns.occurredAt, since14d))
+        .groupBy(dayExpr(conversationTurns.occurredAt), conversationTurns.direction),
+      opts.db
+        .select({
+          day: dayExpr(quotes.requestedAt),
+          n: sql<number>`count(*)::int`,
+        })
+        .from(quotes)
+        .where(gte(quotes.requestedAt, since14d))
+        .groupBy(dayExpr(quotes.requestedAt)),
+      opts.db
+        .select({
+          day: dayExpr(quotes.requestedAt),
+          n: sql<number>`count(*)::int`,
+        })
+        .from(quotes)
+        .where(and(gte(quotes.requestedAt, since14d), isNotNull(quotes.maxanceDevisNumber)))
+        .groupBy(dayExpr(quotes.requestedAt)),
+      opts.db
+        .select({
+          day: dayExpr(auditLog.occurredAt),
+          n: sql<number>`count(*)::int`,
+        })
+        .from(auditLog)
+        .where(
+          and(eq(auditLog.action, 'voice.call.originated'), gte(auditLog.occurredAt, since14d)),
+        )
+        .groupBy(dayExpr(auditLog.occurredAt)),
+      opts.db
+        .select({
+          role: conversationTurns.agentRole,
+          n: sql<number>`count(*)::int`,
+        })
+        .from(conversationTurns)
+        .where(
+          and(
+            eq(conversationTurns.direction, 'outbound'),
+            gte(conversationTurns.occurredAt, since7d),
+            isNotNull(conversationTurns.agentRole),
+          ),
+        )
+        .groupBy(conversationTurns.agentRole),
     ]);
 
     // Resolve customer names for the feed (lead targets → lead→customer;
@@ -285,6 +367,35 @@ export function buildAdminDashboardRouter(opts: AdminDashboardRouterOptions): Ho
     const quotesByStatus: Record<string, number> = {};
     for (const r of quotesByStatusRows) quotesByStatus[r.status] = r.n;
 
+    // Continuous 14-day series — fill zero days so the chart x-axis never
+    // skips a day with no traffic.
+    const inByDay = new Map<string, number>();
+    const outByDay = new Map<string, number>();
+    for (const r of turnsByDayRows) {
+      (r.direction === 'inbound' ? inByDay : outByDay).set(r.day, r.n);
+    }
+    const quotesByDay = new Map(quotesByDayRows.map((r) => [r.day, r.n]));
+    const devisByDay = new Map(devisByDayRows.map((r) => [r.day, r.n]));
+    const callsByDay = new Map(callsByDayRows.map((r) => [r.day, r.n]));
+    const timeseries: DashboardKpis['timeseries'] = [];
+    for (let i = 13; i >= 0; i--) {
+      const d = new Date(Date.now() - i * 24 * 3600_000);
+      const key = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+      timeseries.push({
+        day: key,
+        inbound: inByDay.get(key) ?? 0,
+        outbound: outByDay.get(key) ?? 0,
+        quotesRequested: quotesByDay.get(key) ?? 0,
+        devisDelivered: devisByDay.get(key) ?? 0,
+        callsPlaced: callsByDay.get(key) ?? 0,
+      });
+    }
+
+    const agentActivity = agentActivityRows
+      .filter((r): r is { role: string; n: number } => r.role !== null)
+      .map((r) => ({ role: r.role, count: r.n }))
+      .sort((a, b) => b.count - a.count);
+
     const body: DashboardKpis = {
       generatedAt: new Date().toISOString(),
       leads: {
@@ -333,6 +444,8 @@ export function buildAdminDashboardRouter(opts: AdminDashboardRouterOptions): Ho
           ...(r.targetType === 'lead' && r.targetId ? { leadId: r.targetId } : {}),
         };
       }),
+      timeseries,
+      agentActivity,
     };
     return c.json(body, 200);
   });

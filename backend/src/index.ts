@@ -27,6 +27,9 @@ import { buildAdminKnowledgeRouter } from './admin/knowledge-search.js';
 import { buildAdminPromptsRouter } from './admin/prompts.js';
 import { buildAdminTeamChatRouter } from './admin/team-chat.js';
 import { buildAdminSimRouter } from './admin/sim-control.js';
+import { buildAdminCostsRouter } from './admin/costs.js';
+import { registerLlmUsageSink } from './llm/usage-log.js';
+import { llmUsage } from './db/schema/index.js';
 import { HubSpotClient } from './integrations/hubspot/client.js';
 import { WahaClient } from './channels/whatsapp/waha-client.js';
 import { requireAdminAuth } from './admin/auth.js';
@@ -236,6 +239,27 @@ export function buildApp(opts: BuildAppOptions = {}): Hono {
     // M14.T3 — dashboard KPIs (single aggregated endpoint).
     const adminDashboardApp = buildAdminDashboardRouter({ db: opts.db });
     app.route('/', adminDashboardApp);
+    // Admin redesign 2026-07-08 — system costs (LLM tokens, voice minutes,
+    // fixed monthly items) + the llm_usage writer behind callClaude.
+    const adminCostsApp = buildAdminCostsRouter({ db: opts.db });
+    app.route('/', adminCostsApp);
+    {
+      const usageDb = opts.db;
+      registerLlmUsageSink(async (e) => {
+        await usageDb.insert(llmUsage).values({
+          model: e.model,
+          tier: e.tier,
+          agentRole: e.agentRole ?? null,
+          purpose: e.purpose ?? null,
+          inputTokens: e.inputTokens,
+          outputTokens: e.outputTokens,
+          cacheReadTokens: e.cacheReadTokens,
+          cacheCreationTokens: e.cacheCreationTokens,
+          durationMs: e.durationMs ?? null,
+          iterations: e.iterations ?? 1,
+        });
+      });
+    }
     // M14.T7 — integrations health (live probes + env-presence checks).
     const adminIntegrationsApp = buildAdminIntegrationsRouter();
     app.route('/', adminIntegrationsApp);

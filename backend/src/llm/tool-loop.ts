@@ -49,6 +49,7 @@ import { invokeTool } from '../tools/registry.js';
 import { logger } from '../logger.js';
 import { getClaudeClientForToolLoop } from './claude.js';
 import { maybeAlertLlmBillingError } from './billing-alert.js';
+import { recordLlmUsage, usageTagsFromLogContext } from './usage-log.js';
 
 export interface ToolLoopInput {
   tier: ModelTier;
@@ -204,6 +205,23 @@ export async function callClaudeWithTools(input: ToolLoopInput): Promise<ToolLoo
   };
   let lastStopReason: string | null = null;
   let iteration = 0;
+  const startedAt = Date.now();
+
+  // Persist cumulative token usage for the admin costs page — fire-and-forget,
+  // no-op when no sink is registered (tests / scripts).
+  const recordUsage = (): void => {
+    recordLlmUsage({
+      model: modelId,
+      tier: input.tier,
+      ...usageTagsFromLogContext(input.logContext),
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+      cacheReadTokens: usage.cacheReadInputTokens,
+      cacheCreationTokens: usage.cacheCreationInputTokens,
+      durationMs: Date.now() - startedAt,
+      iterations: iteration,
+    });
+  };
 
   while (iteration < maxIterations) {
     iteration += 1;
@@ -247,6 +265,7 @@ export async function callClaudeWithTools(input: ToolLoopInput): Promise<ToolLoo
         .filter((b: ContentBlock): b is TextBlock => b.type === 'text')
         .map((b) => b.text)
         .join('');
+      recordUsage();
       return {
         text,
         iterations: iteration,
@@ -311,6 +330,7 @@ export async function callClaudeWithTools(input: ToolLoopInput): Promise<ToolLoo
     },
     'tool-loop: max iterations reached without end_turn',
   );
+  recordUsage();
   return {
     text: '',
     iterations: iteration,
