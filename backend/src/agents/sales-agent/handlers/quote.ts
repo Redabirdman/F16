@@ -355,8 +355,26 @@ export async function handleQuoteFailed(
   // Ask the customer to double-check instead of pinging management: Ridaa's
   // robustness mandate — self-heal → audit → escalate only on persistence.
   const combined = `${payload.errorCode} ${payload.detail ?? ''}`;
+  // Underage detection is EVIDENCE-BASED first (live 2026-07-08 16:56: a
+  // stale extension build reported the underage rejection as an opaque
+  // unknown_screen, and the failure got dedup-swallowed while the customer
+  // was told "devis en cours"). The dossier's own birth date is proof: with
+  // a minor souscripteur Maxance rejects EVERY run, whatever the error code
+  // says — so any failure on a minor-DOB dossier means "collect the
+  // parent's details". The structured code / alerte text stay as fallbacks
+  // for dossiers whose DOB we don't have.
+  const dossierDob = (lead.qualification as { clientDateOfBirth?: string } | null)
+    ?.clientDateOfBirth;
+  const dossierIsMinor = ((): boolean => {
+    if (!dossierDob || !/^\d{4}-\d{2}-\d{2}$/.test(dossierDob)) return false;
+    const dob = new Date(`${dossierDob}T00:00:00Z`);
+    const age = (Date.now() - dob.getTime()) / (365.25 * 24 * 3600_000);
+    return Number.isFinite(age) && age >= 0 && age < 18;
+  })();
   const isUnderageError =
-    combined.includes('maxance_subscriber_underage') || /moins de 18/i.test(combined);
+    dossierIsMinor ||
+    combined.includes('maxance_subscriber_underage') ||
+    /moins de 18/i.test(combined);
   const isCustomerDataError =
     isUnderageError ||
     combined.includes('maxance_invalid_postal_code') ||

@@ -65,14 +65,14 @@ const LEAD_ID = '22222222-2222-4222-8222-222222222222';
 const CUSTOMER_ID = '11111111-1111-4111-8111-111111111111';
 const QUOTE_ID = '33333333-3333-4333-8333-333333333333';
 
-function ctx(): SalesHandlerCtx {
+function ctx(qualification: Record<string, unknown> | null = null): SalesHandlerCtx {
   return {
     db: {} as SalesHandlerCtx['db'],
     role: 'sales-agent',
     instanceId: 'test',
     resolveCustomerAndContact: vi.fn().mockResolvedValue({
       customer: { id: CUSTOMER_ID, fullName: 'enc' },
-      lead: { id: LEAD_ID },
+      lead: { id: LEAD_ID, qualification },
       contactRef: { channel: 'whatsapp', address: '+33611111111' },
     }) as unknown as SalesHandlerCtx['resolveCustomerAndContact'],
     leadIdFromEnvelope: () => LEAD_ID,
@@ -140,6 +140,31 @@ describe('handleQuoteFailed — customer-data self-heal', () => {
     const llmArg = generateSalesReplyMock.mock.calls[0]![0] as { content: string };
     expect(llmArg.content).toContain('moins de 18 ans');
     expect(llmArg.content).toContain('prénom, nom et date de naissance');
+  });
+
+  it('minor DOB in the dossier → parent ask even on an OPAQUE error code', async () => {
+    // Live 2026-07-08 16:56: stale extension build reported the underage
+    // rejection as maxance_quote_unknown_screen — the dossier's own birth
+    // date is the evidence, whatever the code says.
+    const res = await handleQuoteFailed(
+      ctx({ clientDateOfBirth: '2013-12-01' }),
+      envelope('maxance_quote_unknown_screen', 'advance loop exhausted on screen=unknown'),
+    );
+    expect(res.ok).toBe(true);
+    expect(createActionMock).not.toHaveBeenCalled();
+    expect(notifyHumanActionMock).not.toHaveBeenCalled();
+    const llmArg = generateSalesReplyMock.mock.calls[0]![0] as { content: string };
+    expect(llmArg.content).toContain('prénom, nom et date de naissance');
+  });
+
+  it('adult DOB + opaque error → still the normal technical escalation', async () => {
+    const res = await handleQuoteFailed(
+      ctx({ clientDateOfBirth: '1990-05-10' }),
+      envelope('maxance_quote_unknown_screen', 'advance loop exhausted on screen=unknown'),
+    );
+    expect(res.ok).toBe(true);
+    expect(createActionMock).toHaveBeenCalledTimes(1);
+    expect(notifyHumanActionMock).toHaveBeenCalledTimes(1);
   });
 
   it('legacy "Ville obligatoire" detail classifies the same way', async () => {
