@@ -241,6 +241,25 @@ d('VoiceOperatorAgent.onMessage', () => {
     expect(after).toHaveLength(1);
   });
 
+  it('releases the duplicate-call guard on failure so a retry can dial (2026-07-10)', async () => {
+    const customerId = await seedCustomer('+33611223344');
+    const fake = new FakeAsteriskClient();
+    fake.throwReason = 'asterisk_originate_no_channel';
+    const agent = newAgent(fake);
+
+    // First attempt fails — live 2026-07-10 the guard key survived this and
+    // Ridaa's "Retry the call" was swallowed as call-already-inflight.
+    await agent.handle(envelope(CALL_ID, customerId, '+33600000000'));
+    expect(fake.calls).toHaveLength(1);
+
+    // Retry with the SAME customer + SAME number must reach the originate.
+    fake.throwReason = null;
+    const retryCallId = '66666666-6666-4666-8666-666666666666';
+    const result = await agent.handle(envelope(retryCallId, customerId, '+33600000000'));
+    expect(result).toMatchObject({ ok: true, result: { started: true } });
+    expect(fake.calls).toHaveLength(2);
+  });
+
   it('emits VOICE.CALL_FAILED (no audit) when the Asterisk client is disabled', async () => {
     const customerId = await seedCustomer('+33611223344');
     const agent = newAgent(null); // injected null = origination disabled

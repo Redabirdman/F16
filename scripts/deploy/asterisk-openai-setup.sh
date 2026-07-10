@@ -107,12 +107,19 @@ exten => s,1,Answer()
  same => n,Hangup()
 
 ; Outbound bridge: customer answers via OVH -> bridge to OpenAI; record + stamp.
+; 2026-07-10: OpenAI's SIP edge answers in ~2s when healthy but intermittently
+; never delivers the 200 OK (3 of 4 live calls that day) — 60s of dead silence
+; before the drop. Dial 20s, then ONE fresh re-INVITE before giving up.
 [f16-openai-bridge]
 exten => s,1,NoOp(F16 bridge -> OpenAI session=${AS_UUID})
  same => n,Answer()
  same => n,MixMonitor(${AS_UUID}.wav,b,)
- same => n,Dial(PJSIP/openai,60,b(f16-openai-stamp^s^1))
- same => n,Hangup()
+ same => n,Dial(PJSIP/openai,20,b(f16-openai-stamp^s^1))
+ same => n,NoOp(F16 openai dial 1 status=${DIALSTATUS})
+ same => n,GotoIf($["${DIALSTATUS}"="ANSWER"]?done)
+ same => n,Dial(PJSIP/openai,20,b(f16-openai-stamp^s^1))
+ same => n,NoOp(F16 openai dial 2 status=${DIALSTATUS})
+ same => n(done),Hangup()
 
 ; Predial gosub (runs on the OpenAI leg before INVITE): stamp X-F16-Session
 ; from the per-call master channel (concurrency-safe), global as fallback.

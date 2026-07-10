@@ -112,14 +112,12 @@ export class VoiceOperatorAgent extends BaseAgent {
       .update(payload.toNumber ?? '')
       .digest('hex')
       .slice(0, 12);
+    // Remembered so every failure path can RELEASE it (2026-07-10): a failed
+    // originate left the 5-min lock behind, so the human 'Retry the call'
+    // choice was silently swallowed as a duplicate.
+    const guardKey = `f16:voice-call-inflight:${customerId}:${numHash}`;
     try {
-      const first = await getRedis().set(
-        `f16:voice-call-inflight:${customerId}:${numHash}`,
-        callId,
-        'EX',
-        300,
-        'NX',
-      );
+      const first = await getRedis().set(guardKey, callId, 'EX', 300, 'NX');
       if (first === null) {
         logger.warn(
           { callId, customerId, instanceId: this.instanceId },
@@ -138,6 +136,7 @@ export class VoiceOperatorAgent extends BaseAgent {
         customerId,
         reason: 'asterisk_disabled_no_env',
         audit: false, // config gap, not a call attempt — skip the audit noise
+        guardKey,
       });
     }
 
@@ -152,18 +151,18 @@ export class VoiceOperatorAgent extends BaseAgent {
       if (customer?.phone && !(payload.altNumber && toNumber)) {
         toNumber = customer.phone;
       } else if (!toNumber) {
-        return this.fail({ callId, customerId, reason: 'no_phone_for_customer' });
+        return this.fail({ callId, customerId, reason: 'no_phone_for_customer', guardKey });
       }
     } catch (err) {
       logger.error(
         { callId, customerId, err: err instanceof Error ? err.message : String(err) },
         'voice-operator: customer resolution failed',
       );
-      return this.fail({ callId, customerId, reason: 'customer_resolution_failed' });
+      return this.fail({ callId, customerId, reason: 'customer_resolution_failed', guardKey });
     }
 
     if (!toNumber) {
-      return this.fail({ callId, customerId, reason: 'no_phone_for_customer' });
+      return this.fail({ callId, customerId, reason: 'no_phone_for_customer', guardKey });
     }
 
     // sessionId = the Asterisk AudioSocket AS_UUID. uuid v4 — opaque + unique.
@@ -182,7 +181,7 @@ export class VoiceOperatorAgent extends BaseAgent {
         { callId, customerId, sessionId, err: err instanceof Error ? err.message : String(err) },
         'voice-operator: session registry write failed',
       );
-      return this.fail({ callId, customerId, reason: 'session_store_failed' });
+      return this.fail({ callId, customerId, reason: 'session_store_failed', guardKey });
     }
 
     let channelId: string;
@@ -199,7 +198,7 @@ export class VoiceOperatorAgent extends BaseAgent {
         { callId, customerId, sessionId, reason },
         'voice-operator: originateCall failed',
       );
-      return this.fail({ callId, customerId, reason });
+      return this.fail({ callId, customerId, reason, guardKey });
     }
 
     // Audit the successful origination (customerId, not the phone number).
@@ -263,8 +262,17 @@ export class VoiceOperatorAgent extends BaseAgent {
     customerId: string;
     reason: string;
     audit?: boolean;
+    /** Duplicate-call guard key to RELEASE — a failed attempt must not hold the 5-min lock. */
+    guardKey?: string;
   }): Promise<MessageHandlerResult> {
     const { callId, customerId, reason } = args;
+    if (args.guardKey) {
+      try {
+        await getRedis().del(args.guardKey);
+      } catch {
+        // Redis blip — the key self-expires in ≤5 min anyway.
+      }
+    }
     if (args.audit !== false) {
       try {
         await appendAudit(this.db, {
