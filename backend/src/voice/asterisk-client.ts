@@ -311,6 +311,7 @@ export class AsteriskCliClient implements VoiceOriginator {
   private readonly trunk: string;
   private readonly openAiContext: string;
   private readonly run: AsteriskRunner;
+  private readonly verifyDelaysMs: number[];
   readonly nativeSip = true;
 
   constructor(cfg: {
@@ -319,10 +320,13 @@ export class AsteriskCliClient implements VoiceOriginator {
     distro?: string;
     timeoutMs?: number;
     runner?: AsteriskRunner;
+    /** Post-originate channel-verification poll delays (test seam). */
+    verifyDelaysMs?: number[];
   }) {
     if (!cfg.trunk) throw new Error('AsteriskCliClient: trunk required');
     this.trunk = cfg.trunk;
     this.openAiContext = cfg.openAiContext ?? 'f16-openai-bridge';
+    this.verifyDelaysMs = cfg.verifyDelaysMs ?? [800, 1200, 1600];
     const distro = cfg.distro ?? process.env.WSL_DISTRO ?? 'Ubuntu';
     const timeoutMs = cfg.timeoutMs ?? 15_000;
     this.run =
@@ -375,6 +379,37 @@ export class AsteriskCliClient implements VoiceOriginator {
     if (/unable|no such|invalid|error/i.test(out)) {
       logger.error({ sessionId: input.sessionId }, 'asterisk-cli: originate rejected');
       throw new Error('asterisk_originate_rejected');
+    }
+
+    // 3. VERIFY a channel actually exists (2026-07-10): `channel originate`
+    //    prints NOTHING and exits 0 even when the dial fails outright (bad
+    //    number, trunk rejects) — a sim lead's call died silently and the
+    //    backend still logged "originated". The trunk leg appears in the
+    //    channel list within ms of a real dial and stays there through the
+    //    whole ring, so a few short polls separate "dialing" from "no-op".
+    //    A concurrent call's channel can mask a failure — acceptable: calls
+    //    are rare and serialized in practice, and false-success was the
+    //    status quo for EVERY call before this check.
+    let channelSeen = false;
+    for (const delayMs of this.verifyDelaysMs) {
+      await new Promise((r) => setTimeout(r, delayMs));
+      try {
+        const channels = await this.run('core show channels concise');
+        if (channels.includes(`PJSIP/${this.trunk}-`)) {
+          channelSeen = true;
+          break;
+        }
+      } catch {
+        // Transient CLI hiccup — keep polling; the last miss decides.
+      }
+    }
+    if (!channelSeen) {
+      // The channel list may embed dialed digits — log only the sessionId.
+      logger.error(
+        { sessionId: input.sessionId },
+        'asterisk-cli: originate produced no channel — dial rejected (bad/unroutable number?)',
+      );
+      throw new Error('asterisk_originate_no_channel');
     }
 
     const channelId = `cli-${input.sessionId}`;

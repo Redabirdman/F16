@@ -34,6 +34,8 @@ import type { AgentMessageEnvelope, MessageHandlerResult } from '../../messaging
 import { logger } from '../../logger.js';
 import { appendAudit } from '../../db/repositories/audit-log.js';
 import { getCustomerById } from '../../db/repositories/customers.js';
+import { createAction, hasPendingAction } from '../../db/repositories/human-actions.js';
+import { notifyHumanAction } from '../human-notify.js';
 import { type VoiceOriginator, asteriskClientFromEnv } from '../../voice/asterisk-client.js';
 import { putSession } from '../../voice/session-store.js';
 import { getRedis } from '../../queue/index.js';
@@ -250,6 +252,11 @@ export class VoiceOperatorAgent extends BaseAgent {
    * Emit VOICE.CALL_FAILED + (optionally) an audit row, and return a
    * successful handler result (the message WAS handled — the call just
    * couldn't be placed; we don't want BullMQ to retry a bad-phone forever).
+   *
+   * 2026-07-10: real attempt failures ALSO raise a deduped human action + WA
+   * alert. Before this, VOICE.CALL_FAILED was a lifecycle event nobody read —
+   * a call-preference lead's very first contact failed (unroutable number)
+   * and the system stayed silent while the customer waited for a ring.
    */
   private async fail(args: {
     callId: string;
@@ -275,6 +282,7 @@ export class VoiceOperatorAgent extends BaseAgent {
           'voice-operator: failure audit append failed (non-blocking)',
         );
       }
+      await this.escalateFailure(customerId, reason);
     }
 
     // Same routing rationale as VOICE.CALL_STARTED above: a lifecycle event on
@@ -294,4 +302,68 @@ export class VoiceOperatorAgent extends BaseAgent {
     );
     return { ok: true, result: { failed: true, reason } };
   }
+
+  /**
+   * One pending VOICE_CALL_FAILED action per customer (same dedup discipline
+   * as QUOTE_FAILED); resolving it re-arms the alert. correlationId = the
+   * CUSTOMER id — the retry choice-executor dials from it. English summary,
+   * no UUIDs, customer name included (management-comms mandate). Best-effort:
+   * an alerting hiccup must not fail the handler.
+   */
+  private async escalateFailure(customerId: string, reason: string): Promise<void> {
+    try {
+      const already = await hasPendingAction(this.db, {
+        correlationId: customerId,
+        intent: 'VOICE_CALL_FAILED',
+      });
+      if (already) return;
+
+      let name = 'the customer';
+      try {
+        const customer = await getCustomerById(this.db, customerId);
+        if (customer?.fullName) name = customer.fullName;
+      } catch {
+        // name lookup is cosmetic — the alert still goes out
+      }
+
+      const action = await createAction(this.db, {
+        createdByAgent: `${this.role}#${this.instanceId}`,
+        correlationId: customerId,
+        intent: 'VOICE_CALL_FAILED',
+        severity: 2,
+        // The trailing (slug) feeds extractErrorCode → the admin queue's
+        // French problem sentence; the prose before it is the WA-group line.
+        summary: `Outbound call to ${name} could not be placed — ${explainCallFailure(reason)} (${reason}).`,
+        options: [
+          { id: 'retry', label: 'Retry the call', kind: 'approve' },
+          { id: 'ignore', label: 'Ignore', kind: 'reject' },
+        ],
+      });
+      await notifyHumanAction(
+        this.db,
+        { id: action.id, severity: 2, summary: action.summary },
+        { role: this.role, instanceId: this.instanceId, correlationId: customerId },
+      );
+    } catch (err) {
+      logger.warn(
+        { customerId, reason, err: err instanceof Error ? err.message : String(err) },
+        'voice-operator: failure escalation failed (non-blocking)',
+      );
+    }
+  }
+}
+
+/** Machine reason → plain English for the WA-group/admin summary. */
+function explainCallFailure(reason: string): string {
+  const r = reason.toLowerCase();
+  if (r.includes('no_channel') || r.includes('originate_rejected')) {
+    return 'the dial was rejected, the phone number is likely invalid or unreachable from our line';
+  }
+  if (r.includes('no_phone_for_customer')) {
+    return 'no phone number on file';
+  }
+  if (r.includes('transport') || r.includes('setglobal')) {
+    return 'the phone system (Asterisk) did not respond';
+  }
+  return `technical error (${reason})`;
 }

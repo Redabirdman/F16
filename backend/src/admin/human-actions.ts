@@ -95,6 +95,7 @@ const INTENT_TITLES_FR: Record<string, string> = {
   CONTRACT_PENDING_HUMAN: 'Contrat — relais humain',
   AGENT_LOOP_DETECTED: "Boucle d'agents détectée",
   MAXANCE_LOGIN_REQUIRED: 'Connexion Maxance requise',
+  VOICE_CALL_FAILED: 'Appel sortant échoué',
 };
 
 /** French twin of humanize.ts explainErrorCode (EN stays for the WA group). */
@@ -127,6 +128,12 @@ function explainErrorCodeFr(code: string): string {
   }
   if (c.includes('rib_rejected')) {
     return 'Maxance a refusé les coordonnées bancaires (RIB) du client.';
+  }
+  if (c.includes('asterisk_originate_no_channel') || c.includes('asterisk_originate_rejected')) {
+    return "L'appel n'a pas pu être lancé — le numéro est probablement invalide ou injoignable depuis notre ligne.";
+  }
+  if (c.includes('no_phone_for_customer')) {
+    return 'Aucun numéro de téléphone au dossier pour ce client.';
   }
   return `Erreur technique (${code}).`;
 }

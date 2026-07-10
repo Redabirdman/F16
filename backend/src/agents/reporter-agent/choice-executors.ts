@@ -444,3 +444,72 @@ const sendApprovedDraft: ChoiceExecutor = async (ctx) => {
 };
 
 registerChoiceExecutor('COMPLIANCE_BLOCKED', 'send_as_is', sendApprovedDraft);
+
+// ---------------------------------------------------------------------------
+// Call retry executor (VOICE_CALL_FAILED:retry)
+// ---------------------------------------------------------------------------
+
+/**
+ * "Retry the call": re-emit VOICE.CALL_SCHEDULED for the failed customer.
+ * The voice-operator's action row sets `correlationId = customer id`; the
+ * operator re-resolves the profile phone itself (toNumber rides along for the
+ * intent schema + the per-number duplicate-call guard). A fresh callId keeps
+ * the audit trail per attempt. Resolving the action re-arms the deduped
+ * VOICE_CALL_FAILED alert, so a still-bad number surfaces again.
+ */
+const retryCall: ChoiceExecutor = async (ctx) => {
+  const { db, action } = ctx;
+  const customerId = action.correlationId;
+  const customer =
+    customerId && UUID_RE.test(customerId)
+      ? (await db.select().from(customers).where(eq(customers.id, customerId)).limit(1))[0]
+      : undefined;
+  if (!customer) {
+    logger.warn(
+      { humanActionId: action.id, correlationId: customerId },
+      'choice-executors: call retry impossible — customer not resolved',
+    );
+    return {
+      groupNote: 'Could not retry the call — customer not found.',
+      detail: { retried: false, reason: 'customer_not_resolved' },
+    };
+  }
+  const phone = decryptPII(customer.phone);
+  if (!phone) {
+    return {
+      groupNote: 'Could not retry the call — no phone number on file.',
+      detail: { retried: false, reason: 'no_phone_on_file' },
+    };
+  }
+
+  const callId = randomUUID();
+  await sendMessage(
+    { db },
+    {
+      fromRole: ctx.fromRole,
+      fromInstance: ctx.fromInstance,
+      toRole: 'voice-operator',
+      toInstance: 'singleton',
+      intent: 'VOICE.CALL_SCHEDULED',
+      payload: {
+        callId,
+        customerId: customer.id,
+        toNumber: phone,
+        scheduledAt: new Date().toISOString(),
+      },
+      correlationId: callId,
+    },
+  );
+
+  const who = await customerFirstName(db, customer.id);
+  logger.info(
+    { humanActionId: action.id, callId, customerId: customer.id },
+    'choice-executors: call retry launched',
+  );
+  return {
+    groupNote: `Retrying the call to ${who} now.`,
+    detail: { retried: true, callId },
+  };
+};
+
+registerChoiceExecutor('VOICE_CALL_FAILED', 'retry', retryCall);

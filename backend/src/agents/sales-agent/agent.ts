@@ -134,6 +134,37 @@ export class SalesAgent extends BaseAgent {
    */
   private async handleLeadScored(envelope: AgentMessageEnvelope): Promise<MessageHandlerResult> {
     const payload = envelope.payload as { leadId: string; opening: string; channel: ChannelId };
+
+    // A call-preference lead's first touch IS the scheduled voice callback
+    // (intake sets callback_due_at; the callback scheduler dials it) — the
+    // competing text greeting is deliberately suppressed (see leads/intake.ts).
+    // 'voice' is not a sendable text channel: sendViaChannel('voice') threw
+    // live on 2026-07-10 and the welcome handler crashed. Transition to
+    // 'qualifying' anyway so the engagement agent backstops an unanswered or
+    // failed call instead of the lead parking at 'scored' forever.
+    if (payload.channel === 'voice') {
+      await setLeadStatus(this.db, payload.leadId, 'qualifying');
+      try {
+        await appendAudit(this.db, {
+          actorType: 'agent',
+          actorId: `${this.role}#${this.instanceId}`,
+          action: 'lead.status.change',
+          targetType: 'lead',
+          targetId: payload.leadId,
+          before: { status: 'scored' },
+          after: { status: 'qualifying', reason: 'voice-callback-first-contact' },
+          meta: { channel: payload.channel },
+        });
+      } catch {
+        // non-blocking
+      }
+      logger.info(
+        { leadId: payload.leadId, instanceId: this.instanceId },
+        'sales-agent: call-preference lead — welcome deferred to the scheduled voice callback',
+      );
+      return { ok: true, result: { skipped: 'voice-first-contact', leadId: payload.leadId } };
+    }
+
     const { customer, lead, contactRef } = await this.resolveCustomerAndContact(
       payload.leadId,
       payload.channel,

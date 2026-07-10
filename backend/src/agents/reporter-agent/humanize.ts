@@ -75,6 +75,7 @@ export function splitDraft(summary: string): { summary: string; draft: string | 
 const INTENT_TITLES_EN: Record<string, string> = {
   QUOTE_FAILED: 'Quote failed',
   QUOTE_STUCK: 'Quote stuck',
+  VOICE_CALL_FAILED: 'Outbound call failed',
   SUBSCRIPTION_FAILED: 'Subscription failed',
   COMPLIANCE_BLOCKED: 'Message blocked — approval needed',
   LEAD_DORMANT: 'Lead gone quiet 7 days',
@@ -142,6 +143,12 @@ export function explainErrorCode(code: string): string {
   }
   if (c.includes('rib_rejected')) {
     return "Maxance rejected the customer's bank details (RIB)";
+  }
+  if (c.includes('asterisk_originate_no_channel') || c.includes('asterisk_originate_rejected')) {
+    return 'the dial was rejected — the phone number is likely invalid or unreachable from our line';
+  }
+  if (c.includes('no_phone_for_customer')) {
+    return 'no phone number on file for this customer';
   }
   return `technical error (${code})`;
 }

@@ -19,7 +19,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { randomBytes } from 'node:crypto';
 import { sql } from 'drizzle-orm';
 import { createDb, type Database } from '../../src/db/index.js';
-import { agentMessages, auditLog } from '../../src/db/schema/index.js';
+import { agentMessages, auditLog, humanActions } from '../../src/db/schema/index.js';
 import { insertCustomer } from '../../src/db/repositories/customers.js';
 import { __resetForTests, getRedis, shutdownQueues } from '../../src/queue/index.js';
 import { VoiceOperatorAgent } from '../../src/agents/voice-operator/agent.js';
@@ -109,6 +109,7 @@ d('VoiceOperatorAgent.onMessage', () => {
     await db.execute(sql`TRUNCATE TABLE customers RESTART IDENTITY CASCADE`);
     await db.execute(sql`TRUNCATE TABLE agent_messages RESTART IDENTITY CASCADE`);
     await db.execute(sql`TRUNCATE TABLE audit_log RESTART IDENTITY CASCADE`);
+    await db.execute(sql`TRUNCATE TABLE human_actions RESTART IDENTITY CASCADE`);
   });
 
   afterEach(async () => {
@@ -203,6 +204,41 @@ d('VoiceOperatorAgent.onMessage', () => {
 
     const audits = await db.select().from(auditLog);
     expect(audits.find((a) => a.action === 'voice.call.failed')).toBeDefined();
+  });
+
+  it('escalates a real failure to a deduped human action + WA notify (2026-07-10)', async () => {
+    const customerId = await seedCustomer('+33611223344');
+    const fake = new FakeAsteriskClient();
+    fake.throwReason = 'asterisk_originate_no_channel';
+    const agent = newAgent(fake);
+
+    await agent.handle(envelope(CALL_ID, customerId, '+33600000000'));
+
+    // Human action: correlated on the CUSTOMER id (the retry executor dials
+    // from it), English summary with the customer's name + plain diagnosis.
+    const actions = await db.select().from(humanActions);
+    expect(actions).toHaveLength(1);
+    expect(actions[0]!.intent).toBe('VOICE_CALL_FAILED');
+    expect(actions[0]!.correlationId).toBe(customerId);
+    expect(actions[0]!.summary).toContain('Jean Dupont');
+    expect(actions[0]!.summary).toContain('invalid or unreachable');
+    expect((actions[0]!.options as Array<{ id: string }>).map((o) => o.id)).toEqual([
+      'retry',
+      'ignore',
+    ]);
+
+    // WA-group bridge: HUMAN_ACTION.REQUESTED emitted for the reporter.
+    const msgs = await db.select().from(agentMessages);
+    const notify = msgs.find((m) => m.intent === 'HUMAN_ACTION.REQUESTED');
+    expect(notify).toBeDefined();
+    expect((notify?.payload as { humanActionId: string }).humanActionId).toBe(actions[0]!.id);
+
+    // Second failure for the SAME customer (different callId + toNumber so the
+    // per-number duplicate-call guard lets it through) → NO second action.
+    const secondCallId = '55555555-5555-4555-8555-555555555555';
+    await agent.handle(envelope(secondCallId, customerId, '+33600000001'));
+    const after = await db.select().from(humanActions);
+    expect(after).toHaveLength(1);
   });
 
   it('emits VOICE.CALL_FAILED (no audit) when the Asterisk client is disabled', async () => {

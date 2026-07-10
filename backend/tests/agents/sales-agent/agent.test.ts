@@ -436,6 +436,37 @@ d('SalesAgent.onMessage (live pg, stub channel, stub Claude)', () => {
   });
 
   // -------------------------------------------------------------------------
+  // 3c. LEAD.SCORED voice channel — call-preference lead (2026-07-10)
+  //
+  // 'voice' is not a sendable text channel: the callback scheduler owns first
+  // contact (intake sets callback_due_at) and the text greeting is deliberately
+  // suppressed. Before the fix, sendViaChannel('voice') threw live and the
+  // welcome handler crashed. The lead must still move to 'qualifying' so the
+  // engagement agent backstops a failed/unanswered call.
+  // -------------------------------------------------------------------------
+  it('test 3c (LEAD.SCORED voice): skips the text welcome, transitions to qualifying', async () => {
+    const { leadId } = await seedLead();
+    const agent = newAgent({ leadId });
+
+    const result = await agent.handle(
+      makeEnvelope('LEAD.SCORED', {
+        leadId,
+        score: 80,
+        opening: 'Bonjour — should never be texted',
+        channel: 'voice',
+      }),
+    );
+
+    expect(result).toMatchObject({
+      ok: true,
+      result: { skipped: 'voice-first-contact', leadId },
+    });
+    expect(wa.sends).toHaveLength(0);
+    const [lead] = await db.select().from(leads).where(eq(leads.id, leadId));
+    expect(lead!.status).toBe('qualifying');
+  });
+
+  // -------------------------------------------------------------------------
   // 3b. LEAD.SCORED compliance-blocked opener — M6.T7
   //
   // Lead Scorer's opening contains a hard-rule violation (asserts the contract

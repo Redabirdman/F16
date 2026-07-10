@@ -220,15 +220,34 @@ describe('asteriskClientFromEnv', () => {
 });
 
 describe('AsteriskCliClient', () => {
-  it('originateNativeSip sets the global then originates (via the injected runner)', async () => {
+  /** Runner stub: originate/setglobal return quiet; the channel list is scripted. */
+  function scriptedRunner(channelLists: string[]): {
+    run: (cmd: string) => Promise<string>;
+    cmds: string[];
+  } {
     const cmds: string[] = [];
+    let poll = 0;
+    return {
+      cmds,
+      run: async (cmd: string) => {
+        cmds.push(cmd);
+        if (cmd === 'core show channels concise') {
+          return channelLists[Math.min(poll++, channelLists.length - 1)] ?? '';
+        }
+        return '';
+      },
+    };
+  }
+
+  it('originateNativeSip sets the global, originates, then VERIFIES the channel exists', async () => {
+    const { run, cmds } = scriptedRunner([
+      'PJSIP/ovh-trunk-00000001!f16-openai-bridge!s!1!Ring!Dial!PJSIP/openai',
+    ]);
     const client = new AsteriskCliClient({
       trunk: 'ovh-trunk',
       openAiContext: 'f16-openai-bridge',
-      runner: async (cmd) => {
-        cmds.push(cmd);
-        return 'Channel created';
-      },
+      verifyDelaysMs: [1],
+      runner: run,
     });
     const res = await client.originateNativeSip({
       to: '+212650012403',
@@ -238,7 +257,59 @@ describe('AsteriskCliClient', () => {
     expect(cmds[1]).toBe(
       'channel originate PJSIP/00212650012403@ovh-trunk extension s@f16-openai-bridge',
     );
+    expect(cmds[2]).toBe('core show channels concise');
     expect(res.channelId).toBe('cli-11111111-2222-3333-4444-555555555555');
+  });
+
+  it('throws asterisk_originate_no_channel when no trunk channel ever appears (silent dial failure)', async () => {
+    // 2026-07-10 live: `channel originate` prints nothing and exits 0 on a
+    // rejected dial — without the verification the client reported success.
+    const { run } = scriptedRunner(['', '', '']);
+    const client = new AsteriskCliClient({
+      trunk: 'ovh-trunk',
+      verifyDelaysMs: [1, 1, 1],
+      runner: run,
+    });
+    await expect(
+      client.originateNativeSip({
+        to: '+212757818787',
+        sessionId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      }),
+    ).rejects.toThrow(/asterisk_originate_no_channel/);
+  });
+
+  it('succeeds when the trunk channel appears on a later verification poll', async () => {
+    const { run, cmds } = scriptedRunner(['', 'PJSIP/ovh-trunk-0000000a!f16-openai-bridge!s!1']);
+    const client = new AsteriskCliClient({
+      trunk: 'ovh-trunk',
+      verifyDelaysMs: [1, 1, 1],
+      runner: run,
+    });
+    const res = await client.originateNativeSip({
+      to: '+33612345678',
+      sessionId: 'bbbbbbbb-cccc-dddd-eeee-ffffffffffff',
+    });
+    expect(res.channelId).toBe('cli-bbbbbbbb-cccc-dddd-eeee-ffffffffffff');
+    // two polls: first empty, second shows the channel, third never runs
+    expect(cmds.filter((c) => c === 'core show channels concise')).toHaveLength(2);
+  });
+
+  it('never logs the dialed number during verification (PII guard)', async () => {
+    const errSpy = vi.spyOn(logger, 'error');
+    const { run } = scriptedRunner(['', '', '']);
+    const client = new AsteriskCliClient({
+      trunk: 'ovh-trunk',
+      verifyDelaysMs: [1],
+      runner: run,
+    });
+    await expect(
+      client.originateNativeSip({
+        to: '+33698765432',
+        sessionId: 'cccccccc-dddd-eeee-ffff-000000000000',
+      }),
+    ).rejects.toThrow(/asterisk_originate_no_channel/);
+    expect(JSON.stringify(errSpy.mock.calls)).not.toContain('33698765432');
+    vi.restoreAllMocks();
   });
 
   it('throws on a rejected originate', async () => {

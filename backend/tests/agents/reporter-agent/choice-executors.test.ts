@@ -186,11 +186,69 @@ d('reporter-agent choice executors (live)', () => {
     expect(hasChoiceExecutor('QUOTE_FAILED', 'retry')).toBe(true);
     expect(hasChoiceExecutor('QUOTE_STUCK', 'retry')).toBe(true);
     expect(hasChoiceExecutor('COMPLIANCE_BLOCKED', 'send_as_is')).toBe(true);
+    expect(hasChoiceExecutor('VOICE_CALL_FAILED', 'retry')).toBe(true);
     // reject = do nothing; revise = future work — no executors on purpose.
     expect(hasChoiceExecutor('COMPLIANCE_BLOCKED', 'reject_send')).toBe(false);
     expect(hasChoiceExecutor('COMPLIANCE_BLOCKED', 'revise')).toBe(false);
     expect(hasChoiceExecutor('QUOTE_FAILED', 'manual')).toBe(false);
     expect(hasChoiceExecutor('SUBSCRIPTION_FAILED', 'retry')).toBe(false);
+    expect(hasChoiceExecutor('VOICE_CALL_FAILED', 'ignore')).toBe(false);
+  });
+
+  it('VOICE_CALL_FAILED:retry re-emits VOICE.CALL_SCHEDULED with the profile phone', async () => {
+    const cust = await insertCustomer(db, {
+      fullName: 'Paul Rappel',
+      phone: '+33757000000',
+      email: null,
+    });
+    const action = await createAction(db, {
+      createdByAgent: 'voice-operator#singleton',
+      correlationId: cust.id,
+      intent: 'VOICE_CALL_FAILED',
+      severity: 2,
+      summary: 'Outbound call to Paul Rappel could not be placed — the dial was rejected.',
+      options: [
+        { id: 'retry', label: 'Retry the call', kind: 'approve' },
+        { id: 'ignore', label: 'Ignore', kind: 'reject' },
+      ],
+    });
+
+    const result = await executeResolutionChoice(execCtx(action));
+
+    expect(result).not.toBeNull();
+    expect(result?.detail).toMatchObject({ retried: true });
+    expect(result?.groupNote).toContain('Retrying the call to Paul');
+
+    const msgs = await db.select().from(agentMessages);
+    const scheduled = msgs.find((m) => m.intent === 'VOICE.CALL_SCHEDULED');
+    expect(scheduled).toBeDefined();
+    expect(scheduled?.toRole).toBe('voice-operator');
+    const payload = scheduled?.payload as { customerId: string; toNumber: string; callId: string };
+    expect(payload.customerId).toBe(cust.id);
+    expect(payload.toNumber).toBe('+33757000000');
+    expect(payload.callId).toBe(result?.detail?.callId);
+  });
+
+  it('VOICE_CALL_FAILED:retry degrades gracefully when the customer has no phone', async () => {
+    const cust = await insertCustomer(db, {
+      fullName: 'Sans Telephone',
+      phone: null,
+      email: 'sans.tel@example.com',
+    });
+    const action = await createAction(db, {
+      createdByAgent: 'voice-operator#singleton',
+      correlationId: cust.id,
+      intent: 'VOICE_CALL_FAILED',
+      severity: 2,
+      summary: 'Outbound call to Sans Telephone could not be placed.',
+      options: [{ id: 'retry', label: 'Retry the call', kind: 'approve' }],
+    });
+
+    const result = await executeResolutionChoice(execCtx(action));
+
+    expect(result?.detail).toMatchObject({ retried: false, reason: 'no_phone_on_file' });
+    const msgs = await db.select().from(agentMessages);
+    expect(msgs.find((m) => m.intent === 'VOICE.CALL_SCHEDULED')).toBeUndefined();
   });
 
   it('QUOTE_FAILED:retry mints a new quote + emits QUOTE.REQUESTED + flips the lead', async () => {
