@@ -45,6 +45,7 @@ import { getSession } from '../voice/session-store.js';
 import { insertTurn } from '../db/repositories/conversation-turns.js';
 import { appendAudit } from '../db/repositories/audit-log.js';
 import { ASSURYAL_VOICE_INSTRUCTIONS, VOICE_PERSONA_KEY } from './voice-persona.js';
+import { buildVoiceCallContext } from './voice-call-context.js';
 import { resolvePrompt } from '../prompts/registry.js';
 import { VOICE_TOOLS, VOICE_TRANSPORT_TOOLS, handleVoiceTool } from './voice-tools.js';
 import { emitHubSpotActivity } from '../integrations/hubspot/activity-worker.js';
@@ -166,9 +167,18 @@ export function buildOpenAiSipRouter(opts: OpenAiSipRouterOptions): Hono | null 
     // 4. Accept with the session config (NO audio formats — SIP negotiates the
     //    codec). server_vad keeps barge-in/turn-taking server-side.
     //    M14.T6: resolve the (admin-editable) persona per-call.
-    const instructions =
+    //    2026-07-10: identified calls get a per-call context block APPENDED
+    //    (customer name, requested product, form facts, outbound framing) —
+    //    the bot was greeting form-callback leads as cold inbound callers.
+    let instructions =
       opts.instructions ??
       (await resolvePrompt(opts.db, VOICE_PERSONA_KEY, () => ASSURYAL_VOICE_INSTRUCTIONS));
+    if (ctx.customerId) {
+      instructions += await buildVoiceCallContext(opts.db, {
+        customerId: ctx.customerId,
+        leadId: ctx.leadId,
+      });
+    }
     const sessionConfig = {
       type: 'realtime',
       model,
