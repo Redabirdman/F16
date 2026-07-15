@@ -128,7 +128,7 @@ function verifyHmac(rawBody: string, providedSig: string, secret: string): boole
   }
 }
 
-interface RateLimiter {
+export interface RateLimiter {
   allow(key: string): boolean;
 }
 
@@ -143,7 +143,7 @@ interface RateLimiter {
  * Not durable across restarts. M16 introduces a Redis-backed version once
  * the intake runs >1 replica.
  */
-function makeRateLimiter(maxPerMin: number): RateLimiter {
+export function makeRateLimiter(maxPerMin: number): RateLimiter {
   const buckets = new Map<string, number[]>();
   const windowMs = 60_000;
   return {

@@ -8,6 +8,7 @@ import { logger } from './logger.js';
 import type { Database } from './db/index.js';
 import { buildWhatsAppWebhook, parseAuthorisedResolvers } from './channels/whatsapp/webhook.js';
 import { buildLeadIntakeRouter } from './leads/intake-http.js';
+import { buildWebsiteLeadIntakeRouter } from './leads/website-intake-http.js';
 import { buildVoiceRouter } from './http/voice.js';
 import { buildOpenAiSipRouter } from './http/openai-sip.js';
 import { buildVoiceCallRequestRouter } from './http/voice-call-request.js';
@@ -141,6 +142,23 @@ export function buildApp(opts: BuildAppOptions = {}): Hono {
       ...(opts.leadIntakeHmacSecret ? { hmacSecret: opts.leadIntakeHmacSecret } : {}),
     });
     app.route('/', leadIntakeApp);
+
+    // 2026-07-15 — public website form intake (`POST /v1/website-leads`).
+    // Unsigned by design (public SPA can't hold a secret); CORS + rate limit
+    // + honeypot instead. Notifies the management WA group on each lead.
+    const websiteLeadWaha = process.env.WAHA_BASE_URL
+      ? new WahaClient({
+          baseUrl: process.env.WAHA_BASE_URL,
+          ...(process.env.WAHA_API_KEY ? { apiKey: process.env.WAHA_API_KEY } : {}),
+          ...(process.env.WAHA_SESSION ? { session: process.env.WAHA_SESSION } : {}),
+        })
+      : undefined;
+    const websiteLeadApp = buildWebsiteLeadIntakeRouter({
+      db: opts.db,
+      ...(websiteLeadWaha ? { waha: websiteLeadWaha } : {}),
+      ...(humanActionGroupChatId ? { groupChatId: humanActionGroupChatId } : {}),
+    });
+    app.route('/', websiteLeadApp);
 
     // M10 — synchronous voice turn webhook (`POST /v1/voice/turn`). Pipecat
     // POSTs a transcript and gets the Sales Agent's reply text back to speak.
